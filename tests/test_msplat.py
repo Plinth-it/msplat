@@ -91,6 +91,36 @@ def _write_minimal_nerfstudio_dataset(root, alpha, mask=False):
         json.dump(transforms, f)
 
 
+def _write_minimal_colmap_text_dataset(root, mask_filename=None):
+    os.makedirs(os.path.join(root, "images"))
+    os.makedirs(os.path.join(root, "sparse"))
+
+    _write_rgba_png(os.path.join(root, "images", "image.png"), 2, 1, bytes([
+        255, 0, 0, 255,
+        0, 0, 255, 255,
+    ]))
+
+    if mask_filename is not None:
+        os.makedirs(os.path.join(root, "masks"))
+        _write_rgba_png(os.path.join(root, "masks", mask_filename), 2, 1, bytes([
+            255, 255, 255, 255,
+            0, 0, 0, 255,
+        ]))
+
+    with open(os.path.join(root, "sparse", "cameras.txt"), "w", encoding="utf-8") as f:
+        f.write("# CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]\n")
+        f.write("1 PINHOLE 2 1 2.0 2.0 1.0 0.5\n")
+
+    with open(os.path.join(root, "sparse", "images.txt"), "w", encoding="utf-8") as f:
+        f.write("# IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME\n")
+        f.write("1 1 0 0 0 0 0 0 1 image.png\n")
+        f.write("\n")
+
+    with open(os.path.join(root, "sparse", "points3D.txt"), "w", encoding="utf-8") as f:
+        f.write("# POINT3D_ID, X, Y, Z, R, G, B, ERROR, TRACK[]\n")
+        f.write("1 0 0 0 255 255 255 0 1 0\n")
+
+
 def _ply_vertex_count(path):
     with open(path, "rb") as f:
         for raw in f:
@@ -202,6 +232,18 @@ def test_dataset_detects_explicit_mask_path():
         _write_minimal_nerfstudio_dataset(tmp, alpha=False, mask=True)
         ds = Dataset(tmp)
 
+        assert ds.camera_has_alpha(0) is False
+        assert ds.camera_has_mask(0) is True
+
+
+def test_dataset_detects_colmap_text_with_image_extension_mask_suffix():
+    from msplat import Dataset
+
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_minimal_colmap_text_dataset(tmp, mask_filename="image.png.png")
+        ds = Dataset(tmp)
+
+        assert ds.num_train == 1
         assert ds.camera_has_alpha(0) is False
         assert ds.camera_has_mask(0) is True
 

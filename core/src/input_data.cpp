@@ -8,33 +8,61 @@
 #include <algorithm>
 #include <random>
 #include <cmath>
+#include <cctype>
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 
 // ── Image loading ───────────────────────────────────────────────────────────
 
-static std::string findMaskPath(const std::string &imagePath) {
-    fs::path image(imagePath);
-    fs::path dir = image.parent_path();
-    fs::path stem = image.stem();
-    fs::path parent = dir.parent_path();
+static bool iequals(const std::string &a, const std::string &b) {
+    return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(),
+        [](unsigned char ca, unsigned char cb) {
+            return std::tolower(ca) == std::tolower(cb);
+        });
+}
 
-    std::vector<fs::path> roots = {
+static std::vector<fs::path> maskSearchDirsForImage(const fs::path &image) {
+    fs::path dir = image.parent_path();
+    fs::path parent = dir.parent_path();
+    std::vector<fs::path> dirs = {
         parent / "masks",
         dir / "masks",
         parent / "mask",
         dir / "mask",
     };
-    std::vector<std::string> exts = {
-        image.extension().string(), ".png", ".jpg", ".jpeg", ".JPG"
-    };
 
-    for (const fs::path &root : roots) {
-        for (const std::string &ext : exts) {
-            if (ext.empty()) continue;
-            fs::path candidate = root / (stem.string() + ext);
-            if (fs::exists(candidate)) return candidate.string();
+    fs::path suffix;
+    for (fs::path cur = dir; !cur.empty(); suffix = cur.filename() / suffix, cur = cur.parent_path()) {
+        if (iequals(cur.filename().string(), "images")) {
+            dirs.push_back(cur.parent_path() / "masks" / suffix);
+            dirs.push_back(cur.parent_path() / "mask" / suffix);
+            break;
+        }
+        if (cur == cur.root_path()) break;
+    }
+
+    return dirs;
+}
+
+static std::string findMaskPath(const std::string &imagePath) {
+    fs::path image(imagePath);
+    std::string imageName = image.filename().string();
+    std::string imageStem = image.stem().string();
+    std::string maskStem = imageStem + ".mask";
+
+    for (const fs::path &root : maskSearchDirsForImage(image)) {
+        if (!fs::is_directory(root)) continue;
+
+        for (const fs::directory_entry &entry : fs::directory_iterator(root)) {
+            if (!entry.is_regular_file()) continue;
+
+            std::string candidateStem = entry.path().stem().string();
+            if (iequals(candidateStem, imageName)
+                || iequals(candidateStem, imageStem)
+                || iequals(candidateStem, maskStem)) {
+                return entry.path().string();
+            }
         }
     }
     return "";
@@ -330,8 +358,13 @@ InputData inputDataFromX(const std::string &path, const std::string &colmapImage
     if (fs::exists(root / "transforms.json"))
         return loaders::loadNerfstudio(path);
 
-    // COLMAP: cameras.bin (direct or in sparse/0/)
-    if (fs::exists(root / "cameras.bin") || fs::exists(root / "sparse" / "0" / "cameras.bin"))
+    // COLMAP: binary or text model, direct or in sparse[/0].
+    if (fs::exists(root / "cameras.bin")
+        || fs::exists(root / "cameras.txt")
+        || fs::exists(root / "sparse" / "0" / "cameras.bin")
+        || fs::exists(root / "sparse" / "0" / "cameras.txt")
+        || fs::exists(root / "sparse" / "cameras.bin")
+        || fs::exists(root / "sparse" / "cameras.txt"))
         return loaders::loadColmap(path, colmapImagePath);
 
     // Polycam: keyframes/ directory or cameras.json
@@ -339,5 +372,5 @@ InputData inputDataFromX(const std::string &path, const std::string &colmapImage
         return loaders::loadPolycam(path);
 
     throw std::runtime_error("Unrecognized dataset format in: " + path +
-        "\nSupported: COLMAP (cameras.bin), Nerfstudio (transforms.json), Polycam (keyframes/)");
+        "\nSupported: COLMAP (cameras.bin/cameras.txt), Nerfstudio (transforms.json), Polycam (keyframes/)");
 }
