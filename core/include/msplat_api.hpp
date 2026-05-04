@@ -28,6 +28,7 @@ struct Config {
     int stopScreenSizeAt = 4000;
     float splitScreenSize = 0.05f;
     bool keepCrs = false;
+    bool renderMip = false;
     float downscaleFactor = 1.0f;
     float bgColor[3] = {0.6130f, 0.0101f, 0.3984f};  // magenta — high contrast for debugging
 };
@@ -90,6 +91,8 @@ public:
     int numTrain() const;
     int numTest() const;
     void cameraPose(int index, float camToWorld[16]) const;
+    bool cameraHasAlpha(int index) const;
+    bool cameraHasMask(int index) const;
 
     // Opaque handle for Trainer
     void* _handle() const;
@@ -135,6 +138,12 @@ public:
 
     /// Export scene to PLY format.
     void exportPly(const std::string& path);
+
+    /// Export a deterministic importance-ranked LOD PLY with at most targetCount gaussians.
+    void exportLodPly(const std::string& path, int targetCount);
+
+    /// Decimate the active model in memory to at most targetCount gaussians.
+    void decimateToLod(int targetCount);
 
     /// Export scene to .splat format.
     void exportSplat(const std::string& path);

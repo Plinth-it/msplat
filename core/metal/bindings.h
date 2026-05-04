@@ -42,7 +42,8 @@ MTensor msplat_render(
     const std::tuple<int, int, int> tile_bounds, float clip_thresh,
     unsigned degree, unsigned degrees_to_use, float cam_pos[3],
     MTensor &features_dc, MTensor &features_rest,
-    MTensor &opacities, MTensor &background
+    MTensor &opacities, MTensor &background,
+    int use_mip_splatting
 );
 
 // Fused forward + backward + Adam + grad_stats in one encoder
@@ -56,7 +57,9 @@ std::tuple<MTensor, float> msplat_train_step(
     unsigned degree, unsigned degrees_to_use, float cam_pos[3],
     MTensor &features_dc, MTensor &features_rest,
     MTensor &opacities, MTensor &background,
-    MTensor &gt, MTensor &window2d, float ssim_weight,
+    int use_mip_splatting,
+    MTensor &gt, MTensor &loss_mask, int use_loss_mask,
+    MTensor &window2d, float ssim_weight,
     float loss_inv_n, int features_rest_bases,
     int num_adam_groups,
     MTensor adam_params[], MTensor adam_exp_avg[], MTensor adam_exp_avg_sq[],

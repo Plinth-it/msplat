@@ -350,9 +350,9 @@ struct FusedTensorCache {
     int bwd_num_points = 0, features_rest_bases = 0;
 
     // Forward intermediates
-    MTensor xys, depths, radii_out, conics, num_tiles_hit, colors, aabb;
+    MTensor xys, depths, radii_out, conics, opacity_comp, num_tiles_hit, colors, aabb;
     MTensor gaussian_ids;
-    MTensor packed_xy_opac, packed_conic, packed_rgb;
+    MTensor packed_xy_opac, packed_conic, packed_rgb, packed_opacity_comp;
     MTensor out_img, final_Ts, final_idx;
     MTensor loss_intermediates;
     MTensor ssim_h_buf;
@@ -388,6 +388,7 @@ struct FusedTensorCache {
             depths = mtensor_empty(dev, {np}, DType::Float32);
             radii_out = mtensor_empty(dev, {np}, DType::Int32);
             conics = mtensor_empty(dev, {np, 3}, DType::Float32);
+            opacity_comp = mtensor_empty(dev, {np}, DType::Float32);
             num_tiles_hit = mtensor_empty(dev, {np}, DType::Int32);
             colors = mtensor_empty(dev, {np, 3}, DType::Float32);
             aabb = mtensor_empty(dev, {np, 2}, DType::Float32);
@@ -399,6 +400,7 @@ struct FusedTensorCache {
             packed_xy_opac = mtensor_empty(dev, {cap, 3}, DType::Float32);
             packed_conic = mtensor_empty(dev, {cap, 3}, DType::Float32);
             packed_rgb = mtensor_empty(dev, {cap, 3}, DType::Float32);
+            packed_opacity_comp = mtensor_empty(dev, {cap}, DType::Float32);
         }
         if (ih != img_height || iw != img_width) {
             img_height = ih; img_width = iw;
@@ -468,6 +470,7 @@ static void forward_pipeline(
     unsigned degree, unsigned degrees_to_use, float cam_pos[3],
     MTensor &features_dc, MTensor &features_rest,
     MTensor &opacities, MTensor &background,
+    int use_mip_splatting,
     MTensor &gt, MTensor &window2d, float ssim_weight,
     bool compute_loss
 ) {
@@ -494,6 +497,7 @@ static void forward_pipeline(
     }
     int64_t capacity = (int64_t)num_points * g_tcache.capacity_multiplier;
     uint32_t channels = 3;
+    uint32_t use_mip_splatting_u32 = use_mip_splatting ? 1u : 0u;
 
     // --- Cached buffer pool: only reallocate on dimension change (densification) ---
     g_tcache.ensure_forward(num_points, capacity, img_height, img_width, num_tiles, ctx->device);
@@ -501,6 +505,7 @@ static void forward_pipeline(
     MTensor &depths = g_tcache.depths;
     MTensor &radii_out = g_tcache.radii_out;
     MTensor &conics = g_tcache.conics;
+    MTensor &opacity_comp = g_tcache.opacity_comp;
     MTensor &num_tiles_hit = g_tcache.num_tiles_hit;
     MTensor &colors = g_tcache.colors;
     MTensor &aabb = g_tcache.aabb;
@@ -510,6 +515,7 @@ static void forward_pipeline(
     MTensor &packed_xy_opac = g_tcache.packed_xy_opac;
     MTensor &packed_conic = g_tcache.packed_conic;
     MTensor &packed_rgb = g_tcache.packed_rgb;
+    MTensor &packed_opacity_comp = g_tcache.packed_opacity_comp;
     MTensor &out_img = g_tcache.out_img;
     MTensor &final_Ts = g_tcache.final_Ts;
     MTensor &final_idx = g_tcache.final_idx;
@@ -568,7 +574,7 @@ static void forward_pipeline(
         [enc setBytes:cam_pos_arr->data() length:sizeof(*cam_pos_arr) atIndex:18];
         ENC_BUF(enc, features_dc, 19); ENC_BUF(enc, features_rest, 20);
         ENC_BUF(enc, colors, 21); ENC_BUF(enc, aabb, 22);
-        // buffer 23 removed (was opacity-aware AABB, reverted)
+        ENC_BUF(enc, opacity_comp, 23); ENC_SCALAR(enc, use_mip_splatting_u32, 24);
 
         [enc dispatchThreads:MTLSizeMake(num_points, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
     };
@@ -604,9 +610,9 @@ static void forward_pipeline(
             ENC_BUF(enc, gaussian_ids, 3);
             ENC_SCALAR(enc, num_tiles_u32, 4);
             ENC_BUF(enc, xys, 5); ENC_BUF(enc, conics, 6);
-            ENC_BUF(enc, colors, 7); ENC_BUF(enc, opacities, 8);
-            ENC_BUF(enc, packed_xy_opac, 9); ENC_BUF(enc, packed_conic, 10); ENC_BUF(enc, packed_rgb, 11);
-            ENC_BUF(enc, tile_bins, 12);
+            ENC_BUF(enc, colors, 7); ENC_BUF(enc, opacities, 8); ENC_BUF(enc, opacity_comp, 9);
+            ENC_BUF(enc, packed_xy_opac, 10); ENC_BUF(enc, packed_conic, 11); ENC_BUF(enc, packed_rgb, 12);
+            ENC_BUF(enc, packed_opacity_comp, 13); ENC_BUF(enc, tile_bins, 14);
             [enc dispatchThreadgroups:MTLSizeMake(num_tiles, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
         }
     };
@@ -623,9 +629,10 @@ static void forward_pipeline(
         [enc setBytes:img_size_dim3->data() length:sizeof(*img_size_dim3) atIndex:1];
         ENC_SCALAR(enc, channels, 2); ENC_BUF(enc, tile_bins, 3);
         ENC_BUF(enc, packed_xy_opac, 4); ENC_BUF(enc, packed_conic, 5); ENC_BUF(enc, packed_rgb, 6);
-        ENC_BUF(enc, final_Ts, 7); ENC_BUF(enc, final_idx, 8); ENC_BUF(enc, out_img, 9);
-        ENC_BUF(enc, background, 10);
-        [enc setBytes:block_size_dim2->data() length:sizeof(*block_size_dim2) atIndex:11];
+        ENC_BUF(enc, packed_opacity_comp, 7);
+        ENC_BUF(enc, final_Ts, 8); ENC_BUF(enc, final_idx, 9); ENC_BUF(enc, out_img, 10);
+        ENC_BUF(enc, background, 11);
+        [enc setBytes:block_size_dim2->data() length:sizeof(*block_size_dim2) atIndex:12];
         [enc dispatchThreadgroups:num_tg threadsPerThreadgroup:tg_size];
     };
 
@@ -642,9 +649,10 @@ static void forward_pipeline(
         [enc setBytes:img_size_dim3->data() length:sizeof(*img_size_dim3) atIndex:1];
         ENC_SCALAR(enc, channels, 2); ENC_BUF(enc, tile_bins, 3);
         ENC_BUF(enc, packed_xy_opac, 4); ENC_BUF(enc, packed_conic, 5); ENC_BUF(enc, packed_rgb, 6);
-        ENC_BUF(enc, g_tcache.chunk_T, 7); ENC_BUF(enc, g_tcache.chunk_C, 8); ENC_BUF(enc, g_tcache.chunk_final_idx, 9);
-        ENC_SCALAR(enc, CHUNK_SIZE, 10); ENC_SCALAR(enc, K_max, 11);
-        [enc setBytes:block_size_dim2->data() length:sizeof(*block_size_dim2) atIndex:12];
+        ENC_BUF(enc, packed_opacity_comp, 7);
+        ENC_BUF(enc, g_tcache.chunk_T, 8); ENC_BUF(enc, g_tcache.chunk_C, 9); ENC_BUF(enc, g_tcache.chunk_final_idx, 10);
+        ENC_SCALAR(enc, CHUNK_SIZE, 11); ENC_SCALAR(enc, K_max, 12);
+        [enc setBytes:block_size_dim2->data() length:sizeof(*block_size_dim2) atIndex:13];
         [enc dispatchThreadgroups:chunked_tg threadsPerThreadgroup:tg_size];
 
         // Phase 2: merge kernel — one thread per pixel
@@ -757,14 +765,15 @@ MTensor msplat_render(
     const std::tuple<int, int, int> tile_bounds, float clip_thresh,
     unsigned degree, unsigned degrees_to_use, float cam_pos[3],
     MTensor &features_dc, MTensor &features_rest,
-    MTensor &opacities, MTensor &background
+    MTensor &opacities, MTensor &background,
+    int use_mip_splatting
 ) {
     MTensor dummyGt, dummyWindow;
     forward_pipeline(num_points, means3d, scales, glob_scale,
         quats, viewmat, projmat, fx, fy, cx, cy,
         img_height, img_width, tile_bounds, clip_thresh,
         degree, degrees_to_use, cam_pos, features_dc, features_rest,
-        opacities, background, dummyGt, dummyWindow, 0.0f, false);
+        opacities, background, use_mip_splatting, dummyGt, dummyWindow, 0.0f, false);
     return g_tcache.out_img;
 }
 
@@ -777,7 +786,9 @@ std::tuple<MTensor, float> msplat_train_step(
     unsigned degree, unsigned degrees_to_use, float cam_pos[3],
     MTensor &features_dc, MTensor &features_rest,
     MTensor &opacities, MTensor &background,
-    MTensor &gt, MTensor &window2d, float ssim_weight,
+    int use_mip_splatting,
+    MTensor &gt, MTensor &loss_mask, int use_loss_mask,
+    MTensor &window2d, float ssim_weight,
     float loss_inv_n, int features_rest_bases,
     int num_adam_groups,
     MTensor adam_params[], MTensor adam_exp_avg[], MTensor adam_exp_avg_sq[],
@@ -809,6 +820,7 @@ std::tuple<MTensor, float> msplat_train_step(
     }
     int64_t capacity = (int64_t)num_points * g_tcache.capacity_multiplier;
     uint32_t channels = 3;
+    uint32_t use_mip_splatting_u32 = use_mip_splatting ? 1u : 0u;
 
     // --- Cached buffer pool ---
     g_tcache.ensure_forward(num_points, capacity, img_height, img_width, num_tiles, ctx->device);
@@ -818,6 +830,7 @@ std::tuple<MTensor, float> msplat_train_step(
     MTensor &depths = g_tcache.depths;
     MTensor &radii_out = g_tcache.radii_out;
     MTensor &conics = g_tcache.conics;
+    MTensor &opacity_comp = g_tcache.opacity_comp;
     MTensor &num_tiles_hit = g_tcache.num_tiles_hit;
     MTensor &colors = g_tcache.colors;
     MTensor &aabb = g_tcache.aabb;
@@ -827,6 +840,7 @@ std::tuple<MTensor, float> msplat_train_step(
     MTensor &packed_xy_opac = g_tcache.packed_xy_opac;
     MTensor &packed_conic = g_tcache.packed_conic;
     MTensor &packed_rgb = g_tcache.packed_rgb;
+    MTensor &packed_opacity_comp = g_tcache.packed_opacity_comp;
     MTensor &out_img = g_tcache.out_img;
     MTensor &final_Ts = g_tcache.final_Ts;
     MTensor &final_idx = g_tcache.final_idx;
@@ -850,6 +864,7 @@ std::tuple<MTensor, float> msplat_train_step(
 
     // --- Constants (heap-allocated for Obj-C block capture) ---
     auto loss_img_size = std::make_shared<std::array<uint32_t, 2>>(std::array<uint32_t, 2>{img_width, img_height});
+    uint32_t use_loss_mask_u32 = use_loss_mask ? 1u : 0u;
     auto proj_intrins = std::make_shared<std::array<float, 4>>(std::array<float, 4>{fx, fy, cx, cy});
     auto proj_img_size = std::make_shared<std::array<uint32_t, 2>>(std::array<uint32_t, 2>{img_width, img_height});
     auto tile_bounds_arr = std::make_shared<std::array<uint32_t, 4>>(std::array<uint32_t, 4>{
@@ -911,7 +926,7 @@ std::tuple<MTensor, float> msplat_train_step(
         [enc setBytes:cam_pos_arr->data() length:sizeof(*cam_pos_arr) atIndex:18];
         ENC_BUF(enc, features_dc, 19); ENC_BUF(enc, features_rest, 20);
         ENC_BUF(enc, colors, 21); ENC_BUF(enc, aabb, 22);
-        // buffer 23 removed (was opacity-aware AABB, reverted)
+        ENC_BUF(enc, opacity_comp, 23); ENC_SCALAR(enc, use_mip_splatting_u32, 24);
 
         [enc dispatchThreads:MTLSizeMake(num_points, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
     };
@@ -947,9 +962,9 @@ std::tuple<MTensor, float> msplat_train_step(
             ENC_BUF(enc, gaussian_ids, 3);
             ENC_SCALAR(enc, num_tiles_u32, 4);
             ENC_BUF(enc, xys, 5); ENC_BUF(enc, conics, 6);
-            ENC_BUF(enc, colors, 7); ENC_BUF(enc, opacities, 8);
-            ENC_BUF(enc, packed_xy_opac, 9); ENC_BUF(enc, packed_conic, 10); ENC_BUF(enc, packed_rgb, 11);
-            ENC_BUF(enc, tile_bins, 12);
+            ENC_BUF(enc, colors, 7); ENC_BUF(enc, opacities, 8); ENC_BUF(enc, opacity_comp, 9);
+            ENC_BUF(enc, packed_xy_opac, 10); ENC_BUF(enc, packed_conic, 11); ENC_BUF(enc, packed_rgb, 12);
+            ENC_BUF(enc, packed_opacity_comp, 13); ENC_BUF(enc, tile_bins, 14);
             [enc dispatchThreadgroups:MTLSizeMake(num_tiles, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
         }
     };
@@ -963,9 +978,10 @@ std::tuple<MTensor, float> msplat_train_step(
             [enc setBytes:img_size_dim3->data() length:sizeof(*img_size_dim3) atIndex:1];
             ENC_SCALAR(enc, channels, 2); ENC_BUF(enc, tile_bins, 3);
             ENC_BUF(enc, packed_xy_opac, 4); ENC_BUF(enc, packed_conic, 5); ENC_BUF(enc, packed_rgb, 6);
-            ENC_BUF(enc, final_Ts, 7); ENC_BUF(enc, final_idx, 8); ENC_BUF(enc, out_img, 9);
-            ENC_BUF(enc, background, 10);
-            [enc setBytes:block_size_dim2->data() length:sizeof(*block_size_dim2) atIndex:11];
+            ENC_BUF(enc, packed_opacity_comp, 7);
+            ENC_BUF(enc, final_Ts, 8); ENC_BUF(enc, final_idx, 9); ENC_BUF(enc, out_img, 10);
+            ENC_BUF(enc, background, 11);
+            [enc setBytes:block_size_dim2->data() length:sizeof(*block_size_dim2) atIndex:12];
             [enc dispatchThreadgroups:num_tg threadsPerThreadgroup:MTLSizeMake(RAST_BLOCK_X, RAST_BLOCK_Y, 1)];
         } else {
             // Chunked
@@ -978,9 +994,10 @@ std::tuple<MTensor, float> msplat_train_step(
             [enc setBytes:img_size_dim3->data() length:sizeof(*img_size_dim3) atIndex:1];
             ENC_SCALAR(enc, channels, 2); ENC_BUF(enc, tile_bins, 3);
             ENC_BUF(enc, packed_xy_opac, 4); ENC_BUF(enc, packed_conic, 5); ENC_BUF(enc, packed_rgb, 6);
-            ENC_BUF(enc, g_tcache.chunk_T, 7); ENC_BUF(enc, g_tcache.chunk_C, 8); ENC_BUF(enc, g_tcache.chunk_final_idx, 9);
-            ENC_SCALAR(enc, CHUNK_SIZE, 10); ENC_SCALAR(enc, K_max, 11);
-            [enc setBytes:block_size_dim2->data() length:sizeof(*block_size_dim2) atIndex:12];
+            ENC_BUF(enc, packed_opacity_comp, 7);
+            ENC_BUF(enc, g_tcache.chunk_T, 8); ENC_BUF(enc, g_tcache.chunk_C, 9); ENC_BUF(enc, g_tcache.chunk_final_idx, 10);
+            ENC_SCALAR(enc, CHUNK_SIZE, 11); ENC_SCALAR(enc, K_max, 12);
+            [enc setBytes:block_size_dim2->data() length:sizeof(*block_size_dim2) atIndex:13];
             [enc dispatchThreadgroups:MTLSizeMake(tile_x, tile_y, K_max) threadsPerThreadgroup:MTLSizeMake(RAST_BLOCK_X, RAST_BLOCK_Y, 1)];
             [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
             // Merge
@@ -1013,6 +1030,7 @@ std::tuple<MTensor, float> msplat_train_step(
         [enc setBytes:loss_img_size->data() length:sizeof(*loss_img_size) atIndex:3];
         ENC_SCALAR(enc, ssim_weight, 4); ENC_SCALAR(enc, loss_inv_n, 5);
         ENC_BUF(enc, loss_intermediates, 6); ENC_BUF(enc, loss_sum, 7);
+        ENC_BUF(enc, loss_mask, 8); ENC_SCALAR(enc, use_loss_mask_u32, 9);
         [enc dispatchThreads:grid threadsPerThreadgroup:tg];
         [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
         // Pass 3: V bwd
@@ -1022,6 +1040,7 @@ std::tuple<MTensor, float> msplat_train_step(
         [enc setBytes:loss_img_size->data() length:sizeof(*loss_img_size) atIndex:3];
         ENC_SCALAR(enc, ssim_weight, 4); ENC_SCALAR(enc, loss_inv_n, 5);
         ENC_BUF(enc, v_rendered, 6);
+        ENC_BUF(enc, loss_mask, 7); ENC_SCALAR(enc, use_loss_mask_u32, 8);
         [enc dispatchThreads:grid threadsPerThreadgroup:tg];
     };
 
@@ -1035,10 +1054,11 @@ std::tuple<MTensor, float> msplat_train_step(
             ENC_BUF(enc, gaussian_ids, 2); ENC_BUF(enc, tile_bins, 3);
             ENC_BUF(enc, packed_xy_opac, 4); ENC_BUF(enc, packed_conic, 5);
             ENC_BUF(enc, packed_rgb, 6);
-            ENC_BUF(enc, background, 7); ENC_BUF(enc, final_Ts, 8);
-            ENC_BUF(enc, final_idx, 9); ENC_BUF(enc, v_rendered, 10);
-            ENC_BUF(enc, v_xy, 11); ENC_BUF(enc, v_conic, 12);
-            ENC_BUF(enc, v_colors_rast, 13); ENC_BUF(enc, v_opacity, 14);
+            ENC_BUF(enc, packed_opacity_comp, 7);
+            ENC_BUF(enc, background, 8); ENC_BUF(enc, final_Ts, 9);
+            ENC_BUF(enc, final_idx, 10); ENC_BUF(enc, v_rendered, 11);
+            ENC_BUF(enc, v_xy, 12); ENC_BUF(enc, v_conic, 13);
+            ENC_BUF(enc, v_colors_rast, 14); ENC_BUF(enc, v_opacity, 15);
             [enc dispatchThreadgroups:num_tg threadsPerThreadgroup:MTLSizeMake(RAST_BLOCK_X, RAST_BLOCK_Y, 1)];
         } else {
             // Chunked backward
@@ -1062,14 +1082,15 @@ std::tuple<MTensor, float> msplat_train_step(
             ENC_BUF(enc, gaussian_ids, 2); ENC_BUF(enc, tile_bins, 3);
             ENC_BUF(enc, packed_xy_opac, 4); ENC_BUF(enc, packed_conic, 5);
             ENC_BUF(enc, packed_rgb, 6);
-            ENC_BUF(enc, background, 7); ENC_BUF(enc, final_Ts, 8);
-            ENC_BUF(enc, g_tcache.chunk_final_idx, 9);
-            ENC_BUF(enc, g_tcache.prefix_T, 10); ENC_BUF(enc, g_tcache.chunk_T, 11);
-            ENC_BUF(enc, g_tcache.after_C, 12);
-            ENC_BUF(enc, v_rendered, 13);
-            ENC_BUF(enc, v_xy, 14); ENC_BUF(enc, v_conic, 15);
-            ENC_BUF(enc, v_colors_rast, 16); ENC_BUF(enc, v_opacity, 17);
-            ENC_SCALAR(enc, BWD_CHUNK_SIZE, 18); ENC_SCALAR(enc, bwd_K_max, 19);
+            ENC_BUF(enc, packed_opacity_comp, 7);
+            ENC_BUF(enc, background, 8); ENC_BUF(enc, final_Ts, 9);
+            ENC_BUF(enc, g_tcache.chunk_final_idx, 10);
+            ENC_BUF(enc, g_tcache.prefix_T, 11); ENC_BUF(enc, g_tcache.chunk_T, 12);
+            ENC_BUF(enc, g_tcache.after_C, 13);
+            ENC_BUF(enc, v_rendered, 14);
+            ENC_BUF(enc, v_xy, 15); ENC_BUF(enc, v_conic, 16);
+            ENC_BUF(enc, v_colors_rast, 17); ENC_BUF(enc, v_opacity, 18);
+            ENC_SCALAR(enc, BWD_CHUNK_SIZE, 19); ENC_SCALAR(enc, bwd_K_max, 20);
             [enc dispatchThreadgroups:MTLSizeMake(tile_x, tile_y, bwd_K_max) threadsPerThreadgroup:MTLSizeMake(RAST_BLOCK_X, RAST_BLOCK_Y, 1)];
         }
     };

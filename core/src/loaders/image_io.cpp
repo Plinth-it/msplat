@@ -29,27 +29,36 @@ Image imreadRGB(const std::string &path) {
     int w = (int)CGImageGetWidth(cgImage);
     int h = (int)CGImageGetHeight(cgImage);
 
-    // Render into RGBA buffer, then extract RGB and convert to float32
+    // Render into premultiplied RGBA, then extract RGB/alpha as float32.
     std::vector<uint8_t> rgba(w * h * 4);
     CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
     CGContextRef ctx = CGBitmapContextCreate(
         rgba.data(), w, h, 8, w * 4, colorSpace,
-        kCGImageAlphaNoneSkipLast | kCGBitmapByteOrderDefault
+        kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big
     );
     CGContextDrawImage(ctx, CGRectMake(0, 0, w, h), cgImage);
     CGContextRelease(ctx);
     CGColorSpaceRelease(colorSpace);
     CGImageRelease(cgImage);
 
-    // RGBA → float32 RGB [0,1]
+    // RGBA → float32 RGB [0,1]. RGB is premultiplied when alpha is present,
+    // which lets the trainer composite targets with `rgb + bg * (1 - alpha)`.
     Image img;
     img.width = w;
     img.height = h;
     img.data.resize(w * h * 3);
+    bool hasTransparentPixel = false;
     for (int i = 0; i < w * h; i++) {
         img.data[i * 3 + 0] = rgba[i * 4 + 0] / 255.0f;
         img.data[i * 3 + 1] = rgba[i * 4 + 1] / 255.0f;
         img.data[i * 3 + 2] = rgba[i * 4 + 2] / 255.0f;
+        if (rgba[i * 4 + 3] != 255) hasTransparentPixel = true;
+    }
+    if (hasTransparentPixel) {
+        img.alpha.resize(w * h);
+        for (int i = 0; i < w * h; i++) {
+            img.alpha[i] = rgba[i * 4 + 3] / 255.0f;
+        }
     }
     return img;
 }
@@ -95,6 +104,8 @@ Image resizeArea(const Image &src, int dstW, int dstH) {
     dst.width = dstW;
     dst.height = dstH;
     dst.data.resize(dstW * dstH * 3, 0.0f);
+    bool hasAlpha = src.hasAlpha();
+    if (hasAlpha) dst.alpha.resize(dstW * dstH, 0.0f);
 
     float scaleX = (float)src.width / dstW;
     float scaleY = (float)src.height / dstH;
@@ -108,6 +119,7 @@ Image resizeArea(const Image &src, int dstW, int dstH) {
             float srcX1 = (dx + 1) * scaleX;
 
             float sum[3] = {};
+            float alphaSum = 0.0f;
             float totalArea = 0;
 
             int iy0 = (int)srcY0;
@@ -124,6 +136,7 @@ Image resizeArea(const Image &src, int dstW, int dstH) {
                     sum[0] += p[0] * area;
                     sum[1] += p[1] * area;
                     sum[2] += p[2] * area;
+                    if (hasAlpha) alphaSum += src.alpha[iy * src.width + ix] * area;
                     totalArea += area;
                 }
             }
@@ -133,6 +146,7 @@ Image resizeArea(const Image &src, int dstW, int dstH) {
             out[0] = sum[0] * inv;
             out[1] = sum[1] * inv;
             out[2] = sum[2] * inv;
+            if (hasAlpha) dst.alpha[dy * dstW + dx] = alphaSum * inv;
         }
     }
     return dst;
@@ -198,6 +212,32 @@ static void bilinearSample(const Image &img, float x, float y, float out[3]) {
         float bottom = p01[c] * (1.0f - fx) + p11[c] * fx;
         out[c] = top * (1.0f - fy) + bottom * fy;
     }
+}
+
+static float bilinearSampleAlpha(const Image &img, float x, float y) {
+    if (!img.hasAlpha()) return 1.0f;
+
+    int x0 = (int)std::floor(x);
+    int y0 = (int)std::floor(y);
+    int x1 = x0 + 1;
+    int y1 = y0 + 1;
+
+    x0 = std::clamp(x0, 0, img.width - 1);
+    x1 = std::clamp(x1, 0, img.width - 1);
+    y0 = std::clamp(y0, 0, img.height - 1);
+    y1 = std::clamp(y1, 0, img.height - 1);
+
+    float fx = x - std::floor(x);
+    float fy = y - std::floor(y);
+
+    float a00 = img.alpha[y0 * img.width + x0];
+    float a10 = img.alpha[y0 * img.width + x1];
+    float a01 = img.alpha[y1 * img.width + x0];
+    float a11 = img.alpha[y1 * img.width + x1];
+
+    float top = a00 * (1.0f - fx) + a10 * fx;
+    float bottom = a01 * (1.0f - fx) + a11 * fx;
+    return top * (1.0f - fy) + bottom * fy;
 }
 
 UndistortResult undistortImage(const Image &src,
@@ -281,6 +321,7 @@ UndistortResult undistortImage(const Image &src,
     undist.width = w;
     undist.height = h;
     undist.data.resize(w * h * 3);
+    if (src.hasAlpha()) undist.alpha.resize(w * h);
 
     for (int oy = 0; oy < h; oy++) {
         for (int ox = 0; ox < w; ox++) {
@@ -297,6 +338,9 @@ UndistortResult undistortImage(const Image &src,
             out[0] = pixel[0];
             out[1] = pixel[1];
             out[2] = pixel[2];
+            if (src.hasAlpha()) {
+                undist.alpha[oy * w + ox] = bilinearSampleAlpha(src, srcX, srcY);
+            }
         }
     }
 
@@ -305,10 +349,16 @@ UndistortResult undistortImage(const Image &src,
     cropped.width = roiW;
     cropped.height = roiH;
     cropped.data.resize(roiW * roiH * 3);
+    if (undist.hasAlpha()) cropped.alpha.resize(roiW * roiH);
     for (int y = 0; y < roiH; y++) {
         memcpy(&cropped.data[y * roiW * 3],
                &undist.data[((y + roiY) * w + roiX) * 3],
                roiW * 3 * sizeof(float));
+        if (undist.hasAlpha()) {
+            memcpy(&cropped.alpha[y * roiW],
+                   &undist.alpha[(y + roiY) * w + roiX],
+                   roiW * sizeof(float));
+        }
     }
 
     UndistortResult result;

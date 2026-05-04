@@ -44,13 +44,14 @@ Model::Model(const InputData &inputData, int numCameras,
     int numDownscales, int resolutionSchedule, int shDegree, int shDegreeInterval,
     int refineEvery, int warmupLength, int resetAlphaEvery, float densifyGradThresh, float densifySizeThresh, int stopScreenSizeAt, float splitScreenSize,
     int maxSteps, bool keepCrs,
-    const float* bgColor)
+    const float* bgColor,
+    bool renderMip)
     : numCameras(numCameras), numDownscales(numDownscales), resolutionSchedule(resolutionSchedule),
       shDegree(shDegree), shDegreeInterval(shDegreeInterval),
       refineEvery(refineEvery), warmupLength(warmupLength), resetAlphaEvery(resetAlphaEvery),
       stopSplitAt(maxSteps / 2), densifyGradThresh(densifyGradThresh), densifySizeThresh(densifySizeThresh),
       stopScreenSizeAt(stopScreenSizeAt), splitScreenSize(splitScreenSize),
-      maxSteps(maxSteps), keepCrs(keepCrs) {
+      maxSteps(maxSteps), keepCrs(keepCrs), renderMip(renderMip) {
 
     int64_t numPoints = inputData.points.count;
     scale = inputData.scale;
@@ -310,6 +311,53 @@ void Model::savePly(const std::string &filename, int step){
     saveGaussianPly(filename, p, step);
 }
 
+void Model::saveLodPly(const std::string &filename, int step, int64_t targetCount){
+    GaussianParams p{means, scales, quats, featuresDc, featuresRest, opacities,
+                     scale, {translation[0], translation[1], translation[2]}, keepCrs};
+    GaussianLodStats stats;
+    GaussianLodStats *statsPtr = nullptr;
+    if (visCounts.defined() && xysGradNorm.defined() && max2DSize.defined()
+        && visCounts.size(0) == means.size(0)
+        && xysGradNorm.size(0) == means.size(0)
+        && max2DSize.size(0) == means.size(0)) {
+        msplat_gpu_sync();
+        stats.visCounts = visCounts.data<float>();
+        stats.xysGradNorm = xysGradNorm.data<float>();
+        stats.max2DSize = max2DSize.data<float>();
+        statsPtr = &stats;
+    }
+    saveGaussianLodPly(filename, p, step, targetCount, statsPtr);
+}
+
+void Model::decimateToLod(int64_t targetCount){
+    GaussianParams p{means, scales, quats, featuresDc, featuresRest, opacities,
+                     scale, {translation[0], translation[1], translation[2]}, keepCrs};
+    GaussianLodStats stats;
+    GaussianLodStats *statsPtr = nullptr;
+    if (visCounts.defined() && xysGradNorm.defined() && max2DSize.defined()
+        && visCounts.size(0) == means.size(0)
+        && xysGradNorm.size(0) == means.size(0)
+        && max2DSize.size(0) == means.size(0)) {
+        msplat_gpu_sync();
+        stats.visCounts = visCounts.data<float>();
+        stats.xysGradNorm = xysGradNorm.data<float>();
+        stats.max2DSize = max2DSize.data<float>();
+        statsPtr = &stats;
+    }
+
+    auto g = decimateGaussians(p, targetCount, statsPtr);
+    means = g.means;
+    scales = g.scales;
+    quats = g.quats;
+    featuresDc = g.featuresDc;
+    featuresRest = g.featuresRest;
+    opacities = g.opacities;
+    xysGradNorm.reset();
+    visCounts.reset();
+    max2DSize.reset();
+    setupOptimizers();
+}
+
 void Model::saveSplat(const std::string &filename){
     GaussianParams p{means, scales, quats, featuresDc, featuresRest, opacities,
                      scale, {translation[0], translation[1], translation[2]}, keepCrs};
@@ -487,8 +535,8 @@ int Model::loadCheckpoint(const std::string &filename) {
     return (int)step;
 }
 
-Model::CamSetup Model::prepareCam(Camera& cam, int step) {
-    const float sf = getDownscaleFactor(step);
+Model::CamSetup Model::prepareCam(Camera& cam, int step, int forcedDownscale) {
+    const float sf = (float)(forcedDownscale > 0 ? forcedDownscale : getDownscaleFactor(step));
     CamSetup s;
     s.fx = cam.fx / sf; s.fy = cam.fy / sf;
     s.cx = cam.cx / sf; s.cy = cam.cy / sf;
@@ -540,11 +588,11 @@ MTensor Model::render(Camera& cam, int step){
         quats, cam.cachedViewMat, cam.cachedProjViewMat, s.fx, s.fy, s.cx, s.cy,
         s.height, s.width, s.tileBounds, 0.01f,
         s.degree, s.degreesToUse, s.cam_pos, featuresDc, featuresRest,
-        opacities, backgroundColor);
+        opacities, backgroundColor, renderMip ? 1 : 0);
 }
 
-void Model::fullIteration(Camera& cam, int step, MTensor &gt, float ssimWeight){
-    auto s = prepareCam(cam, step);
+void Model::fullIteration(Camera& cam, int step, MTensor &gt, MTensor *lossMask, float lossMaskMean, float ssimWeight, int forcedDownscale){
+    auto s = prepareCam(cam, step, forcedDownscale);
     lastHeight = s.height; lastWidth = s.width;
     int numPoints = means.size(0);
 
@@ -578,14 +626,18 @@ void Model::fullIteration(Camera& cam, int step, MTensor &gt, float ssimWeight){
     }
 
     float invMaxDim = 1.0f / static_cast<float>((std::max)(lastHeight, lastWidth));
-    float lossInvN = 1.0f / (float)(s.height * s.width * 3);
+    float effectiveMaskMean = (lossMask && lossMaskMean > 1e-6f) ? lossMaskMean : 1.0f;
+    float lossInvN = 1.0f / ((float)(s.height * s.width * 3) * effectiveMaskMean);
+    MTensor &lossMaskTensor = lossMask ? *lossMask : gt;
 
     auto [r, loss] = msplat_train_step(
         numPoints, means, scales, 1.0f,
         quats, cam.cachedViewMat, cam.cachedProjViewMat, s.fx, s.fy, s.cx, s.cy,
         s.height, s.width, s.tileBounds, 0.01f,
         s.degree, s.degreesToUse, s.cam_pos, featuresDc, featuresRest,
-        opacities, backgroundColor, gt, window2d, ssimWeight,
+        opacities, backgroundColor, renderMip ? 1 : 0,
+        gt, lossMaskTensor, lossMask ? 1 : 0,
+        window2d, ssimWeight,
         lossInvN, (int)featuresRest.size(-2),
         N_ADAM_GROUPS,
         adam_p, adam_ea, adam_eas,

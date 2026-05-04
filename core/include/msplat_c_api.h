@@ -28,6 +28,7 @@ typedef struct {
     int stopScreenSizeAt;
     float splitScreenSize;
     bool keepCrs;
+    bool renderMip;
     float downscaleFactor;
     float bgColor[3];
 } MsplatConfig;
@@ -48,6 +49,7 @@ static inline MsplatConfig msplat_default_config(void) {
     c.stopScreenSizeAt = 4000;
     c.splitScreenSize = 0.05f;
     c.keepCrs = false;
+    c.renderMip = false;
     c.downscaleFactor = 1.0f;
     c.bgColor[0] = 0.6130f; c.bgColor[1] = 0.0101f; c.bgColor[2] = 0.3984f;
     return c;
@@ -86,6 +88,8 @@ MsplatDataset msplat_dataset_create(const char* path, float downscaleFactor,
 void msplat_dataset_destroy(MsplatDataset ds);
 int msplat_dataset_num_train(MsplatDataset ds);
 int msplat_dataset_num_test(MsplatDataset ds);
+bool msplat_dataset_camera_has_alpha(MsplatDataset ds, int cameraIndex);
+bool msplat_dataset_camera_has_mask(MsplatDataset ds, int cameraIndex);
 
 // ── Trainer ─────────────────────────────────────────────────────────────────
 
@@ -107,6 +111,8 @@ void msplat_trainer_render_pose_to_buffer(MsplatTrainer t, const float camToWorl
                                       int refCameraIndex, uint8_t* outRGBA,
                                       int* outWidth, int* outHeight);
 void msplat_trainer_export_ply(MsplatTrainer t, const char* path);
+void msplat_trainer_export_lod_ply(MsplatTrainer t, const char* path, int targetCount);
+void msplat_trainer_decimate_to_lod(MsplatTrainer t, int targetCount);
 void msplat_trainer_export_splat(MsplatTrainer t, const char* path);
 void msplat_trainer_save_checkpoint(MsplatTrainer t, const char* path);
 int msplat_trainer_load_checkpoint(MsplatTrainer t, const char* path);

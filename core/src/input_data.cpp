@@ -14,9 +14,49 @@ using json = nlohmann::json;
 
 // ── Image loading ───────────────────────────────────────────────────────────
 
+static std::string findMaskPath(const std::string &imagePath) {
+    fs::path image(imagePath);
+    fs::path dir = image.parent_path();
+    fs::path stem = image.stem();
+    fs::path parent = dir.parent_path();
+
+    std::vector<fs::path> roots = {
+        parent / "masks",
+        dir / "masks",
+        parent / "mask",
+        dir / "mask",
+    };
+    std::vector<std::string> exts = {
+        image.extension().string(), ".png", ".jpg", ".jpeg", ".JPG"
+    };
+
+    for (const fs::path &root : roots) {
+        for (const std::string &ext : exts) {
+            if (ext.empty()) continue;
+            fs::path candidate = root / (stem.string() + ext);
+            if (fs::exists(candidate)) return candidate.string();
+        }
+    }
+    return "";
+}
+
+static float maskPixelValue(const Image &mask, int index) {
+    const float *p = &mask.data[index * 3];
+    return std::clamp(0.2126f * p[0] + 0.7152f * p[1] + 0.0722f * p[2], 0.0f, 1.0f);
+}
+
 void Camera::loadImage(float downscaleFactor) {
     Image raw = imreadRGB(filePath);
     if (raw.empty()) return;
+
+    if (maskPath.empty()) maskPath = findMaskPath(filePath);
+    Image rawMask;
+    if (!maskPath.empty() && fs::exists(maskPath)) {
+        rawMask = imreadRGB(maskPath);
+        if (!rawMask.empty() && (rawMask.width != raw.width || rawMask.height != raw.height)) {
+            rawMask = resizeArea(rawMask, raw.width, raw.height);
+        }
+    }
 
     // If actual image dimensions differ from metadata, rescale intrinsics
     if (width > 0 && height > 0 && (raw.width != width || raw.height != height)) {
@@ -33,6 +73,7 @@ void Camera::loadImage(float downscaleFactor) {
         int newW = (int)(width / downscaleFactor);
         int newH = (int)(height / downscaleFactor);
         raw = resizeArea(raw, newW, newH);
+        if (!rawMask.empty()) rawMask = resizeArea(rawMask, newW, newH);
         float s = 1.0f / downscaleFactor;
         fx *= s; fy *= s; cx *= s; cy *= s;
         width = newW; height = newH;
@@ -41,6 +82,9 @@ void Camera::loadImage(float downscaleFactor) {
     // Undistort if needed
     if (hasDistortion()) {
         auto result = undistortImage(raw, fx, fy, cx, cy, k1, k2, p1, p2, k3);
+        if (!rawMask.empty()) {
+            rawMask = undistortImage(rawMask, fx, fy, cx, cy, k1, k2, p1, p2, k3).image;
+        }
         raw = std::move(result.image);
         fx = result.fx; fy = result.fy;
         cx = result.cx; cy = result.cy;
@@ -49,6 +93,7 @@ void Camera::loadImage(float downscaleFactor) {
     }
 
     image = std::move(raw);
+    maskImage = std::move(rawMask);
 }
 
 Image Camera::getImage(int downscaleFactor) {
@@ -64,6 +109,19 @@ Image Camera::getImage(int downscaleFactor) {
     return scaled;
 }
 
+Image Camera::getMaskImage(int downscaleFactor) {
+    if (downscaleFactor <= 1) return maskImage;
+
+    auto it = maskPyramids.find(downscaleFactor);
+    if (it != maskPyramids.end()) return it->second;
+
+    int newW = maskImage.width / downscaleFactor;
+    int newH = maskImage.height / downscaleFactor;
+    Image scaled = resizeArea(maskImage, newW, newH);
+    maskPyramids[downscaleFactor] = scaled;
+    return scaled;
+}
+
 MTensor& Camera::getGPUImage(int downscaleFactor) {
     auto it = mtensorImageCache.find(downscaleFactor);
     if (it != mtensorImageCache.end()) return it->second;
@@ -72,6 +130,74 @@ MTensor& Camera::getGPUImage(int downscaleFactor) {
     memcpy(mt.data_ptr(), img.ptr(), img.width * img.height * 3 * sizeof(float));
     mtensorImageCache[downscaleFactor] = mt;
     return mtensorImageCache[downscaleFactor];
+}
+
+MTensor& Camera::getGPUImage(int downscaleFactor, const float background[3]) {
+    Image img = getImage(downscaleFactor);
+    if (!img.hasAlpha() || background == nullptr) return getGPUImage(downscaleFactor);
+
+    std::array<float, 3> bg = {background[0], background[1], background[2]};
+    auto cacheIt = mtensorCompositeImageCache.find(downscaleFactor);
+    auto bgIt = mtensorCompositeImageCacheBackground.find(downscaleFactor);
+    if (cacheIt != mtensorCompositeImageCache.end() && bgIt != mtensorCompositeImageCacheBackground.end() && bgIt->second == bg) {
+        return cacheIt->second;
+    }
+
+    MTensor mt = gpu_empty({img.height, img.width, 3}, DType::Float32);
+    float *dst = mt.data<float>();
+    const float *src = img.ptr();
+    for (int i = 0; i < img.width * img.height; i++) {
+        float a = img.alpha[i];
+        dst[i * 3 + 0] = src[i * 3 + 0] + background[0] * (1.0f - a);
+        dst[i * 3 + 1] = src[i * 3 + 1] + background[1] * (1.0f - a);
+        dst[i * 3 + 2] = src[i * 3 + 2] + background[2] * (1.0f - a);
+    }
+    mtensorCompositeImageCache[downscaleFactor] = mt;
+    mtensorCompositeImageCacheBackground[downscaleFactor] = bg;
+    return mtensorCompositeImageCache[downscaleFactor];
+}
+
+MTensor& Camera::getGPULossMask(int downscaleFactor) {
+    auto it = mtensorLossMaskCache.find(downscaleFactor);
+    if (it != mtensorLossMaskCache.end()) return it->second;
+
+    Image img = !maskImage.empty() ? getMaskImage(downscaleFactor) : getImage(downscaleFactor);
+    MTensor mt = gpu_empty({img.height, img.width}, DType::Float32);
+    float *dst = mt.data<float>();
+    double sum = 0.0;
+
+    if (!maskImage.empty()) {
+        for (int i = 0; i < img.width * img.height; i++) {
+            float value = maskPixelValue(img, i);
+            dst[i] = value;
+            sum += value;
+        }
+    } else if (img.hasAlpha()) {
+        for (int i = 0; i < img.width * img.height; i++) {
+            float value = std::clamp(img.alpha[i], 0.0f, 1.0f);
+            dst[i] = value;
+            sum += value;
+        }
+    } else {
+        for (int i = 0; i < img.width * img.height; i++) {
+            dst[i] = 1.0f;
+        }
+        sum = img.width * img.height;
+    }
+
+    lossMaskMeanCache[downscaleFactor] = img.width > 0 && img.height > 0
+        ? (float)(sum / (double)(img.width * img.height))
+        : 1.0f;
+    mtensorLossMaskCache[downscaleFactor] = mt;
+    return mtensorLossMaskCache[downscaleFactor];
+}
+
+float Camera::getLossMaskMean(int downscaleFactor) {
+    auto it = lossMaskMeanCache.find(downscaleFactor);
+    if (it != lossMaskMeanCache.end()) return it->second;
+    if (!hasLossMask()) return 1.0f;
+    getGPULossMask(downscaleFactor);
+    return lossMaskMeanCache[downscaleFactor];
 }
 
 // ── Scale & center ──────────────────────────────────────────────────────────

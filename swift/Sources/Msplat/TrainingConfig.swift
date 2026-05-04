@@ -16,6 +16,8 @@ public struct TrainingConfig {
     public var stopScreenSizeAt: Int32 = 4_000
     public var splitScreenSize: Float = 0.05
     public var keepCrs: Bool = false
+    /// Use MIP splatting opacity compensation during training and rendering.
+    public var renderMip: Bool = false
     public var downscaleFactor: Float = 1.0
     /// Background color as (R, G, B) in [0, 1]. Default magenta — high contrast
     /// against typical scenes, makes under-reconstructed regions obvious.
@@ -39,6 +41,7 @@ public struct TrainingConfig {
         c.stopScreenSizeAt = stopScreenSizeAt
         c.splitScreenSize = splitScreenSize
         c.keepCrs = keepCrs
+        c.renderMip = renderMip
         c.downscaleFactor = downscaleFactor
         c.bgColor = (bgColor.0, bgColor.1, bgColor.2)
         return c

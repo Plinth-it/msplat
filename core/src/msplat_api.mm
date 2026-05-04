@@ -52,6 +52,14 @@ void Dataset::cameraPose(int index, float camToWorld[16]) const {
     if (index >= 0 && index < (int)impl->trainCams.size())
         memcpy(camToWorld, impl->trainCams[index].camToWorld, 16 * sizeof(float));
 }
+bool Dataset::cameraHasAlpha(int index) const {
+    return index >= 0 && index < (int)impl->trainCams.size()
+        && impl->trainCams[index].imageHasAlpha();
+}
+bool Dataset::cameraHasMask(int index) const {
+    return index >= 0 && index < (int)impl->trainCams.size()
+        && impl->trainCams[index].hasExplicitMask();
+}
 void* Dataset::_handle() const { return impl.get(); }
 
 // ── Trainer::Impl ───────────────────────────────────────────────────────────
@@ -93,7 +101,7 @@ Trainer::Trainer(Dataset& dataset, const Config& config)
         config.densifyGradThresh, config.densifySizeThresh,
         config.stopScreenSizeAt, config.splitScreenSize,
         config.iterations, config.keepCrs,
-        config.bgColor
+        config.bgColor, config.renderMip
     );
 
     impl->camIndices.resize(impl->ds->trainCams.size());
@@ -109,11 +117,19 @@ Stats Trainer::step() {
     Camera& cam = impl->ds->trainCams[camIdx];
 
     int ds = impl->model->getDownscaleFactor(impl->currentStep);
-    MTensor& gt = cam.getGPUImage(ds);
+    MTensor& gt = cam.getGPUImage(ds, impl->config.bgColor);
+    MTensor *lossMask = nullptr;
+    MTensor mask;
+    float lossMaskMean = 1.0f;
+    if (cam.hasLossMask()) {
+        mask = cam.getGPULossMask(ds);
+        lossMask = &mask;
+        lossMaskMean = cam.getLossMaskMean(ds);
+    }
 
     auto t0 = std::chrono::high_resolution_clock::now();
 
-    impl->model->fullIteration(cam, impl->currentStep, gt, impl->config.ssimWeight);
+    impl->model->fullIteration(cam, impl->currentStep, gt, lossMask, lossMaskMean, impl->config.ssimWeight);
     impl->model->schedulersStep(impl->currentStep);
     impl->model->afterTrain(impl->currentStep);
     msplat_commit();
@@ -150,7 +166,7 @@ EvalMetrics Trainer::evaluate() {
         msplat_gpu_sync();
         MTensor rgbCpu = rgb.cpu();
         int dsf = impl->model->getDownscaleFactor(impl->config.iterations);
-        MTensor gtCpu = cam.getGPUImage(dsf).cpu();
+        MTensor gtCpu = cam.getGPUImage(dsf, impl->config.bgColor).cpu();
 
         sumPsnr += psnr(rgbCpu, gtCpu);
         sumSsim += ssim_eval(rgbCpu, gtCpu);
@@ -242,6 +258,14 @@ void Trainer::exportPly(const std::string& path) {
     impl->model->savePly(path, impl->currentStep);
 }
 
+void Trainer::exportLodPly(const std::string& path, int targetCount) {
+    impl->model->saveLodPly(path, impl->currentStep, targetCount);
+}
+
+void Trainer::decimateToLod(int targetCount) {
+    impl->model->decimateToLod(targetCount);
+}
+
 void Trainer::exportSplat(const std::string& path) {
     impl->model->saveSplat(path);
 }
@@ -292,6 +316,7 @@ static msplat::Config configFromC(MsplatConfig c) {
     cfg.stopScreenSizeAt = c.stopScreenSizeAt;
     cfg.splitScreenSize = c.splitScreenSize;
     cfg.keepCrs = c.keepCrs;
+    cfg.renderMip = c.renderMip;
     cfg.downscaleFactor = c.downscaleFactor;
     memcpy(cfg.bgColor, c.bgColor, sizeof(cfg.bgColor));
     return cfg;
@@ -313,6 +338,14 @@ int msplat_dataset_num_train(MsplatDataset ds) {
 
 int msplat_dataset_num_test(MsplatDataset ds) {
     return static_cast<msplat::Dataset*>(ds)->numTest();
+}
+
+bool msplat_dataset_camera_has_alpha(MsplatDataset ds, int cameraIndex) {
+    return static_cast<msplat::Dataset*>(ds)->cameraHasAlpha(cameraIndex);
+}
+
+bool msplat_dataset_camera_has_mask(MsplatDataset ds, int cameraIndex) {
+    return static_cast<msplat::Dataset*>(ds)->cameraHasMask(cameraIndex);
 }
 
 void msplat_dataset_camera_pose(MsplatDataset ds, int cameraIndex, float camToWorld[16]) {
@@ -367,6 +400,14 @@ void msplat_trainer_render_pose_to_buffer(MsplatTrainer t, const float camToWorl
 
 void msplat_trainer_export_ply(MsplatTrainer t, const char* path) {
     static_cast<msplat::Trainer*>(t)->exportPly(std::string(path));
+}
+
+void msplat_trainer_export_lod_ply(MsplatTrainer t, const char* path, int targetCount) {
+    static_cast<msplat::Trainer*>(t)->exportLodPly(std::string(path), targetCount);
+}
+
+void msplat_trainer_decimate_to_lod(MsplatTrainer t, int targetCount) {
+    static_cast<msplat::Trainer*>(t)->decimateToLod(targetCount);
 }
 
 void msplat_trainer_export_splat(MsplatTrainer t, const char* path) {

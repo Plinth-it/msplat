@@ -304,6 +304,16 @@ inline bool compute_cov2d_bounds(
     return true;
 }
 
+inline float mip_opacity_compensation(const float3 cov2d) {
+    const float3 cov_orig = cov2d - float3(0.3f, 0.0f, 0.3f);
+    const float det_orig = max(cov_orig.x * cov_orig.z - cov_orig.y * cov_orig.y, 0.0f);
+    const float det_blurred = cov2d.x * cov2d.z - cov2d.y * cov2d.y;
+    if (det_blurred <= 0.0f) {
+        return 1.0f;
+    }
+    return sqrt(det_orig / det_blurred);
+}
+
 // Project 3D point to pixel coordinates via projection matrix.
 inline float2 project_pix(
     constant float *mat, const float3 p, const uint2 img_size, const float2 pp
@@ -477,6 +487,7 @@ kernel void nd_rasterize_forward_kernel(
     constant float* packed_xy_opac, // float3: (x, y, sigmoid(opacity))
     constant float* packed_conic,   // float3
     constant float* packed_rgb,     // float3: raw SH (NOT clamped)
+    constant float* packed_opacity_comp,
     device float* final_Ts,
     device int* final_index,
     device float* out_img,
@@ -506,6 +517,7 @@ kernel void nd_rasterize_forward_kernel(
     threadgroup float3 xy_opacity_batch[RAST_BLOCK_SIZE];
     threadgroup float3 conic_batch[RAST_BLOCK_SIZE];
     threadgroup float3 rgbs_batch[RAST_BLOCK_SIZE];
+    threadgroup float opacity_comp_batch[RAST_BLOCK_SIZE];
 
     float T = 1.f;
     float3 pix_out = {0.f, 0.f, 0.f};
@@ -526,6 +538,7 @@ kernel void nd_rasterize_forward_kernel(
             // packed_rgb has raw SH output — clamp_min(raw + 0.5, 0)
             const float3 raw_c = read_packed_float3(packed_rgb, idx);
             rgbs_batch[tr] = max(raw_c + 0.5f, 0.0f);
+            opacity_comp_batch[tr] = packed_opacity_comp[idx];
         }
         // wait for all threads to finish loading
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -552,7 +565,7 @@ kernel void nd_rasterize_forward_kernel(
                 continue;
             }
 
-            const float alpha = min(0.999f, xy_opac.z * exp(-sigma));
+            const float alpha = min(0.999f, xy_opac.z * opacity_comp_batch[t] * exp(-sigma));
             if (alpha < 1.f / 255.f) {
                 continue;
             }
@@ -903,6 +916,7 @@ kernel void rasterize_backward_kernel(
     constant float* packed_xy_opac, // float3: (x, y, sigmoid(opacity))
     constant float* packed_conic,   // float3
     constant float* packed_rgb,     // float3: raw SH
+    constant float* packed_opacity_comp,
     constant float* background, // single float3
     constant float* final_Ts,
     constant int* final_index,
@@ -948,6 +962,7 @@ kernel void rasterize_backward_kernel(
     threadgroup float3 xy_opacity_batch[RAST_BLOCK_SIZE];
     threadgroup float3 conic_batch[RAST_BLOCK_SIZE];
     threadgroup float3 rgbs_batch[RAST_BLOCK_SIZE];
+    threadgroup float opacity_comp_batch[RAST_BLOCK_SIZE];
 
     // df/d_out for this pixel
     const float3 v_out = read_packed_float3(v_output, pix_id);
@@ -989,6 +1004,7 @@ kernel void rasterize_backward_kernel(
             xy_opacity_batch[tr] = read_packed_float3(packed_xy_opac, idx);
             conic_batch[tr] = read_packed_float3(packed_conic, idx);
             rgbs_batch[tr] = read_packed_float3(packed_rgb, idx);
+            opacity_comp_batch[tr] = packed_opacity_comp[idx];
         }
         // wait for other threads to collect the gaussians in batch
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -999,17 +1015,22 @@ kernel void rasterize_backward_kernel(
             // Broadcast batch data from lane 0 → all lanes in SIMD group.
             // All threads read the same index t, so one threadgroup read +
             // simd_broadcast replaces 32 redundant threadgroup reads.
-            float3 b_conic, b_xy_opac, b_rgb;
-            int32_t b_id;
+            float3 b_conic = float3(0.0f);
+            float3 b_xy_opac = float3(0.0f);
+            float3 b_rgb = float3(0.0f);
+            float b_opacity_comp = 1.0f;
+            int32_t b_id = 0;
             if (wr == 0) {
                 b_conic = conic_batch[t];
                 b_xy_opac = xy_opacity_batch[t];
                 b_rgb = rgbs_batch[t];
+                b_opacity_comp = opacity_comp_batch[t];
                 b_id = id_batch[t];
             }
             b_conic = simd_broadcast(b_conic, 0);
             b_xy_opac = simd_broadcast(b_xy_opac, 0);
             b_rgb = simd_broadcast(b_rgb, 0);
+            b_opacity_comp = simd_broadcast(b_opacity_comp, 0);
             b_id = simd_broadcast(b_id, 0);
 
             int valid = inside;
@@ -1030,7 +1051,7 @@ kernel void rasterize_backward_kernel(
                     valid = 0;
                 } else {
                     vis = exp(-sigma);
-                    alpha = min(0.999f, opac * vis);
+                    alpha = min(0.999f, opac * b_opacity_comp * vis);
                     if (alpha < 1.f / 255.f) {
                         valid = 0;
                     }
@@ -1718,6 +1739,8 @@ kernel void project_and_sh_forward_kernel(
     constant float* features_rest,
     device float* colors,
     device float* aabb, // float2: per-axis pixel extents
+    device float* opacity_comp,
+    constant uint& use_mip_splatting,
     uint3 gp [[thread_position_in_grid]]
 ) {
     uint idx = gp.x;
@@ -1748,6 +1771,7 @@ kernel void project_and_sh_forward_kernel(
     float3 cov2d = project_cov3d_ewa(
         local_cov3d, viewmat, fx, fy, tan_fovx, tan_fovy, p_view
     );
+    opacity_comp[idx] = use_mip_splatting ? mip_opacity_compensation(cov2d) : 1.0f;
 
     float3 conic;
     float radius;
@@ -2072,10 +2096,12 @@ kernel void bitonic_sort_per_tile_kernel(
     constant float* conics              [[buffer(6)]],
     constant float* colors              [[buffer(7)]],
     constant float* opacities           [[buffer(8)]],
-    device float* packed_xy_opac        [[buffer(9)]],
-    device float* packed_conic          [[buffer(10)]],
-    device float* packed_rgb            [[buffer(11)]],
-    device int* tile_bins               [[buffer(12)]],
+    constant float* opacity_comp        [[buffer(9)]],
+    device float* packed_xy_opac        [[buffer(10)]],
+    device float* packed_conic          [[buffer(11)]],
+    device float* packed_rgb            [[buffer(12)]],
+    device float* packed_opacity_comp   [[buffer(13)]],
+    device int* tile_bins               [[buffer(14)]],
     uint tg_id [[threadgroup_position_in_grid]],
     uint tid [[thread_position_in_threadgroup]]
 ) {
@@ -2134,6 +2160,7 @@ kernel void bitonic_sort_per_tile_kernel(
         write_packed_float3(packed_xy_opac, global_idx, {xy.x, xy.y, opac});
         write_packed_float3(packed_conic, global_idx, read_packed_float3(conics, g_id));
         write_packed_float3(packed_rgb, global_idx, read_packed_float3(colors, g_id));
+        packed_opacity_comp[global_idx] = opacity_comp[g_id];
     }
 }
 
@@ -2638,6 +2665,7 @@ kernel void rasterize_forward_chunked_kernel(
     constant float* packed_xy_opac,
     constant float* packed_conic,
     constant float* packed_rgb,
+    constant float* packed_opacity_comp,
     device float* chunk_T,        // [K_max, H, W]
     device float* chunk_C,        // [K_max, H, W, 3]
     device int* chunk_final_idx,  // [K_max, H, W]
@@ -2687,6 +2715,7 @@ kernel void rasterize_forward_chunked_kernel(
     threadgroup float3 xy_opacity_batch[RAST_BLOCK_SIZE];
     threadgroup float3 conic_batch[RAST_BLOCK_SIZE];
     threadgroup float3 rgbs_batch[RAST_BLOCK_SIZE];
+    threadgroup float opacity_comp_batch[RAST_BLOCK_SIZE];
 
     float T = 1.f;
     float3 pix_out = {0.f, 0.f, 0.f};
@@ -2702,6 +2731,7 @@ kernel void rasterize_forward_chunked_kernel(
             conic_batch[tr] = read_packed_float3(packed_conic, idx);
             const float3 raw_c = read_packed_float3(packed_rgb, idx);
             rgbs_batch[tr] = max(raw_c + 0.5f, 0.0f);
+            opacity_comp_batch[tr] = packed_opacity_comp[idx];
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -2716,7 +2746,7 @@ kernel void rasterize_forward_chunked_kernel(
                 fma(conic_local.x, delta.x * delta.x, conic_local.z * delta.y * delta.y),
                 conic_local.y * delta.x * delta.y);
             if (sigma < 0.f || sigma >= 5.55f) continue;
-            const float alpha = min(0.999f, xy_opac.z * exp(-sigma));
+            const float alpha = min(0.999f, xy_opac.z * opacity_comp_batch[t] * exp(-sigma));
             if (alpha < 1.f / 255.f) continue;
             const float next_T = T * (1.f - alpha);
             if (next_T <= 1e-4f) {
@@ -2849,6 +2879,7 @@ kernel void rasterize_backward_chunked_kernel(
     constant float* packed_xy_opac,
     constant float* packed_conic,
     constant float* packed_rgb,
+    constant float* packed_opacity_comp,
     constant float* background,
     constant float* final_Ts,       // [H, W] — global final transmittance
     constant int* chunk_final_idx,  // [K_max, H, W]
@@ -2915,6 +2946,7 @@ kernel void rasterize_backward_chunked_kernel(
     threadgroup float3 xy_opacity_batch[RAST_BLOCK_SIZE];
     threadgroup float3 conic_batch[RAST_BLOCK_SIZE];
     threadgroup float3 rgbs_batch[RAST_BLOCK_SIZE];
+    threadgroup float opacity_comp_batch[RAST_BLOCK_SIZE];
 
     // Warp-level early exit
     const int warp_bin_final = warp_reduce_all_max(bin_final, warp_size);
@@ -2943,21 +2975,27 @@ kernel void rasterize_backward_chunked_kernel(
             xy_opacity_batch[tr] = read_packed_float3(packed_xy_opac, idx);
             conic_batch[tr] = read_packed_float3(packed_conic, idx);
             rgbs_batch[tr] = read_packed_float3(packed_rgb, idx);
+            opacity_comp_batch[tr] = packed_opacity_comp[idx];
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
         for (int t = max(0, batch_end - warp_bin_final); t < batch_size; ++t) {
-            float3 b_conic, b_xy_opac, b_rgb;
-            int32_t b_id;
+            float3 b_conic = float3(0.0f);
+            float3 b_xy_opac = float3(0.0f);
+            float3 b_rgb = float3(0.0f);
+            float b_opacity_comp = 1.0f;
+            int32_t b_id = 0;
             if (wr == 0) {
                 b_conic = conic_batch[t];
                 b_xy_opac = xy_opacity_batch[t];
                 b_rgb = rgbs_batch[t];
+                b_opacity_comp = opacity_comp_batch[t];
                 b_id = id_batch[t];
             }
             b_conic = simd_broadcast(b_conic, 0);
             b_xy_opac = simd_broadcast(b_xy_opac, 0);
             b_rgb = simd_broadcast(b_rgb, 0);
+            b_opacity_comp = simd_broadcast(b_opacity_comp, 0);
             b_id = simd_broadcast(b_id, 0);
 
             int valid = inside;
@@ -2977,7 +3015,7 @@ kernel void rasterize_backward_chunked_kernel(
                     valid = 0;
                 } else {
                     vis = exp(-sigma);
-                    alpha = min(0.999f, opac * vis);
+                    alpha = min(0.999f, opac * b_opacity_comp * vis);
                     if (alpha < 1.f / 255.f) valid = 0;
                 }
             }
@@ -3228,6 +3266,7 @@ kernel void ssim_fused_v_fwd_h_bwd_kernel(
     constant float* ssim_h_buf, constant uint2& img_size,
     constant float& ssim_weight, constant float& inv_n,
     device float* deriv_h_buf, device atomic_float* loss_sum,
+    constant float* loss_mask, constant uint& use_loss_mask,
     uint2 gid [[thread_position_in_grid]], uint2 lid [[thread_position_in_threadgroup]],
     uint tr [[thread_index_in_threadgroup]], uint2 tgid [[threadgroup_position_in_grid]],
     uint2 tg_size [[threads_per_threadgroup]]
@@ -3300,7 +3339,10 @@ kernel void ssim_fused_v_fwd_h_bwd_kernel(
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
-    float pixel_loss = (px < W && py < H) ? ssim_weight*(1.0f-ssim_sum/3.0f) + (1.0f-ssim_weight)*l1_sum/3.0f : 0.0f;
+    float mask_weight = (use_loss_mask != 0 && px < W && py < H) ? loss_mask[py * W + px] : 1.0f;
+    float pixel_loss = (px < W && py < H)
+        ? mask_weight * (ssim_weight*(1.0f-ssim_sum/3.0f) + (1.0f-ssim_weight)*l1_sum/3.0f)
+        : 0.0f;
     threadgroup float tg_sum[256];
     tg_sum[tr] = pixel_loss;
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -3401,6 +3443,8 @@ kernel void ssim_v_bwd_kernel(
     constant float& ssim_weight,
     constant float& inv_n,          // 1.0 / (H * W * 3)
     device float* v_rendered,       // (H, W, 3)
+    constant float* loss_mask,
+    constant uint& use_loss_mask,
     uint2 gid [[thread_position_in_grid]],
     uint2 lid [[thread_position_in_threadgroup]],
     uint tr [[thread_index_in_threadgroup]],
@@ -3441,6 +3485,7 @@ kernel void ssim_v_bwd_kernel(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     if (px < W && py < H) {
+        float mask_weight = use_loss_mask != 0 ? loss_mask[py * W + px] : 1.0f;
         for (uint c = 0; c < 3; c++) {
             float conv_f1 = 0, conv_f2 = 0, conv_f3 = 0;
             for (uint dy = 0; dy < SSIM_WIN; dy++) {
@@ -3456,7 +3501,7 @@ kernel void ssim_v_bwd_kernel(
             float v_ssim = conv_f1 + rend_val * conv_f2 + gt_val * conv_f3;
             float v_l1 = (gt_val > rend_val) ? -1.0f : ((gt_val < rend_val) ? 1.0f : 0.0f);
 
-            v_rendered[(py * W + px) * 3 + c] = inv_n * (
+            v_rendered[(py * W + px) * 3 + c] = mask_weight * inv_n * (
                 -ssim_weight * v_ssim + (1.0f - ssim_weight) * v_l1
             );
         }

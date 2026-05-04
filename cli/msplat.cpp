@@ -30,6 +30,18 @@ int main(int argc, char *argv[]) {
     app.add_option("-o,--output", outputScene, "Output scene path");
     int saveEvery = -1;
     app.add_option("-s,--save-every", saveEvery, "Save every N steps (-1 to disable)");
+    int lodLevels = 0;
+    app.add_option("--lod-levels", lodLevels, "Export N importance-ranked LOD PLY files after training")
+        ->check(CLI::Range(0, 16));
+    float lodKeepRatio = 0.5f;
+    app.add_option("--lod-keep-ratio", lodKeepRatio, "Fraction of splats to keep per LOD level")
+        ->check(CLI::Range(0.01f, 1.0f));
+    int lodRefineSteps = 0;
+    app.add_option("--lod-refine-steps", lodRefineSteps, "Optimize each decimated LOD for N extra steps")
+        ->check(CLI::Range(0, 1000000));
+    int lodImageScale = 100;
+    app.add_option("--lod-image-scale", lodImageScale, "Image scale percent used during LOD refinement")
+        ->check(CLI::Range(1, 100));
 
     // Resume
     std::string resume;
@@ -86,6 +98,8 @@ int main(int argc, char *argv[]) {
     app.add_option("--split-screen-size", splitScreenSize, "Screen-space split threshold");
     bool keepCrs = false;
     app.add_flag("--keep-crs", keepCrs, "Retain input coordinate reference system");
+    bool renderMip = false;
+    app.add_flag("--render-mip", renderMip, "Use MIP splatting opacity compensation during training and rendering");
     std::vector<float> bgColor = {0.6130f, 0.0101f, 0.3984f};
     app.add_option("--bg-color", bgColor, "Background RGB (0-1), default magenta")
         ->expected(3);
@@ -122,7 +136,7 @@ int main(int argc, char *argv[]) {
                      refineEvery, warmupLength, resetAlphaEvery, densifyGradThresh,
                      densifySizeThresh, stopScreenSizeAt, splitScreenSize,
                      numIters, keepCrs,
-                     bgColor.data());
+                     bgColor.data(), renderMip);
 
         std::vector<size_t> camIndices(cams.size());
         std::iota(camIndices.begin(), camIndices.end(), 0);
@@ -146,8 +160,17 @@ int main(int argc, char *argv[]) {
             Camera &cam = cams[camsIter.next()];
 
             auto iter_start = cpu_now();
-            MTensor gt = cam.getGPUImage(model.getDownscaleFactor(step));
-            model.fullIteration(cam, step, gt, ssimWeight);
+            int downscale = model.getDownscaleFactor(step);
+            MTensor gt = cam.getGPUImage(downscale, bgColor.data());
+            MTensor *lossMask = nullptr;
+            MTensor mask;
+            float lossMaskMean = 1.0f;
+            if (cam.hasLossMask()) {
+                mask = cam.getGPULossMask(downscale);
+                lossMask = &mask;
+                lossMaskMean = cam.getLossMaskMean(downscale);
+            }
+            model.fullIteration(cam, step, gt, lossMask, lossMaskMean, ssimWeight);
             model.schedulersStep(step);
             model.afterTrain(step);
             msplat_commit();
@@ -263,6 +286,45 @@ int main(int argc, char *argv[]) {
 
         inputData.saveCameras((fs::path(outputScene).parent_path() / "cameras.json").string(), keepCrs);
         model.save(outputScene, numIters);
+        if (lodLevels > 0) {
+            fs::path outputPath(outputScene);
+            fs::path dir = outputPath.parent_path();
+            if (dir.empty()) dir = ".";
+            std::string stem = outputPath.stem().string();
+            for (int level = 1; level <= lodLevels; level++) {
+                int64_t sourceCount = model.means.size(0);
+                int64_t targetCount = std::max<int64_t>(1, (int64_t)std::llround(sourceCount * lodKeepRatio));
+                fs::path lodPath = dir / (stem + "_lod" + std::to_string(level) + ".ply");
+                if (lodRefineSteps > 0) {
+                    model.decimateToLod(targetCount);
+                    float cumulativeScale = std::pow((float)lodImageScale / 100.0f, (float)level);
+                    int lodDownscale = std::max(1, (int)std::lround(1.0f / std::max(cumulativeScale, 0.01f)));
+                    std::cout << "LOD " << level << "/" << lodLevels << ": " << sourceCount
+                              << " -> " << model.means.size(0) << " gaussians, refining "
+                              << lodRefineSteps << " steps at downscale " << lodDownscale << std::endl;
+
+                    for (int refineStep = 1; refineStep <= lodRefineSteps; refineStep++) {
+                        Camera &cam = cams[camsIter.next()];
+                        MTensor gt = cam.getGPUImage(lodDownscale, bgColor.data());
+                        MTensor *lossMask = nullptr;
+                        MTensor mask;
+                        float lossMaskMean = 1.0f;
+                        if (cam.hasLossMask()) {
+                            mask = cam.getGPULossMask(lodDownscale);
+                            lossMask = &mask;
+                            lossMaskMean = cam.getLossMaskMean(lodDownscale);
+                        }
+                        int globalStep = numIters + (level - 1) * lodRefineSteps + refineStep;
+                        model.fullIteration(cam, globalStep, gt, lossMask, lossMaskMean, ssimWeight, lodDownscale);
+                        model.schedulersStep(globalStep);
+                        msplat_commit();
+                    }
+                    model.save(lodPath.string(), numIters + level * lodRefineSteps);
+                } else {
+                    model.saveLodPly(lodPath.string(), numIters, targetCount);
+                }
+            }
+        }
 
         // Evaluation
         if (evalMode && !testCams.empty()) {
@@ -274,7 +336,7 @@ int main(int argc, char *argv[]) {
                 MTensor rgb = model.render(testCams[i], numIters);
                 msplat_gpu_sync();
                 MTensor rgb_cpu = rgb.cpu();
-                MTensor gt_cpu = testCams[i].getGPUImage(model.getDownscaleFactor(numIters)).cpu();
+                MTensor gt_cpu = testCams[i].getGPUImage(model.getDownscaleFactor(numIters), bgColor.data()).cpu();
 
                 float p = psnr(rgb_cpu, gt_cpu);
                 float s = ssim_eval(rgb_cpu, gt_cpu);
@@ -296,7 +358,7 @@ int main(int argc, char *argv[]) {
             MTensor rgb = model.render(*valCam, numIters);
             msplat_gpu_sync();
             MTensor rgb_cpu = rgb.cpu();
-            MTensor gt_cpu = valCam->getGPUImage(model.getDownscaleFactor(numIters)).cpu();
+            MTensor gt_cpu = valCam->getGPUImage(model.getDownscaleFactor(numIters), bgColor.data()).cpu();
 
             std::cout << "\n=== Validation (" << valCam->filePath << ") ===" << std::endl;
             std::cout << "  PSNR:  " << psnr(rgb_cpu, gt_cpu)

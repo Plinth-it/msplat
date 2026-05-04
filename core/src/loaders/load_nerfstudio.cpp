@@ -41,6 +41,12 @@ InputData loaders::loadNerfstudio(const std::string &projectRoot) {
         cam.filePath = (fp[0] == '/' || fp[0] == '.')
             ? resolveImagePath(fp)
             : resolveImagePath((fs::path(projectRoot) / fp).string());
+        if (frame.contains("mask_path")) {
+            std::string mp = frame["mask_path"].get<std::string>();
+            cam.maskPath = (mp[0] == '/' || mp[0] == '.')
+                ? resolveImagePath(mp)
+                : resolveImagePath((fs::path(projectRoot) / mp).string());
+        }
 
         // transform_matrix is 4x4 c2w (OpenGL convention)
         auto &tm = frame["transform_matrix"];

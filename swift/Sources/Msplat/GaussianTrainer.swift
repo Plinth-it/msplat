@@ -77,6 +77,16 @@ public class GaussianTrainer {
         msplat_trainer_export_ply(handle, path)
     }
 
+    /// Export an importance-ranked LOD PLY with at most `targetCount` Gaussians.
+    public func exportLodPly(to path: String, targetCount: Int32) {
+        msplat_trainer_export_lod_ply(handle, path, targetCount)
+    }
+
+    /// Decimate the active model in memory to at most `targetCount` Gaussians.
+    public func decimateToLod(targetCount: Int32) {
+        msplat_trainer_decimate_to_lod(handle, targetCount)
+    }
+
     /// Export scene as .splat.
     public func exportSplat(to path: String) {
         msplat_trainer_export_splat(handle, path)

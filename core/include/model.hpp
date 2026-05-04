@@ -14,7 +14,8 @@ struct Model{
         int numDownscales, int resolutionSchedule, int shDegree, int shDegreeInterval,
         int refineEvery, int warmupLength, int resetAlphaEvery, float densifyGradThresh, float densifySizeThresh, int stopScreenSizeAt, float splitScreenSize,
         int maxSteps, bool keepCrs,
-        const float* bgColor = nullptr);
+        const float* bgColor = nullptr,
+        bool renderMip = false);
 
   ~Model(){ releaseOptimizers(); }
 
@@ -26,6 +27,8 @@ struct Model{
   void afterTrain(int step);
   void save(const std::string &filename, int step);
   void savePly(const std::string &filename, int step);
+  void saveLodPly(const std::string &filename, int step, int64_t targetCount);
+  void decimateToLod(int64_t targetCount);
   void saveSplat(const std::string &filename);
   int loadPly(const std::string &filename);
   void saveCheckpoint(const std::string &filename, int step);
@@ -36,8 +39,9 @@ struct Model{
     std::tuple<int,int,int> tileBounds;
     float cam_pos[3];
   };
-  CamSetup prepareCam(Camera& cam, int step);
-  void fullIteration(Camera& cam, int step, MTensor &gt, float ssimWeight);
+  CamSetup prepareCam(Camera& cam, int step, int forcedDownscale = 0);
+  void fullIteration(Camera& cam, int step, MTensor &gt, MTensor *lossMask, float lossMaskMean,
+                     float ssimWeight, int forcedDownscale = 0);
   MTensor render(Camera& cam, int step);
 
   MTensor means;
@@ -94,6 +98,7 @@ struct Model{
   float splitScreenSize;
   int maxSteps;
   bool keepCrs;
+  bool renderMip;
 
   float scale;
   float translation[3] = {};

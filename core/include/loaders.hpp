@@ -42,13 +42,23 @@ struct GaussianParams {
     bool keepCrs;
 };
 
+struct GaussianLodStats {
+    const float *visCounts = nullptr;
+    const float *xysGradNorm = nullptr;
+    const float *max2DSize = nullptr;
+};
+
 void saveGaussianPly(const std::string &path, GaussianParams &p, int step);
+void saveGaussianLodPly(const std::string &path, GaussianParams &p, int step, int64_t targetCount,
+                        const GaussianLodStats *stats = nullptr);
 void saveGaussianSplat(const std::string &path, GaussianParams &p);
 
 struct LoadedGaussians {
     MTensor means, scales, quats, featuresDc, featuresRest, opacities;
     int step;
 };
+LoadedGaussians decimateGaussians(GaussianParams &p, int64_t targetCount,
+                                  const GaussianLodStats *stats = nullptr);
 LoadedGaussians loadGaussianPly(const std::string &path, float scale, const float translation[3], bool keepCrs);
 
 #endif

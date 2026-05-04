@@ -18,6 +18,7 @@ class TrainingConfig:
     stop_screen_size_at: int
     split_screen_size: float
     keep_crs: bool
+    render_mip: bool
     downscale_factor: float
     output: str
     save_every: int
@@ -40,6 +41,7 @@ class TrainingConfig:
         stop_screen_size_at: int = 4000,
         split_screen_size: float = 0.05,
         keep_crs: bool = False,
+        render_mip: bool = False,
         downscale_factor: float = 1.0,
         output: str = "splat.ply",
         save_every: int = -1,
@@ -89,6 +91,14 @@ class Dataset:
         """Get camera-to-world pose (4x4 row-major, OpenGL convention) as numpy array."""
         ...
 
+    def camera_has_alpha(self, index: int) -> bool:
+        """Return true when the loaded training image has transparent pixels."""
+        ...
+
+    def camera_has_mask(self, index: int) -> bool:
+        """Return true when the dataset provides an explicit mask image."""
+        ...
+
 class GaussianTrainer:
     """3D Gaussian Splatting trainer. All computation runs on the Metal GPU."""
 
@@ -134,6 +144,14 @@ class GaussianTrainer:
 
     def export_ply(self, path: str) -> None:
         """Export the current Gaussians as a PLY file."""
+        ...
+
+    def export_lod_ply(self, path: str, target_count: int) -> None:
+        """Export an importance-ranked LOD PLY with at most target_count Gaussians."""
+        ...
+
+    def decimate_to_lod(self, target_count: int) -> None:
+        """Decimate the active model in memory to at most target_count Gaussians."""
         ...
 
     def export_splat(self, path: str) -> None:

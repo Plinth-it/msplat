@@ -88,6 +88,18 @@ img = trainer.render_from_pose(pose)  # numpy (H, W, 3) float32
 ```
 
 Supported dataset formats: COLMAP, Nerfstudio, Polycam.
+Transparent PNG targets are composited against the configured background color
+(`bg_color` / `--bg-color`) during training.
+Nerfstudio `mask_path` frames and sibling `masks/<image-stem>.*` files are used
+as loss masks.
+MIP splatting opacity compensation is available with `render_mip=True` in
+Python or `--render-mip` in the C++ CLI.
+Training can also emit deterministic importance-ranked LOD PLYs with
+`--lod-levels`; each level keeps `--lod-keep-ratio` of the previous splat
+budget. LOD ranking uses accumulated training visibility, screen-space
+gradient, and screen-size statistics when available, then falls back to
+static size/opacity. `--lod-refine-steps` decimates the active model and
+optimizes each LOD before export.
 
 Type stubs (`_core.pyi`) are included for IDE autocompletion.
 

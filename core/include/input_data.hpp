@@ -5,14 +5,17 @@
 #include <vector>
 #include <tuple>
 #include <unordered_map>
+#include <array>
 #include "metal_tensor.hpp"
 
 // Simple float32 RGB image — replaces cv::Mat
 struct Image {
-    std::vector<float> data;  // width * height * 3 floats, RGB, [0,1]
+    std::vector<float> data;   // width * height * 3 floats, RGB, [0,1]
+    std::vector<float> alpha;  // optional width * height floats, [0,1]
     int width = 0, height = 0;
 
     bool empty() const { return data.empty(); }
+    bool hasAlpha() const { return alpha.size() == (size_t)width * (size_t)height; }
     float* ptr() { return data.data(); }
     const float* ptr() const { return data.data(); }
 };
@@ -25,15 +28,29 @@ struct Camera {
     std::string filePath;
 
     Image image;
+    Image maskImage;
+    std::string maskPath;
     std::unordered_map<int, Image> imagePyramids;
+    std::unordered_map<int, Image> maskPyramids;
     std::unordered_map<int, MTensor> mtensorImageCache;
+    std::unordered_map<int, MTensor> mtensorCompositeImageCache;
+    std::unordered_map<int, std::array<float, 3>> mtensorCompositeImageCacheBackground;
+    std::unordered_map<int, MTensor> mtensorLossMaskCache;
+    std::unordered_map<int, float> lossMaskMeanCache;
     MTensor cachedViewMat, cachedProjViewMat;
     float cachedCamPos[3] = {};
     float cachedFovX = 0, cachedFovY = 0;
 
     void loadImage(float downscaleFactor);
     Image getImage(int downscaleFactor);
+    Image getMaskImage(int downscaleFactor);
     MTensor& getGPUImage(int downscaleFactor);
+    MTensor& getGPUImage(int downscaleFactor, const float background[3]);
+    MTensor& getGPULossMask(int downscaleFactor);
+    float getLossMaskMean(int downscaleFactor);
+    bool imageHasAlpha() const { return image.hasAlpha(); }
+    bool hasLossMask() const { return image.hasAlpha() || !maskImage.empty(); }
+    bool hasExplicitMask() const { return !maskImage.empty(); }
     bool hasDistortion() const { return k1 != 0 || k2 != 0 || k3 != 0 || p1 != 0 || p2 != 0; }
 };
 

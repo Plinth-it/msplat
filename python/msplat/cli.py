@@ -1,6 +1,7 @@
 """msplat-train CLI entry point."""
 
 import sys
+from pathlib import Path
 
 
 def main():
@@ -67,14 +68,29 @@ def main():
         keep_crs: bool = False
         """Keep input coordinate reference system"""
 
+        render_mip: bool = False
+        """Use MIP splatting opacity compensation during training and rendering"""
+
         save_every: int = -1
         """Save every N steps (-1 to disable)"""
+
+        lod_levels: int = 0
+        """Export N importance-ranked LOD PLY files after training"""
+
+        lod_keep_ratio: float = 0.5
+        """Fraction of splats to keep per LOD level"""
+
+        lod_refine_steps: int = 0
+        """Optimize each decimated LOD for N extra steps"""
 
         eval: bool = False
         """Evaluate on held-out test views"""
 
         test_every: int = 8
         """Hold out every Nth image for eval"""
+
+        bg_color: tuple[float, float, float] = (0.6130, 0.0101, 0.3984)
+        """Background RGB used for rendering and transparent image compositing"""
 
     args = tyro.cli(Args)
 
@@ -95,9 +111,11 @@ def main():
         stop_screen_size_at=args.stop_screen_size_at,
         split_screen_size=args.split_screen_size,
         keep_crs=args.keep_crs,
+        render_mip=args.render_mip,
         downscale_factor=args.downscale_factor,
         output=args.output,
         save_every=args.save_every,
+        bg_color=list(args.bg_color),
     )
 
     dataset = Dataset(
@@ -125,6 +143,20 @@ def main():
 
     trainer.export_ply(args.output)
     print(f"Saved {args.output}")
+    if args.lod_levels > 0:
+        output_path = Path(args.output)
+        for level in range(1, args.lod_levels + 1):
+            source_count = trainer.splat_count
+            target_count = max(1, round(source_count * args.lod_keep_ratio))
+            lod_path = output_path.with_name(f"{output_path.stem}_lod{level}.ply")
+            if args.lod_refine_steps > 0:
+                trainer.decimate_to_lod(target_count)
+                for _ in range(args.lod_refine_steps):
+                    trainer.step()
+                trainer.export_ply(str(lod_path))
+            else:
+                trainer.export_lod_ply(str(lod_path), target_count)
+            print(f"Saved {lod_path} ({target_count:,} splats)")
 
     if args.eval:
         metrics = trainer.evaluate()

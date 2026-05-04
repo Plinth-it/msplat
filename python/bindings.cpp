@@ -37,6 +37,7 @@ struct TrainingConfig {
     int stop_screen_size_at = 4000;
     float split_screen_size = 0.05f;
     bool keep_crs = false;
+    bool render_mip = false;
     float downscale_factor = 1.0f;
     std::string output = "splat.ply";
     int save_every = -1;
@@ -94,6 +95,18 @@ public:
         size_t shape[2] = {4, 4};
         return nb::cast(nb::ndarray<nb::numpy, float>(buf, 2, shape, deleter));
     }
+
+    bool camera_has_alpha(int index) const {
+        if (index < 0 || index >= (int)train_cams.size())
+            throw std::runtime_error("Camera index out of range");
+        return train_cams[index].imageHasAlpha();
+    }
+
+    bool camera_has_mask(int index) const {
+        if (index < 0 || index >= (int)train_cams.size())
+            throw std::runtime_error("Camera index out of range");
+        return train_cams[index].hasExplicitMask();
+    }
 };
 
 // ── GaussianTrainer ─────────────────────────────────────────────────────────
@@ -122,7 +135,7 @@ public:
             cfg.densify_grad_thresh, cfg.densify_size_thresh,
             cfg.stop_screen_size_at, cfg.split_screen_size,
             cfg.iterations, cfg.keep_crs,
-            cfg.bg_color.data()
+            cfg.bg_color.data(), cfg.render_mip
         );
 
         cam_indices.resize(dataset.train_cams.size());
@@ -147,11 +160,19 @@ public:
         Camera &cam = dataset_ptr->train_cams[cam_idx];
 
         int ds = model->getDownscaleFactor(current_step);
-        MTensor &gt = cam.getGPUImage(ds);
+        MTensor &gt = cam.getGPUImage(ds, config.bg_color.data());
+        MTensor *loss_mask = nullptr;
+        MTensor mask;
+        float loss_mask_mean = 1.0f;
+        if (cam.hasLossMask()) {
+            mask = cam.getGPULossMask(ds);
+            loss_mask = &mask;
+            loss_mask_mean = cam.getLossMaskMean(ds);
+        }
 
         auto t0 = std::chrono::high_resolution_clock::now();
 
-        model->fullIteration(cam, current_step, gt, config.ssim_weight);
+        model->fullIteration(cam, current_step, gt, loss_mask, loss_mask_mean, config.ssim_weight);
         model->schedulersStep(current_step);
         model->afterTrain(current_step);
         msplat_commit();
@@ -192,7 +213,7 @@ public:
 
             MTensor rgb_cpu = rgb.cpu();
             int ds = model->getDownscaleFactor(config.iterations);
-            MTensor gt_cpu = cam.getGPUImage(ds).cpu();
+            MTensor gt_cpu = cam.getGPUImage(ds, config.bg_color.data()).cpu();
 
             sum_psnr += psnr(rgb_cpu, gt_cpu);
             sum_ssim += ssim_eval(rgb_cpu, gt_cpu);
@@ -262,6 +283,18 @@ public:
         model->savePly(path, current_step);
     }
 
+    void export_lod_ply(const std::string &path, int target_count) {
+        if (target_count <= 0)
+            throw std::invalid_argument("target_count must be positive");
+        model->saveLodPly(path, current_step, target_count);
+    }
+
+    void decimate_to_lod(int target_count) {
+        if (target_count <= 0)
+            throw std::invalid_argument("target_count must be positive");
+        model->decimateToLod(target_count);
+    }
+
     void export_splat(const std::string &path) {
         model->saveSplat(path);
     }
@@ -293,7 +326,7 @@ NB_MODULE(_core, m) {
                 int refine_every, int warmup_length, int reset_alpha_every,
                 float densify_grad_thresh, float densify_size_thresh,
                 int stop_screen_size_at, float split_screen_size,
-                bool keep_crs, float downscale_factor,
+                bool keep_crs, bool render_mip, float downscale_factor,
                 const std::string &output, int save_every,
                 std::vector<float> bg_color) {
             new (cfg) TrainingConfig();
@@ -311,6 +344,7 @@ NB_MODULE(_core, m) {
             cfg->stop_screen_size_at = stop_screen_size_at;
             cfg->split_screen_size = split_screen_size;
             cfg->keep_crs = keep_crs;
+            cfg->render_mip = render_mip;
             cfg->downscale_factor = downscale_factor;
             cfg->output = output;
             cfg->save_every = save_every;
@@ -332,6 +366,7 @@ NB_MODULE(_core, m) {
             "stop_screen_size_at"_a = 4000,
             "split_screen_size"_a = 0.05f,
             "keep_crs"_a = false,
+            "render_mip"_a = false,
             "downscale_factor"_a = 1.0f,
             "output"_a = "splat.ply",
             "save_every"_a = -1,
@@ -350,6 +385,7 @@ NB_MODULE(_core, m) {
         .def_rw("stop_screen_size_at", &TrainingConfig::stop_screen_size_at)
         .def_rw("split_screen_size", &TrainingConfig::split_screen_size)
         .def_rw("keep_crs", &TrainingConfig::keep_crs)
+        .def_rw("render_mip", &TrainingConfig::render_mip)
         .def_rw("downscale_factor", &TrainingConfig::downscale_factor)
         .def_rw("output", &TrainingConfig::output)
         .def_rw("save_every", &TrainingConfig::save_every)
@@ -377,7 +413,11 @@ NB_MODULE(_core, m) {
         .def_prop_ro("num_train", &Dataset::num_train, "Number of training cameras.")
         .def_prop_ro("num_test", &Dataset::num_test, "Number of test cameras (0 unless eval_mode=True).")
         .def("camera_pose", &Dataset::camera_pose, "index"_a,
-            "Get camera-to-world pose (4x4 row-major, OpenGL convention) as numpy array.");
+            "Get camera-to-world pose (4x4 row-major, OpenGL convention) as numpy array.")
+        .def("camera_has_alpha", &Dataset::camera_has_alpha, "index"_a,
+            "Return true when the loaded training image has transparent pixels.")
+        .def("camera_has_mask", &Dataset::camera_has_mask, "index"_a,
+            "Return true when the dataset provides an explicit mask image.");
 
     // GaussianTrainer
     nb::class_<GaussianTrainer>(m, "GaussianTrainer",
@@ -401,6 +441,12 @@ NB_MODULE(_core, m) {
             "Uses intrinsics from ref_cam_idx. Returns numpy (H, W, 3) float32.")
         .def("export_ply", &GaussianTrainer::export_ply, "path"_a,
             "Export the current Gaussians as a PLY file.")
+        .def("export_lod_ply", &GaussianTrainer::export_lod_ply,
+            "path"_a, "target_count"_a,
+            "Export an importance-ranked LOD PLY with at most target_count Gaussians.")
+        .def("decimate_to_lod", &GaussianTrainer::decimate_to_lod,
+            "target_count"_a,
+            "Decimate the active model in memory to at most target_count Gaussians.")
         .def("export_splat", &GaussianTrainer::export_splat, "path"_a,
             "Export the current Gaussians as a .splat file.")
         .def("save_checkpoint", &GaussianTrainer::save_checkpoint, "path"_a,

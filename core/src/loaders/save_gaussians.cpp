@@ -4,21 +4,61 @@
 #include <algorithm>
 #include <numeric>
 #include <cmath>
+#include <cstring>
 
 static const double C0 = 0.28209479177387814;
 
-void saveGaussianPly(const std::string &path, GaussianParams &p, int step) {
+static bool hasLodStats(const GaussianLodStats *stats) {
+    return stats && stats->visCounts && stats->xysGradNorm && stats->max2DSize;
+}
+
+static std::vector<size_t> rankedGaussianIndices(GaussianParams &p, const GaussianLodStats *stats = nullptr) {
+    int64_t N = p.means.size(0);
+    const float *sp = p.scales.data<float>();
+    const float *op = p.opacities.data<float>();
+    bool useStats = hasLodStats(stats);
+
+    std::vector<float> scores(N);
+    for (int64_t i = 0; i < N; i++) {
+        float s = std::exp(sp[i*3]) + std::exp(sp[i*3+1]) + std::exp(sp[i*3+2]);
+        if (p.keepCrs) s /= p.scale;
+        float score = s / (1.0f + std::exp(-op[i]));
+        if (useStats) {
+            float vis = stats->visCounts[i];
+            if (vis > 0.0f) {
+                float avgGrad = stats->xysGradNorm[i] / vis;
+                float screen = std::max(0.0f, stats->max2DSize[i]);
+                float sensitivity = std::log1p(vis) * (std::sqrt(std::max(0.0f, avgGrad)) + screen);
+                score *= 1.0f + sensitivity;
+            }
+        }
+        scores[i] = score;
+    }
+
+    std::vector<size_t> idx(N);
+    std::iota(idx.begin(), idx.end(), 0);
+    std::sort(idx.begin(), idx.end(), [&](size_t a, size_t b) {
+        if (scores[a] == scores[b]) return a < b;
+        return scores[a] > scores[b];
+    });
+    return idx;
+}
+
+static void saveGaussianPlyWithOrder(const std::string &path, GaussianParams &p, int step, const std::vector<size_t> *order, int64_t count, const char *lodScoreSource = nullptr) {
     msplat_gpu_sync();
 
     std::ofstream o(path, std::ios::binary);
     int64_t N = p.means.size(0);
+    if (count < 0 || count > N) count = N;
     int numDc = (int)p.featuresDc.size(1);
     int frBases = (int)p.featuresRest.size(-2);
     int numFr = frBases * 3;
 
     o << "ply\nformat binary_little_endian 1.0\n";
     o << "comment msplat v" << step << "\n";
-    o << "element vertex " << N << "\n";
+    if (count != N) o << "comment msplat_lod_source_count " << N << "\n";
+    if (lodScoreSource) o << "comment msplat_lod_score_source " << lodScoreSource << "\n";
+    o << "element vertex " << count << "\n";
     o << "property float x\nproperty float y\nproperty float z\n";
     o << "property float nx\nproperty float ny\nproperty float nz\n";
     for (int i = 0; i < numDc; i++) o << "property float f_dc_" << i << "\n";
@@ -34,7 +74,8 @@ void saveGaussianPly(const std::string &path, GaussianParams &p, int step) {
     const float *dp = p.featuresDc.data<float>(), *op = p.opacities.data<float>();
     const float *frp = p.featuresRest.data<float>();
 
-    for (int64_t i = 0; i < N; i++) {
+    for (int64_t ii = 0; ii < count; ii++) {
+        size_t i = order ? (*order)[ii] : (size_t)ii;
         int c = 0;
         for (int j = 0; j < 3; j++)
             row[c++] = p.keepCrs ? (mp[i*3+j] / p.scale + p.translation[j]) : mp[i*3+j];
@@ -53,6 +94,67 @@ void saveGaussianPly(const std::string &path, GaussianParams &p, int step) {
     }
 }
 
+void saveGaussianPly(const std::string &path, GaussianParams &p, int step) {
+    saveGaussianPlyWithOrder(path, p, step, nullptr, p.means.size(0));
+}
+
+void saveGaussianLodPly(const std::string &path, GaussianParams &p, int step, int64_t targetCount,
+                        const GaussianLodStats *stats) {
+    int64_t N = p.means.size(0);
+    targetCount = std::clamp<int64_t>(targetCount, 1, N);
+    bool useStats = hasLodStats(stats);
+    std::vector<size_t> order = rankedGaussianIndices(p, stats);
+    saveGaussianPlyWithOrder(path, p, step, &order, targetCount,
+                             useStats ? "training-stats" : "static-size-opacity");
+}
+
+LoadedGaussians decimateGaussians(GaussianParams &p, int64_t targetCount,
+                                  const GaussianLodStats *stats) {
+    msplat_gpu_sync();
+
+    int64_t N = p.means.size(0);
+    targetCount = std::clamp<int64_t>(targetCount, 1, N);
+    std::vector<size_t> order = rankedGaussianIndices(p, stats);
+
+    int frBases = (int)p.featuresRest.size(-2);
+    int64_t frStride = (int64_t)frBases * 3;
+    LoadedGaussians out{
+        gpu_empty({targetCount, 3}, DType::Float32),
+        gpu_empty({targetCount, 3}, DType::Float32),
+        gpu_empty({targetCount, 4}, DType::Float32),
+        gpu_empty({targetCount, 3}, DType::Float32),
+        gpu_empty({targetCount, frBases, 3}, DType::Float32),
+        gpu_empty({targetCount, 1}, DType::Float32),
+        0
+    };
+
+    const float *mp = p.means.data<float>();
+    const float *sp = p.scales.data<float>();
+    const float *qp = p.quats.data<float>();
+    const float *dp = p.featuresDc.data<float>();
+    const float *frp = p.featuresRest.data<float>();
+    const float *op = p.opacities.data<float>();
+
+    float *omp = out.means.data<float>();
+    float *osp = out.scales.data<float>();
+    float *oqp = out.quats.data<float>();
+    float *odp = out.featuresDc.data<float>();
+    float *ofrp = out.featuresRest.data<float>();
+    float *oop = out.opacities.data<float>();
+
+    for (int64_t dst = 0; dst < targetCount; dst++) {
+        size_t src = order[dst];
+        memcpy(&omp[dst * 3], &mp[src * 3], 3 * sizeof(float));
+        memcpy(&osp[dst * 3], &sp[src * 3], 3 * sizeof(float));
+        memcpy(&oqp[dst * 4], &qp[src * 4], 4 * sizeof(float));
+        memcpy(&odp[dst * 3], &dp[src * 3], 3 * sizeof(float));
+        memcpy(&ofrp[dst * frStride], &frp[src * frStride], frStride * sizeof(float));
+        oop[dst] = op[src];
+    }
+
+    return out;
+}
+
 void saveGaussianSplat(const std::string &path, GaussianParams &p) {
     msplat_gpu_sync();
 
@@ -62,15 +164,7 @@ void saveGaussianSplat(const std::string &path, GaussianParams &p) {
     const float *dp = p.featuresDc.data<float>(), *op = p.opacities.data<float>();
 
     // Sort by size/opacity (largest first)
-    std::vector<float> order(N);
-    for (int64_t i = 0; i < N; i++) {
-        float s = std::exp(sp[i*3]) + std::exp(sp[i*3+1]) + std::exp(sp[i*3+2]);
-        if (p.keepCrs) s /= p.scale;
-        order[i] = s / (1.0f + std::exp(-op[i]));
-    }
-    std::vector<size_t> idx(N);
-    std::iota(idx.begin(), idx.end(), 0);
-    std::sort(idx.begin(), idx.end(), [&](size_t a, size_t b){ return order[a] > order[b]; });
+    std::vector<size_t> idx = rankedGaussianIndices(p);
 
     for (int64_t ii = 0; ii < N; ii++) {
         size_t i = idx[ii];
