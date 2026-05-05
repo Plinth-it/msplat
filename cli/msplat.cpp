@@ -365,8 +365,8 @@ int main(int argc, char *argv[]) {
 
         std::vector<size_t> camIndices(cams.size());
         std::iota(camIndices.begin(), camIndices.end(), 0);
-        InfiniteRandomIterator<size_t> camsIter(camIndices);
-        std::mt19937 bgRng(1337);
+        InfiniteRandomIterator<size_t> camsIter(camIndices, seed);
+        std::mt19937 bgRng(seed);
         auto sampleBackground = [&]() {
             std::array<float, 3> bg = {bgColor[0], bgColor[1], bgColor[2]};
             if (backgroundNoiseStrength > 0.0f) {
