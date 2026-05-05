@@ -105,7 +105,8 @@ static const std::unordered_map<std::string, std::string>& optionCanonicalNames(
         {"--subsample-frames", "subsample-frames"}, {"--subsample-points", "subsample-points"},
         {"--alpha-mode", "alpha-mode"}, {"--num-downscales", "num-downscales"},
         {"--resolution-schedule", "resolution-schedule"}, {"--sh-degree", "sh-degree"},
-        {"--sh-degree-interval", "sh-degree-interval"}, {"--ssim-weight", "ssim-weight"},
+        {"--sh-degree-interval", "sh-degree-interval"}, {"--sh-warmup-iters", "sh-warmup-iters"},
+        {"--ssim-weight", "ssim-weight"},
         {"--refine-every", "refine-every"}, {"--warmup-length", "warmup-length"},
         {"--reset-alpha-every", "reset-alpha-every"},
         {"--densify-grad-thresh", "growth-grad-threshold"}, {"--growth-grad-threshold", "growth-grad-threshold"},
@@ -396,8 +397,11 @@ int main(int argc, char *argv[]) {
     int shDegree = 3;
     app.add_option("--sh-degree", shDegree, "Max spherical harmonics degree")
         ->check(CLI::Range(0, 4));
+    int shWarmupIters = 5000;
+    app.add_option("--sh-warmup-iters", shWarmupIters, "Brush-style SH degree warmup period in iterations")
+        ->check(CLI::NonNegativeNumber);
     int shDegreeInterval = 0;
-    app.add_option("--sh-degree-interval", shDegreeInterval, "Increase SH degree every N steps (0 = full degree immediately)")
+    auto *shDegreeIntervalOption = app.add_option("--sh-degree-interval", shDegreeInterval, "Increase SH degree every N steps (0 = full degree immediately)")
         ->check(CLI::NonNegativeNumber);
     float ssimWeight = 0.2f;
     app.add_option("--ssim-weight", ssimWeight, "SSIM loss weight (0 = L1 only)")
@@ -521,6 +525,9 @@ int main(int argc, char *argv[]) {
 
     if (normalizeCrs) keepCrs = false;
     if (stopScreenSizeAtOption->count() == 0) stopScreenSizeAt = growthStopIter;
+    if (shDegreeIntervalOption->count() == 0) {
+        shDegreeInterval = (shWarmupIters > 0 && shDegree > 0) ? shWarmupIters / shDegree : 0;
+    }
     if (lodDecimationKeepOption->count() > 0) lodKeepRatio = static_cast<float>(lodDecimationKeep) / 100.0f;
     if (evalSplitEvery > 0) {
         testEvery = evalSplitEvery;
