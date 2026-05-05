@@ -170,9 +170,6 @@ InputData loaders::loadNerfstudio(const std::string &projectRoot) {
         float gFx = jsonFloat(doc, "fl_x", 0.0f), gFy = jsonFloat(doc, "fl_y", 0.0f);
         float gAngleX = jsonFloat(doc, "camera_angle_x", 0.0f);
         float gAngleY = jsonFloat(doc, "camera_angle_y", 0.0f);
-        float gK1 = jsonFloat(doc, "k1", 0.0f), gK2 = jsonFloat(doc, "k2", 0.0f);
-        float gK3 = jsonFloat(doc, "k3", 0.0f);
-        float gP1 = jsonFloat(doc, "p1", 0.0f), gP2 = jsonFloat(doc, "p2", 0.0f);
 
         for (auto &frame : doc["frames"]) {
             Camera cam;
@@ -180,9 +177,7 @@ InputData loaders::loadNerfstudio(const std::string &projectRoot) {
             cam.fx = jsonFloat(frame, "fl_x", gFx);  cam.fy = jsonFloat(frame, "fl_y", gFy);
             float angleX = jsonFloat(frame, "camera_angle_x", gAngleX);
             float angleY = jsonFloat(frame, "camera_angle_y", gAngleY);
-            cam.k1 = jsonFloat(frame, "k1", gK1);     cam.k2 = jsonFloat(frame, "k2", gK2);
-            cam.k3 = jsonFloat(frame, "k3", gK3);
-            cam.p1 = jsonFloat(frame, "p1", gP1);     cam.p2 = jsonFloat(frame, "p2", gP2);
+            // Brush currently ignores Nerfstudio distortion fields during dataset loading.
 
             std::string fp = frame["file_path"].get<std::string>();
             fs::path imagePath(fp);

@@ -460,7 +460,7 @@ InputData loaders::loadColmap(const std::string &projectRoot, const std::string 
         Camera cam;
         cam.width = cc.width; cam.height = cc.height;
         cam.fx = cc.fx; cam.fy = cc.fy; cam.cx = cc.cx; cam.cy = cc.cy;
-        cam.k1 = cc.k1; cam.k2 = cc.k2; cam.p1 = cc.p1; cam.p2 = cc.p2;
+        // Brush carries COLMAP intrinsics through without image undistortion.
         cam.filePath = findColmapImagePath(root, imageDir, img.filename);
         cam.datasetRoot = root.string();
         if (!fs::exists(cam.filePath)) continue;
