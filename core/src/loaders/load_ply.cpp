@@ -58,6 +58,7 @@ Points readPly(const std::string &path) {
     int numVertices = 0;
     std::vector<PlyProp> props;
     int vertexBytes = 0;
+    bool inVertex = false;
 
     while (std::getline(f, line)) {
         if (line == "end_header") break;
@@ -74,16 +75,16 @@ Points readPly(const std::string &path) {
         } else if (token == "element") {
             std::string name;
             iss >> name;
-            if (name == "vertex") iss >> numVertices;
-        } else if (token == "property") {
-            // Only collect vertex properties (before any other element)
-            if (numVertices > 0) {
-                std::string typeStr, name;
-                iss >> typeStr >> name;
-                PlyType t = parsePlyType(typeStr);
-                props.push_back({name, t, vertexBytes});
-                vertexBytes += (int)plyTypeSize(t);
-            }
+            inVertex = name == "vertex";
+            if (inVertex) iss >> numVertices;
+        } else if (inVertex && token == "property") {
+            std::string typeStr, name;
+            iss >> typeStr;
+            if (typeStr == "list") continue;
+            iss >> name;
+            PlyType t = parsePlyType(typeStr);
+            props.push_back({name, t, vertexBytes});
+            vertexBytes += (int)plyTypeSize(t);
         }
     }
 
