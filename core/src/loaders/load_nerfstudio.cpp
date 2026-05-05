@@ -117,17 +117,12 @@ InputData loaders::loadNerfstudio(const std::string &projectRoot) {
 
     appendFrames(j, transformsDir, data.cameras);
 
-    std::sort(data.cameras.begin(), data.cameras.end(),
-        [](const Camera &a, const Camera &b) { return a.filePath < b.filePath; });
-
     fs::path evalPath = root / "transforms_val.json";
     if (!fs::exists(evalPath)) evalPath = root / "transforms_test.json";
     if (fs::exists(evalPath)) {
         std::ifstream evalFile(evalPath.string());
         json evalJson = json::parse(evalFile);
         appendFrames(evalJson, evalPath.parent_path(), data.evalCameras);
-        std::sort(data.evalCameras.begin(), data.evalCameras.end(),
-            [](const Camera &a, const Camera &b) { return a.filePath < b.filePath; });
     }
 
     // Point cloud
