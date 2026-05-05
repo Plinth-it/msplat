@@ -46,16 +46,25 @@ static fs::path resolveBrushExportPath(const std::string &projectRoot, const std
     return (base / path).lexically_normal();
 }
 
+static std::string formatBrushIteration(int step, int totalSteps) {
+    int digits = totalSteps > 0
+        ? static_cast<int>(std::floor(std::log10(static_cast<double>(totalSteps)))) + 1
+        : 1;
+    std::ostringstream out;
+    out << std::setw(std::max(digits, 1)) << std::setfill('0') << step;
+    return out.str();
+}
+
 static fs::path exportPathForStep(const std::string &projectRoot, const std::string &exportPath,
                                   const std::string &exportName, const std::string &outputScene,
-                                  int step) {
+                                  int step, int totalSteps) {
     if (exportPath.empty()) {
         fs::path p(outputScene);
         return p.replace_filename(fs::path(p.stem().string() + "_" + std::to_string(step) + p.extension().string()));
     }
 
     fs::path dir = resolveBrushExportPath(projectRoot, exportPath);
-    std::string name = replaceAll(exportName, "{iter}", std::to_string(step));
+    std::string name = replaceAll(exportName, "{iter}", formatBrushIteration(step, totalSteps));
     if (name.find(".ply") == std::string::npos) name += ".ply";
     return dir / name;
 }
@@ -694,7 +703,7 @@ int main(int argc, char *argv[]) {
             }
 
             if (saveEvery > 0 && step % saveEvery == 0) {
-                fs::path p = exportPathForStep(projectRoot, exportPath, exportName, outputScene, (int)step);
+                fs::path p = exportPathForStep(projectRoot, exportPath, exportName, outputScene, (int)step, numIters);
                 if (p.has_parent_path()) fs::create_directories(p.parent_path());
                 model.save(p.string(), step);
             }
