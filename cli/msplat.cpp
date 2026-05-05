@@ -59,7 +59,6 @@ static fs::path brushExportPathForName(const std::string &projectRoot, const std
                                        const std::string &exportName, int step, int totalSteps) {
     fs::path dir = resolveBrushExportPath(projectRoot, exportPath);
     std::string name = replaceAll(exportName, "{iter}", formatBrushIteration(step, totalSteps));
-    if (name.find(".ply") == std::string::npos) name += ".ply";
     return dir / name;
 }
 
