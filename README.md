@@ -119,13 +119,11 @@ Python or `--render-mip` in the C++ CLI.
 The C++ CLI exports PLYs and `cameras.json` in the input dataset coordinate
 frame by default, matching Brush. Use `--normalize-crs` to write msplat's
 normalized internal coordinate frame instead.
-Training can also emit deterministic importance-ranked LOD PLYs with
-`--lod-levels`; each level keeps `--lod-keep-ratio` of the previous splat
-budget. LOD ranking uses accumulated training visibility, screen-space
-gradient, and screen-size statistics when available, then falls back to
-static size/opacity. `--lod-refine-steps` decimates the active model and
-optimizes each LOD before export, using `--lod-image-scale` to match Brush's
-per-level refinement image scaling.
+Training can also emit Brush-style LOD PLYs with `--lod-levels`; each level
+keeps `--lod-keep-ratio` or `--lod-decimation-keep` of the previous splat set.
+LOD decimation uses PUP sensitivity scores accumulated from per-view
+`[d_mean, d_log_scale]` gradients, then optionally optimizes each decimated
+LOD with `--lod-refine-steps` and Brush's cumulative `--lod-image-scale`.
 
 Type stubs (`_core.pyi`) are included for IDE autocompletion.
 
