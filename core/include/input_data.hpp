@@ -32,6 +32,7 @@ struct Camera {
     float k1 = 0, k2 = 0, k3 = 0, p1 = 0, p2 = 0;
     float camToWorld[16] = {};  // 4x4 row-major, camera-to-world (OpenGL: Y-up, Z-back)
     std::string filePath;
+    std::string datasetRoot;
 
     Image image;
     Image maskImage;

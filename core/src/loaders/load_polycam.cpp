@@ -54,6 +54,7 @@ InputData loaders::loadPolycam(const std::string &projectRoot) {
             cam.camToWorld[12] = 0;     cam.camToWorld[13] = 0;     cam.camToWorld[14] = 0;     cam.camToWorld[15] = 1;
 
             cam.filePath = findImage(imagesDir, jp.stem().string());
+            cam.datasetRoot = projectRoot;
             data.cameras.push_back(cam);
         }
     } else {
@@ -80,6 +81,7 @@ InputData loaders::loadPolycam(const std::string &projectRoot) {
             cam.filePath = frame.value("file_path", "");
             if (!cam.filePath.empty() && cam.filePath[0] != '/')
                 cam.filePath = (root / cam.filePath).string();
+            cam.datasetRoot = projectRoot;
             data.cameras.push_back(cam);
         }
     }

@@ -45,27 +45,106 @@ static std::vector<fs::path> maskSearchDirsForImage(const fs::path &image) {
     return dirs;
 }
 
-static std::string findMaskPath(const std::string &imagePath) {
-    fs::path image(imagePath);
-    std::string imageName = image.filename().string();
-    std::string imageStem = image.stem().string();
-    std::string maskStem = imageStem + ".mask";
+static bool maskNameMatches(const fs::path &candidate,
+                            const std::string &imageName,
+                            const std::string &imageStem,
+                            const std::string &maskStem) {
+    std::string candidateStem = candidate.stem().string();
+    return iequals(candidateStem, imageName)
+        || iequals(candidateStem, imageStem)
+        || iequals(candidateStem, maskStem);
+}
 
+static bool pathEndsWith(const fs::path &path, const fs::path &suffix) {
+    if (suffix.empty() || suffix == ".") return true;
+
+    auto pathIt = path.end();
+    auto suffixIt = suffix.end();
+    while (suffixIt != suffix.begin()) {
+        if (pathIt == path.begin()) return false;
+        --pathIt;
+        --suffixIt;
+        if (!iequals(pathIt->string(), suffixIt->string())) return false;
+    }
+    return true;
+}
+
+static std::string findBrushStyleMaskPath(const fs::path &image,
+                                          const fs::path &datasetRoot,
+                                          const std::string &imageName,
+                                          const std::string &imageStem,
+                                          const std::string &maskStem) {
+    const fs::path imageDir = image.parent_path();
+    if (!datasetRoot.empty()) {
+        const fs::path masksRoot = datasetRoot / "masks";
+        if (!fs::is_directory(masksRoot)) return "";
+
+        fs::recursive_directory_iterator it(
+            masksRoot, fs::directory_options::skip_permission_denied);
+        for (const fs::directory_entry &entry : it) {
+            if (!entry.is_regular_file()) continue;
+            if (!maskNameMatches(entry.path(), imageName, imageStem, maskStem)) continue;
+
+            const fs::path maskSubdir =
+                entry.path().parent_path().lexically_relative(masksRoot);
+            if (pathEndsWith(imageDir, maskSubdir)) {
+                return entry.path().string();
+            }
+        }
+        return "";
+    }
+
+    for (fs::path root = imageDir; !root.empty(); root = root.parent_path()) {
+        const fs::path masksRoot = root / "masks";
+        if (fs::is_directory(masksRoot)) {
+            fs::recursive_directory_iterator it(
+                masksRoot, fs::directory_options::skip_permission_denied);
+            for (const fs::directory_entry &entry : it) {
+                if (!entry.is_regular_file()) continue;
+                if (!maskNameMatches(entry.path(), imageName, imageStem, maskStem)) continue;
+
+                const fs::path maskSubdir =
+                    entry.path().parent_path().lexically_relative(masksRoot);
+                if (pathEndsWith(imageDir, maskSubdir)) {
+                    return entry.path().string();
+                }
+            }
+        }
+
+        if (root == root.root_path() || root.parent_path() == root) break;
+    }
+    return "";
+}
+
+static std::string findLocalMaskPath(const fs::path &image,
+                                     const std::string &imageName,
+                                     const std::string &imageStem,
+                                     const std::string &maskStem) {
     for (const fs::path &root : maskSearchDirsForImage(image)) {
         if (!fs::is_directory(root)) continue;
 
         for (const fs::directory_entry &entry : fs::directory_iterator(root)) {
             if (!entry.is_regular_file()) continue;
 
-            std::string candidateStem = entry.path().stem().string();
-            if (iequals(candidateStem, imageName)
-                || iequals(candidateStem, imageStem)
-                || iequals(candidateStem, maskStem)) {
+            if (maskNameMatches(entry.path(), imageName, imageStem, maskStem)) {
                 return entry.path().string();
             }
         }
     }
     return "";
+}
+
+static std::string findMaskPath(const std::string &imagePath, const std::string &datasetRoot) {
+    fs::path image(imagePath);
+    std::string imageName = image.filename().string();
+    std::string imageStem = image.stem().string();
+    std::string maskStem = imageStem + ".mask";
+
+    std::string path = findLocalMaskPath(image, imageName, imageStem, maskStem);
+    if (!path.empty()) return path;
+
+    return findBrushStyleMaskPath(image, fs::path(datasetRoot),
+                                  imageName, imageStem, maskStem);
 }
 
 static float maskPixelValue(const Image &mask, int index) {
@@ -112,7 +191,7 @@ void Camera::loadImage(float downscaleFactor, AlphaModeOverride alphaMode) {
     if (raw.empty()) return;
     alphaAsMask = false;
 
-    if (maskPath.empty()) maskPath = findMaskPath(filePath);
+    if (maskPath.empty()) maskPath = findMaskPath(filePath, datasetRoot);
     Image rawMask;
     if (!maskPath.empty() && fs::exists(maskPath)) {
         rawMask = imreadRGB(maskPath);
