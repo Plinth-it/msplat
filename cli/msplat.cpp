@@ -55,6 +55,14 @@ static std::string formatBrushIteration(int step, int totalSteps) {
     return out.str();
 }
 
+static fs::path brushExportPathForName(const std::string &projectRoot, const std::string &exportPath,
+                                       const std::string &exportName, int step, int totalSteps) {
+    fs::path dir = resolveBrushExportPath(projectRoot, exportPath);
+    std::string name = replaceAll(exportName, "{iter}", formatBrushIteration(step, totalSteps));
+    if (name.find(".ply") == std::string::npos) name += ".ply";
+    return dir / name;
+}
+
 static fs::path exportPathForStep(const std::string &projectRoot, const std::string &exportPath,
                                   const std::string &exportName, const std::string &outputScene,
                                   int step, int totalSteps) {
@@ -63,10 +71,7 @@ static fs::path exportPathForStep(const std::string &projectRoot, const std::str
         return p.replace_filename(fs::path(p.stem().string() + "_" + std::to_string(step) + p.extension().string()));
     }
 
-    fs::path dir = resolveBrushExportPath(projectRoot, exportPath);
-    std::string name = replaceAll(exportName, "{iter}", formatBrushIteration(step, totalSteps));
-    if (name.find(".ply") == std::string::npos) name += ".ply";
-    return dir / name;
+    return brushExportPathForName(projectRoot, exportPath, exportName, step, totalSteps);
 }
 
 static std::vector<std::string> splitArgsStr(const std::string &content) {
@@ -305,7 +310,7 @@ int main(int argc, char *argv[]) {
 
     // Output
     std::string outputScene = "splat.ply";
-    app.add_option("-o,--output", outputScene, "Output scene path");
+    auto *outputOption = app.add_option("-o,--output", outputScene, "Output scene path");
     uint32_t seed = 42;
     app.add_option("--seed", seed, "Brush-style random seed");
     int saveEvery = 5000;
@@ -809,17 +814,33 @@ int main(int argc, char *argv[]) {
         bool finalEvalAlreadyRun = evalEvery > 0 && numIters % evalEvery == 0;
         if (!finalEvalAlreadyRun) runEvaluation(numIters, evalSaveToDisk);
 
-        inputData.saveCameras((fs::path(outputScene).parent_path() / "cameras.json").string(), keepCrs);
-        model.save(outputScene, numIters);
+        bool outputExplicit = outputOption->count() > 0;
+        fs::path baseOutputPath = outputExplicit
+            ? fs::path(outputScene)
+            : brushExportPathForName(projectRoot, exportPath, exportName, numIters, numIters);
+        if (baseOutputPath.has_parent_path()) fs::create_directories(baseOutputPath.parent_path());
+        inputData.saveCameras((baseOutputPath.parent_path() / "cameras.json").string(), keepCrs);
+        model.save(baseOutputPath.string(), numIters);
         if (lodLevels > 0) {
-            fs::path outputPath(outputScene);
-            fs::path dir = outputPath.parent_path();
-            if (dir.empty()) dir = ".";
-            std::string stem = outputPath.stem().string();
             for (int level = 1; level <= lodLevels; level++) {
                 int64_t sourceCount = model.means.size(0);
                 int64_t targetCount = std::max<int64_t>(1, (int64_t)(sourceCount * lodKeepRatio));
-                fs::path lodPath = dir / (stem + "_lod" + std::to_string(level) + ".ply");
+                fs::path lodPath;
+                if (outputExplicit) {
+                    fs::path dir = baseOutputPath.parent_path();
+                    if (dir.empty()) dir = ".";
+                    lodPath = dir / (baseOutputPath.stem().string() + "_lod" + std::to_string(level) + ".ply");
+                } else {
+                    std::string lodExportName = exportName;
+                    size_t plyPos = lodExportName.rfind(".ply");
+                    if (plyPos != std::string::npos) {
+                        lodExportName.replace(plyPos, 4, "_lod" + std::to_string(level) + ".ply");
+                    } else {
+                        lodExportName += "_lod" + std::to_string(level);
+                    }
+                    lodPath = brushExportPathForName(projectRoot, exportPath, lodExportName,
+                                                     lodRefineSteps, lodRefineSteps);
+                }
                 std::cout << "LOD " << level << "/" << lodLevels
                           << ": computing PUP sensitivity scores..." << std::endl;
                 std::vector<float> pupScores = model.computePupLodScores(cams);
