@@ -38,10 +38,10 @@ int main(int argc, char *argv[]) {
     float lodKeepRatio = 0.5f;
     app.add_option("--lod-keep-ratio", lodKeepRatio, "Fraction of splats to keep per LOD level")
         ->check(CLI::Range(0.01f, 1.0f));
-    int lodRefineSteps = 0;
+    int lodRefineSteps = 5000;
     app.add_option("--lod-refine-steps", lodRefineSteps, "Optimize each decimated LOD for N extra steps")
         ->check(CLI::Range(0, 1000000));
-    int lodImageScale = 100;
+    int lodImageScale = 50;
     app.add_option("--lod-image-scale", lodImageScale, "Image scale percent used during LOD refinement")
         ->check(CLI::Range(1, 100));
 
@@ -406,7 +406,7 @@ int main(int argc, char *argv[]) {
                         model.fullIteration(cam, globalStep, gt, lossMask, lossMaskMean,
                                             alphaTarget, matchAlphaWeight, stepBg.data(), ssimWeight,
                                             lpipsLossWeight, lodDownscale);
-                        model.schedulersStep(globalStep);
+                        model.schedulersStep(refineStep);
                         msplat_commit();
                     }
                     model.save(lodPath.string(), numIters + level * lodRefineSteps);
