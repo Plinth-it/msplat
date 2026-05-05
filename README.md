@@ -134,6 +134,10 @@ pip install msplat[cli]
 msplat-train path/to/dataset -n 7000 --eval
 ```
 
+If the dataset directory contains `args.txt`, the C++ CLI loads it as
+Brush-style whitespace-separated options before parsing the command line.
+Explicit CLI options override matching `args.txt` options.
+
 ### Swift
 
 Requires Xcode and CMake (`brew install cmake`).

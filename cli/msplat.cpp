@@ -7,6 +7,9 @@
 #include <iomanip>
 #include <array>
 #include <stdexcept>
+#include <sstream>
+#include <unordered_map>
+#include <unordered_set>
 #include <CLI/CLI.hpp>
 #include "model.hpp"
 #include "input_data.hpp"
@@ -55,6 +58,164 @@ static fs::path exportPathForStep(const std::string &projectRoot, const std::str
     std::string name = replaceAll(exportName, "{iter}", std::to_string(step));
     if (name.find(".ply") == std::string::npos) name += ".ply";
     return dir / name;
+}
+
+static std::vector<std::string> splitArgsStr(const std::string &content) {
+    std::istringstream in(content);
+    std::vector<std::string> args;
+    std::string arg;
+    while (in >> arg) args.push_back(arg);
+    return args;
+}
+
+static std::string optionName(std::string token) {
+    size_t eq = token.find('=');
+    if (eq != std::string::npos) token.resize(eq);
+    return token;
+}
+
+static const std::unordered_map<std::string, std::string>& optionCanonicalNames() {
+    static const std::unordered_map<std::string, std::string> names = {
+        {"-o", "output"}, {"--output", "output"},
+        {"--seed", "seed"},
+        {"-s", "export-every"}, {"--save-every", "export-every"}, {"--export-every", "export-every"},
+        {"--export-path", "export-path"}, {"--export-name", "export-name"},
+        {"--lod-levels", "lod-levels"}, {"--lod-keep-ratio", "lod-keep"}, {"--lod-decimation-keep", "lod-keep"},
+        {"--lod-refine-steps", "lod-refine-steps"}, {"--lod-image-scale", "lod-image-scale"},
+        {"--resume", "resume"}, {"--start-iter", "start-iter"},
+        {"--val", "val"}, {"--val-image", "val-image"}, {"--val-render", "val-render"},
+        {"--eval", "eval"}, {"--test-every", "test-every"}, {"--eval-split-every", "eval-split-every"},
+        {"--eval-every", "eval-every"}, {"--eval-save-to-disk", "eval-save-to-disk"},
+        {"-n", "total-train-iters"}, {"--num-iters", "total-train-iters"}, {"--total-train-iters", "total-train-iters"},
+        {"-d", "downscale-factor"}, {"--downscale-factor", "downscale-factor"},
+        {"--max-resolution", "max-resolution"}, {"--max-frames", "max-frames"},
+        {"--subsample-frames", "subsample-frames"}, {"--subsample-points", "subsample-points"},
+        {"--alpha-mode", "alpha-mode"}, {"--num-downscales", "num-downscales"},
+        {"--resolution-schedule", "resolution-schedule"}, {"--sh-degree", "sh-degree"},
+        {"--sh-degree-interval", "sh-degree-interval"}, {"--ssim-weight", "ssim-weight"},
+        {"--refine-every", "refine-every"}, {"--warmup-length", "warmup-length"},
+        {"--reset-alpha-every", "reset-alpha-every"},
+        {"--densify-grad-thresh", "growth-grad-threshold"}, {"--growth-grad-threshold", "growth-grad-threshold"},
+        {"--densify-size-thresh", "densify-size-thresh"},
+        {"--stop-screen-size-at", "stop-screen-size-at"}, {"--growth-stop-iter", "growth-stop-iter"},
+        {"--max-splats", "max-splats"}, {"--growth-select-fraction", "growth-select-fraction"},
+        {"--split-screen-size", "split-at-screen-size"}, {"--split-at-screen-size", "split-at-screen-size"},
+        {"--match-alpha-weight", "match-alpha-weight"}, {"--lpips-loss-weight", "lpips-loss-weight"},
+        {"--opac-decay", "opac-decay"}, {"--scale-decay", "scale-decay"},
+        {"--mean-noise-weight", "mean-noise-weight"}, {"--lr-mean", "lr-mean"},
+        {"--lr-mean-end", "lr-mean-end"}, {"--lr-scale", "lr-scale"},
+        {"--lr-scale-end", "lr-scale-end"}, {"--lr-rotation", "lr-rotation"},
+        {"--lr-coeffs-dc", "lr-coeffs-dc"}, {"--lr-coeffs-sh-scale", "lr-coeffs-sh-scale"},
+        {"--lr-opac", "lr-opac"}, {"--random-init-scene-scale", "random-init-scene-scale"},
+        {"--reduce-second-moment", "reduce-second-moment"},
+        {"--background-noise-strength", "background-noise-strength"},
+        {"--keep-crs", "keep-crs"}, {"--normalize-crs", "normalize-crs"},
+        {"--render-mip", "render-mip"}, {"--render-mode", "render-mode"},
+        {"--bg-color", "background-color"}, {"--background-color", "background-color"},
+        {"--colmap-image-path", "colmap-image-path"},
+    };
+    return names;
+}
+
+static std::string canonicalOptionKey(const std::string &token) {
+    const auto &names = optionCanonicalNames();
+    auto it = names.find(optionName(token));
+    return it != names.end() ? it->second : "";
+}
+
+static int optionValueCount(const std::string &key) {
+    static const std::unordered_set<std::string> flags = {
+        "val", "eval", "eval-save-to-disk", "reduce-second-moment",
+        "keep-crs", "normalize-crs", "render-mip",
+    };
+    if (key.empty() || flags.count(key) > 0) return 0;
+    if (key == "background-color") return 3;
+    return 1;
+}
+
+static bool isOptionToken(const std::string &token) {
+    return token.size() > 1 && token[0] == '-';
+}
+
+static void skipOptionValues(const std::vector<std::string> &args, size_t &index, const std::string &key) {
+    if (args[index].find('=') != std::string::npos) return;
+    int count = optionValueCount(key);
+    while (count-- > 0 && index + 1 < args.size()) ++index;
+}
+
+static std::string findInputPath(int argc, char **argv) {
+    std::vector<std::string> args(argv + 1, argv + argc);
+    for (size_t i = 0; i < args.size(); ++i) {
+        if (args[i] == "--") return i + 1 < args.size() ? args[i + 1] : "";
+        if (isOptionToken(args[i])) {
+            skipOptionValues(args, i, canonicalOptionKey(args[i]));
+            continue;
+        }
+        return args[i];
+    }
+    return "";
+}
+
+static std::unordered_set<std::string> explicitCliOptionKeys(int argc, char **argv) {
+    std::unordered_set<std::string> keys;
+    std::vector<std::string> args(argv + 1, argv + argc);
+    for (size_t i = 0; i < args.size(); ++i) {
+        if (args[i] == "--") break;
+        if (!isOptionToken(args[i])) continue;
+        std::string key = canonicalOptionKey(args[i]);
+        if (!key.empty()) keys.insert(key);
+        skipOptionValues(args, i, key);
+    }
+    return keys;
+}
+
+static std::vector<std::string> filterArgsFileOptions(const std::vector<std::string> &fileArgs,
+                                                       const std::unordered_set<std::string> &explicitKeys) {
+    std::vector<std::string> filtered;
+    for (size_t i = 0; i < fileArgs.size(); ++i) {
+        if (!isOptionToken(fileArgs[i])) {
+            filtered.push_back(fileArgs[i]);
+            continue;
+        }
+
+        std::string key = canonicalOptionKey(fileArgs[i]);
+        bool overridden = !key.empty() && explicitKeys.count(key) > 0;
+        if (!overridden) filtered.push_back(fileArgs[i]);
+        if (fileArgs[i].find('=') != std::string::npos) continue;
+
+        int count = optionValueCount(key);
+        while (count-- > 0 && i + 1 < fileArgs.size()) {
+            ++i;
+            if (!overridden) filtered.push_back(fileArgs[i]);
+        }
+    }
+    return filtered;
+}
+
+static std::vector<std::string> argvWithDatasetArgs(int argc, char **argv) {
+    std::vector<std::string> merged(argv, argv + argc);
+    std::string inputPath = findInputPath(argc, argv);
+    if (inputPath.empty()) return merged;
+
+    fs::path argsPath = fs::path(inputPath) / "args.txt";
+    if (!fs::is_regular_file(argsPath)) return merged;
+
+    std::ifstream file(argsPath);
+    std::stringstream buffer;
+    buffer << file.rdbuf();
+    std::vector<std::string> fileArgs = splitArgsStr(buffer.str());
+    if (fileArgs.empty()) return merged;
+
+    std::vector<std::string> filtered = filterArgsFileOptions(fileArgs, explicitCliOptionKeys(argc, argv));
+    if (filtered.empty()) return merged;
+
+    std::vector<std::string> out;
+    out.reserve(1 + filtered.size() + (size_t)argc - 1);
+    out.push_back(argv[0]);
+    out.insert(out.end(), filtered.begin(), filtered.end());
+    for (int i = 1; i < argc; ++i) out.push_back(argv[i]);
+    std::cerr << "Loaded settings from " << argsPath << std::endl;
+    return out;
 }
 
 static void filterCameras(InputData &inputData, int maxFrames, int subsampleFrames) {
@@ -300,7 +461,15 @@ int main(int argc, char *argv[]) {
     std::string colmapImagePath;
     app.add_option("--colmap-image-path", colmapImagePath, "Override COLMAP image directory");
 
-    CLI11_PARSE(app, argc, argv);
+    std::vector<std::string> mergedArgs = argvWithDatasetArgs(argc, argv);
+    std::vector<char*> mergedArgv;
+    mergedArgv.reserve(mergedArgs.size());
+    for (std::string &arg : mergedArgs) mergedArgv.push_back(arg.data());
+    try {
+        app.parse(static_cast<int>(mergedArgv.size()), mergedArgv.data());
+    } catch (const CLI::ParseError &e) {
+        return app.exit(e);
+    }
 
     if (normalizeCrs) keepCrs = false;
     if (stopScreenSizeAtOption->count() == 0) stopScreenSizeAt = growthStopIter;
