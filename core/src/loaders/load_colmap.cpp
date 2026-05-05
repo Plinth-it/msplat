@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include <cmath>
 #include <optional>
+#include <cctype>
 
 namespace fs = std::filesystem;
 
@@ -69,6 +70,47 @@ static std::optional<ColmapSparseModel> findSparseModel(const fs::path &root) {
         if (hasTextModel(dir)) return ColmapSparseModel{dir, false};
     }
     return std::nullopt;
+}
+
+static bool hasPathComponent(const fs::path &path, const std::string &component) {
+    return std::any_of(path.begin(), path.end(), [&](const fs::path &part) {
+        const std::string text = part.string();
+        return text.size() == component.size() && std::equal(text.begin(), text.end(), component.begin(),
+            [](unsigned char a, unsigned char b) {
+                return std::tolower(a) == std::tolower(b);
+            });
+    });
+}
+
+static bool pathEndsWith(const fs::path &path, const fs::path &suffix) {
+    auto pathIt = path.end();
+    auto suffixIt = suffix.end();
+    while (suffixIt != suffix.begin()) {
+        if (pathIt == path.begin()) return false;
+        --pathIt;
+        --suffixIt;
+        if (*pathIt != *suffixIt) return false;
+    }
+    return true;
+}
+
+static std::string findColmapImagePath(const fs::path &root, const fs::path &imageDir,
+                                       const std::string &filename) {
+    fs::path namePath(filename);
+    if (namePath.is_absolute() && fs::exists(namePath)) return namePath.string();
+
+    fs::path direct = imageDir / namePath;
+    if (fs::exists(direct)) return direct.string();
+
+    for (const auto &entry : fs::recursive_directory_iterator(root)) {
+        if (!entry.is_regular_file()) continue;
+        if (hasPathComponent(entry.path(), "masks")) continue;
+
+        fs::path relative = fs::relative(entry.path(), root);
+        if (pathEndsWith(relative, namePath)) return entry.path().string();
+    }
+
+    return direct.string();
 }
 
 static size_t colmapModelParamCount(int model) {
@@ -353,7 +395,7 @@ InputData loaders::loadColmap(const std::string &projectRoot, const std::string 
         cam.width = cc.width; cam.height = cc.height;
         cam.fx = cc.fx; cam.fy = cc.fy; cam.cx = cc.cx; cam.cy = cc.cy;
         cam.k1 = cc.k1; cam.k2 = cc.k2; cam.p1 = cc.p1; cam.p2 = cc.p2;
-        cam.filePath = imageDir + "/" + img.filename;
+        cam.filePath = findColmapImagePath(root, imageDir, img.filename);
         w2cToCamToWorld(img.quat, img.t, cam.camToWorld);
         data.cameras.push_back(cam);
     }
