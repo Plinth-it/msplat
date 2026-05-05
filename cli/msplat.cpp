@@ -117,9 +117,9 @@ int main(int argc, char *argv[]) {
     app.add_option("-o,--output", outputScene, "Output scene path");
     uint32_t seed = 42;
     app.add_option("--seed", seed, "Brush-style random seed");
-    int saveEvery = -1;
+    int saveEvery = 5000;
     app.add_option("-s,--save-every,--export-every", saveEvery, "Save/export every N steps (-1 to disable)");
-    std::string exportPath;
+    std::string exportPath = "./{dataset}_exports/";
     app.add_option("--export-path", exportPath, "Brush-style export directory, supports {dataset}");
     std::string exportName = "export_{iter}.ply";
     app.add_option("--export-name", exportName, "Brush-style export filename, supports {iter}");
@@ -164,7 +164,7 @@ int main(int argc, char *argv[]) {
     int evalSplitEvery = 0;
     app.add_option("--eval-split-every", evalSplitEvery, "Brush-style eval split period")
         ->check(CLI::Range(2, 100));
-    int evalEvery = 0;
+    int evalEvery = 1000;
     app.add_option("--eval-every", evalEvery, "Evaluate every N steps (0 to disable periodic eval)")
         ->check(CLI::Range(0, 1000000));
     bool evalSaveToDisk = false;
