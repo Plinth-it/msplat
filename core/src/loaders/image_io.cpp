@@ -69,21 +69,32 @@ Image imreadRGB(const std::string &path) {
 void imwriteRGB(const std::string &path, const Image &img) {
     int w = img.width, h = img.height;
 
-    // float32 RGB → uint8 RGB
-    std::vector<uint8_t> rgb8(w * h * 3);
-    for (int i = 0; i < w * h * 3; i++) {
-        float v = std::clamp(img.data[i] * 255.0f, 0.0f, 255.0f);
-        rgb8[i] = (uint8_t)(v + 0.5f);
+    // float32 RGB -> uint8 RGBA. CoreGraphics support for 24-bit RGB bitmap
+    // contexts is inconsistent, so write through a standard 32-bit layout.
+    std::vector<uint8_t> rgba8(w * h * 4);
+    for (int i = 0; i < w * h; i++) {
+        for (int c = 0; c < 3; c++) {
+            float v = std::clamp(img.data[i * 3 + c] * 255.0f, 0.0f, 255.0f);
+            rgba8[i * 4 + c] = (uint8_t)(v + 0.5f);
+        }
+        rgba8[i * 4 + 3] = 255;
     }
 
     CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
     CGContextRef ctx = CGBitmapContextCreate(
-        rgb8.data(), w, h, 8, w * 3, colorSpace,
-        kCGImageAlphaNone | kCGBitmapByteOrderDefault
+        rgba8.data(), w, h, 8, w * 4, colorSpace,
+        kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big
     );
+    if (!ctx) {
+        CGColorSpaceRelease(colorSpace);
+        throw std::runtime_error("Failed to create image context for: " + path);
+    }
     CGImageRef cgImage = CGBitmapContextCreateImage(ctx);
     CGContextRelease(ctx);
     CGColorSpaceRelease(colorSpace);
+    if (!cgImage) {
+        throw std::runtime_error("Failed to encode image: " + path);
+    }
 
     CFStringRef cfPath = CFStringCreateWithCString(nullptr, path.c_str(), kCFStringEncodingUTF8);
     CFURLRef url = CFURLCreateWithFileSystemPath(nullptr, cfPath, kCFURLPOSIXPathStyle, false);
@@ -91,8 +102,16 @@ void imwriteRGB(const std::string &path, const Image &img) {
 
     CGImageDestinationRef dest = CGImageDestinationCreateWithURL(url, CFSTR("public.png"), 1, nullptr);
     CFRelease(url);
+    if (!dest) {
+        CGImageRelease(cgImage);
+        throw std::runtime_error("Failed to create image destination: " + path);
+    }
     CGImageDestinationAddImage(dest, cgImage, nullptr);
-    CGImageDestinationFinalize(dest);
+    if (!CGImageDestinationFinalize(dest)) {
+        CFRelease(dest);
+        CGImageRelease(cgImage);
+        throw std::runtime_error("Failed to write image: " + path);
+    }
 
     CFRelease(dest);
     CGImageRelease(cgImage);

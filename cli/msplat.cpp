@@ -17,6 +17,46 @@
 
 namespace fs = std::filesystem;
 
+static std::string replaceAll(std::string text, const std::string &from, const std::string &to) {
+    size_t pos = 0;
+    while ((pos = text.find(from, pos)) != std::string::npos) {
+        text.replace(pos, from.size(), to);
+        pos += to.size();
+    }
+    return text;
+}
+
+static std::string datasetNameFromPath(const std::string &projectRoot) {
+    fs::path path(projectRoot);
+    if (!path.filename().empty()) return path.filename().string();
+    if (path.has_parent_path()) return path.parent_path().filename().string();
+    return "dataset";
+}
+
+static fs::path resolveBrushExportPath(const std::string &projectRoot, const std::string &exportPath) {
+    std::string pathText = replaceAll(exportPath, "{dataset}", datasetNameFromPath(projectRoot));
+    fs::path path(pathText);
+    if (path.is_absolute()) return path;
+
+    fs::path base = fs::path(projectRoot).parent_path();
+    if (base.empty()) base = ".";
+    return (base / path).lexically_normal();
+}
+
+static fs::path exportPathForStep(const std::string &projectRoot, const std::string &exportPath,
+                                  const std::string &exportName, const std::string &outputScene,
+                                  int step) {
+    if (exportPath.empty()) {
+        fs::path p(outputScene);
+        return p.replace_filename(fs::path(p.stem().string() + "_" + std::to_string(step) + p.extension().string()));
+    }
+
+    fs::path dir = resolveBrushExportPath(projectRoot, exportPath);
+    std::string name = replaceAll(exportName, "{iter}", std::to_string(step));
+    if (name.find(".ply") == std::string::npos) name += ".ply";
+    return dir / name;
+}
+
 int main(int argc, char *argv[]) {
     CLI::App app{"msplat — 3D Gaussian Splatting for Apple Silicon"};
     app.set_version_flag("--version", APP_VERSION);
@@ -31,13 +71,20 @@ int main(int argc, char *argv[]) {
     std::string outputScene = "splat.ply";
     app.add_option("-o,--output", outputScene, "Output scene path");
     int saveEvery = -1;
-    app.add_option("-s,--save-every", saveEvery, "Save every N steps (-1 to disable)");
+    app.add_option("-s,--save-every,--export-every", saveEvery, "Save/export every N steps (-1 to disable)");
+    std::string exportPath;
+    app.add_option("--export-path", exportPath, "Brush-style export directory, supports {dataset}");
+    std::string exportName = "export_{iter}.ply";
+    app.add_option("--export-name", exportName, "Brush-style export filename, supports {iter}");
     int lodLevels = 0;
     app.add_option("--lod-levels", lodLevels, "Export N importance-ranked LOD PLY files after training")
         ->check(CLI::Range(0, 16));
     float lodKeepRatio = 0.5f;
     app.add_option("--lod-keep-ratio", lodKeepRatio, "Fraction of splats to keep per LOD level")
         ->check(CLI::Range(0.01f, 1.0f));
+    int lodDecimationKeep = 0;
+    app.add_option("--lod-decimation-keep", lodDecimationKeep, "Brush-style LOD keep percentage")
+        ->check(CLI::Range(1, 100));
     int lodRefineSteps = 5000;
     app.add_option("--lod-refine-steps", lodRefineSteps, "Optimize each decimated LOD for N extra steps")
         ->check(CLI::Range(0, 1000000));
@@ -64,10 +111,18 @@ int main(int argc, char *argv[]) {
     int testEvery = 8;
     app.add_option("--test-every", testEvery, "Hold out every Nth image for eval")
         ->check(CLI::Range(2, 100));
+    int evalSplitEvery = 0;
+    app.add_option("--eval-split-every", evalSplitEvery, "Brush-style eval split period")
+        ->check(CLI::Range(2, 100));
+    int evalEvery = 0;
+    app.add_option("--eval-every", evalEvery, "Evaluate every N steps (0 to disable periodic eval)")
+        ->check(CLI::Range(0, 1000000));
+    bool evalSaveToDisk = false;
+    app.add_flag("--eval-save-to-disk", evalSaveToDisk, "Save periodic eval renders under export path");
 
     // Training hyperparameters
     int numIters = 30000;
-    app.add_option("-n,--num-iters", numIters, "Number of iterations")
+    app.add_option("-n,--num-iters,--total-train-iters", numIters, "Number of iterations")
         ->check(CLI::Range(1, 1000000));
     float downScaleFactor = 1.0f;
     app.add_option("-d,--downscale-factor", downScaleFactor, "Image downscale factor")
@@ -91,7 +146,7 @@ int main(int argc, char *argv[]) {
     int resetAlphaEvery = 0;
     app.add_option("--reset-alpha-every", resetAlphaEvery, "Reset opacity every N refinements, or 0 to disable");
     float densifyGradThresh = 0.0020f;
-    app.add_option("--densify-grad-thresh", densifyGradThresh, "Gradient threshold for split/dup");
+    app.add_option("--densify-grad-thresh,--growth-grad-threshold", densifyGradThresh, "Gradient threshold for split/dup");
     float densifySizeThresh = 0.01f;
     app.add_option("--densify-size-thresh", densifySizeThresh, "Size threshold (dup vs split)");
     int stopScreenSizeAt = 15000;
@@ -106,7 +161,7 @@ int main(int argc, char *argv[]) {
     app.add_option("--growth-select-fraction", growthSelectFraction, "Fraction of high-gradient splats selected for growth")
         ->check(CLI::Range(0.0f, 1.0f));
     float splitScreenSize = 0.25f;
-    app.add_option("--split-screen-size", splitScreenSize, "Screen-space split threshold");
+    app.add_option("--split-screen-size,--split-at-screen-size", splitScreenSize, "Screen-space split threshold");
     float matchAlphaWeight = 0.1f;
     app.add_option("--match-alpha-weight", matchAlphaWeight, "Alpha L1 loss weight for transparent targets")
         ->check(CLI::Range(0.0f, 100.0f));
@@ -160,14 +215,31 @@ int main(int argc, char *argv[]) {
     app.add_flag("--keep-crs", keepCrs, "Retain input coordinate reference system");
     bool renderMip = false;
     app.add_flag("--render-mip", renderMip, "Use MIP splatting opacity compensation during training and rendering");
+    std::string renderMode;
+    app.add_option("--render-mode", renderMode, "Brush render mode: default or mip");
     std::vector<float> bgColor = {0.0f, 0.0f, 0.0f};
-    app.add_option("--bg-color", bgColor, "Background RGB (0-1), default black")
+    app.add_option("--bg-color,--background-color", bgColor, "Background RGB (0-1), default black")
         ->expected(3);
     std::string colmapImagePath;
     app.add_option("--colmap-image-path", colmapImagePath, "Override COLMAP image directory");
 
     CLI11_PARSE(app, argc, argv);
 
+    if (lodDecimationKeep > 0) lodKeepRatio = static_cast<float>(lodDecimationKeep) / 100.0f;
+    if (evalSplitEvery > 0) {
+        testEvery = evalSplitEvery;
+        evalMode = true;
+    }
+    if (!renderMode.empty()) {
+        if (renderMode == "mip") {
+            renderMip = true;
+        } else if (renderMode == "default") {
+            renderMip = false;
+        } else {
+            std::cerr << "--render-mode must be 'default' or 'mip'" << std::endl;
+            return 1;
+        }
+    }
     if (validate || !valRender.empty()) validate = true;
     if (!valRender.empty() && !fs::exists(valRender)) fs::create_directories(valRender);
     downScaleFactor = std::max(downScaleFactor, 1.0f);
@@ -214,6 +286,61 @@ int main(int argc, char *argv[]) {
                 for (float &channel : bg) channel = std::clamp(channel + dist(bgRng), 0.0f, 1.0f);
             }
             return bg;
+        };
+        auto evaluationImageDir = [&](int evalStep) {
+            fs::path base;
+            if (exportPath.empty()) {
+                base = fs::path(outputScene).parent_path();
+                if (base.empty()) base = ".";
+            } else {
+                base = resolveBrushExportPath(projectRoot, exportPath);
+            }
+            return base / ("eval_" + std::to_string(evalStep));
+        };
+        auto runEvaluation = [&](int evalStep, bool saveImages) {
+            if (!evalMode || testCams.empty()) return;
+
+            double sumPsnr = 0, sumSsim = 0, sumL1 = 0;
+            int nTest = testCams.size();
+            fs::path imageDir;
+            if (saveImages) {
+                imageDir = evaluationImageDir(evalStep);
+                fs::create_directories(imageDir);
+            }
+
+            std::cout << "\n=== Evaluation (" << nTest << " test views";
+            if (evalStep != numIters) std::cout << ", step " << evalStep;
+            std::cout << ") ===" << std::endl;
+
+            for (int i = 0; i < nTest; i++) {
+                MTensor rgb = model.render(testCams[i], evalStep);
+                msplat_gpu_sync();
+                MTensor rgb_cpu = rgb.cpu();
+                MTensor gt_cpu = testCams[i].getGPUImage(model.getDownscaleFactor(evalStep), bgColor.data()).cpu();
+                quantizeRenderedForEval(rgb_cpu);
+
+                float p = psnr(rgb_cpu, gt_cpu);
+                float s = ssim_eval(rgb_cpu, gt_cpu);
+                float l = l1_loss(rgb_cpu, gt_cpu);
+                sumPsnr += p; sumSsim += s; sumL1 += l;
+
+                if (saveImages) {
+                    Image evalImg;
+                    evalImg.width = (int)rgb_cpu.size(1);
+                    evalImg.height = (int)rgb_cpu.size(0);
+                    evalImg.data.resize(evalImg.width * evalImg.height * 3);
+                    memcpy(evalImg.ptr(), rgb_cpu.data_ptr(), evalImg.data.size() * sizeof(float));
+                    imwriteRGB((imageDir / (fs::path(testCams[i].filePath).stem().string() + ".png")).string(), evalImg);
+                }
+
+                std::cout << "  [" << (i+1) << "/" << nTest << "] "
+                          << fs::path(testCams[i].filePath).filename().string()
+                          << "  PSNR=" << p << "  SSIM=" << s << "  L1=" << l << std::endl;
+            }
+            std::cout << "\n  PSNR:  " << (sumPsnr / nTest)
+                      << "  SSIM:  " << (sumSsim / nTest)
+                      << "  L1:  " << (sumL1 / nTest)
+                      << "  Gaussians: " << model.means.size(0) << std::endl;
         };
 
         size_t step = 1;
@@ -270,8 +397,13 @@ int main(int argc, char *argv[]) {
             }
 
             if (saveEvery > 0 && step % saveEvery == 0) {
-                fs::path p(outputScene);
-                model.save(p.replace_filename(fs::path(p.stem().string() + "_" + std::to_string(step) + p.extension().string())).string(), step);
+                fs::path p = exportPathForStep(projectRoot, exportPath, exportName, outputScene, (int)step);
+                if (p.has_parent_path()) fs::create_directories(p.parent_path());
+                model.save(p.string(), step);
+            }
+
+            if (evalEvery > 0 && step % (size_t)evalEvery == 0) {
+                runEvaluation((int)step, evalSaveToDisk);
             }
 
             if (!valRender.empty() && step % 10 == 0) {
@@ -418,32 +550,8 @@ int main(int argc, char *argv[]) {
         }
 
         // Evaluation
-        if (evalMode && !testCams.empty()) {
-            double sumPsnr = 0, sumSsim = 0, sumL1 = 0;
-            int nTest = testCams.size();
-
-            std::cout << "\n=== Evaluation (" << nTest << " test views) ===" << std::endl;
-            for (int i = 0; i < nTest; i++) {
-                MTensor rgb = model.render(testCams[i], numIters);
-                msplat_gpu_sync();
-                MTensor rgb_cpu = rgb.cpu();
-                MTensor gt_cpu = testCams[i].getGPUImage(model.getDownscaleFactor(numIters), bgColor.data()).cpu();
-                quantizeRenderedForEval(rgb_cpu);
-
-                float p = psnr(rgb_cpu, gt_cpu);
-                float s = ssim_eval(rgb_cpu, gt_cpu);
-                float l = l1_loss(rgb_cpu, gt_cpu);
-                sumPsnr += p; sumSsim += s; sumL1 += l;
-
-                std::cout << "  [" << (i+1) << "/" << nTest << "] "
-                          << fs::path(testCams[i].filePath).filename().string()
-                          << "  PSNR=" << p << "  SSIM=" << s << "  L1=" << l << std::endl;
-            }
-            std::cout << "\n  PSNR:  " << (sumPsnr / nTest)
-                      << "  SSIM:  " << (sumSsim / nTest)
-                      << "  L1:  " << (sumL1 / nTest)
-                      << "  Gaussians: " << model.means.size(0) << std::endl;
-        }
+        bool finalEvalAlreadyRun = evalEvery > 0 && numIters % evalEvery == 0;
+        if (!finalEvalAlreadyRun) runEvaluation(numIters, false);
 
         // Validation
         if (valCam) {
