@@ -2,6 +2,8 @@
 // Ported from https://github.com/Po-Hsun-Su/pytorch-ssim (MIT)
 
 #include "ssim.hpp"
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 
 std::vector<float> createSSIMWindow(int windowSize, float sigma) {
@@ -35,9 +37,9 @@ static void gaussianBlur(const float* in, float* out, float* tmp,
             float sum = 0;
             for (int k = 0; k < kSize; k++) {
                 int sx = x + k - pad;
-                if (sx < 0) sx = 0;
-                if (sx >= W) sx = W - 1;
-                sum += in[y * W + sx] * kernel[k];
+                if (sx >= 0 && sx < W) {
+                    sum += in[y * W + sx] * kernel[k];
+                }
             }
             tmp[y * W + x] = sum;
         }
@@ -49,9 +51,9 @@ static void gaussianBlur(const float* in, float* out, float* tmp,
             float sum = 0;
             for (int k = 0; k < kSize; k++) {
                 int sy = y + k - pad;
-                if (sy < 0) sy = 0;
-                if (sy >= H) sy = H - 1;
-                sum += tmp[sy * W + x] * kernel[k];
+                if (sy >= 0 && sy < H) {
+                    sum += tmp[sy * W + x] * kernel[k];
+                }
             }
             out[y * W + x] = sum;
         }
@@ -108,13 +110,13 @@ float ssim_eval(const MTensor& rendered, const MTensor& gt,
             float m1sq = mu1[i] * mu1[i];
             float m2sq = mu2[i] * mu2[i];
             float m12  = mu1[i] * mu2[i];
-            float sig1sq = s_rr[i] - m1sq;
-            float sig2sq = s_gg[i] - m2sq;
+            float sig1sq = std::max(0.0f, s_rr[i] - m1sq);
+            float sig2sq = std::max(0.0f, s_gg[i] - m2sq);
             float sig12  = s_rg[i] - m12;
 
             float num = (2.0f * m12 + C1) * (2.0f * sig12 + C2);
             float den = (m1sq + m2sq + C1) * (sig1sq + sig2sq + C2);
-            ssim_sum += num / den;
+            ssim_sum += std::clamp(num / den, -1.0f, 1.0f);
             count++;
         }
     }

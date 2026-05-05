@@ -32,6 +32,11 @@ void msplat_drain_gpu_times(std::vector<double>& out);
 void msplat_drain_stage_times(std::vector<double> stage_times[], int max_stages, int& n_stages,
                               const char** stage_names);
 
+void msplat_apply_mean_noise(
+    int num_points, MTensor &means3d, MTensor &opacities, MTensor &radii,
+    float noise_scale, float max_noise, uint32_t seed
+);
+
 // Render-only forward pass (no loss computation)
 // Returns: out_img (H, W, 3) as MTensor
 MTensor msplat_render(
@@ -59,12 +64,14 @@ std::tuple<MTensor, float> msplat_train_step(
     MTensor &opacities, MTensor &background,
     int use_mip_splatting,
     MTensor &gt, MTensor &loss_mask, int use_loss_mask,
-    MTensor &window2d, float ssim_weight,
+    MTensor &alpha_target, int use_alpha_loss, float alpha_loss_weight,
+    MTensor &window2d, float ssim_weight, float lpips_loss_weight,
     float loss_inv_n, int features_rest_bases,
     int num_adam_groups,
     MTensor adam_params[], MTensor adam_exp_avg[], MTensor adam_exp_avg_sq[],
     float adam_step_sizes[], float adam_bc2_sqrts[],
     float adam_beta1, float adam_beta2, float adam_eps,
+    int reduce_second_moment,
     MTensor &vis_counts, MTensor &xys_grad_norm, MTensor &max_2d_size,
     float inv_max_dim
 );
@@ -72,6 +79,7 @@ std::tuple<MTensor, float> msplat_train_step(
 int msplat_densify(
     int N, int buf_capacity,
     float grad_thresh, float size_thresh, float screen_thresh, int check_screen,
+    float growth_select_fraction, uint32_t growth_seed, int max_splats,
     float cull_alpha_thresh, float cull_scale_thresh, float cull_screen_size, int check_huge,
     MTensor &xys_grad_norm, MTensor &vis_counts, MTensor &max_2d_size,
     float half_max_dim,

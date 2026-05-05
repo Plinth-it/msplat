@@ -6,12 +6,19 @@
 
 #import <Metal/Metal.h>
 #import <MetalPerformanceShaders/MetalPerformanceShaders.h>
+#import <MetalPerformanceShadersGraph/MetalPerformanceShadersGraph.h>
+#import <MetalPerformanceShadersGraph/MPSGraphAutomaticDifferentiation.h>
 #import <chrono>
 #import <dlfcn.h>
 #import <unordered_map>
 #import <functional>
 #import <array>
+#import <algorithm>
 #import <mutex>
+#import <memory>
+#import <string>
+#import <fstream>
+#import <cstdlib>
 #import <mach/mach_time.h>
 
 // GPU profiling infrastructure.
@@ -149,9 +156,12 @@ struct MetalContext {
     id<MTLComputePipelineState> ssim_v_fwd_kernel_cpso;
     id<MTLComputePipelineState> ssim_fused_v_fwd_h_bwd_kernel_cpso;
     id<MTLComputePipelineState> ssim_v_bwd_kernel_cpso;
+    id<MTLComputePipelineState> lpips_prepare_nchw_kernel_cpso;
+    id<MTLComputePipelineState> lpips_apply_grad_kernel_cpso;
     // Backward pipeline kernels
     id<MTLComputePipelineState> project_and_sh_backward_kernel_cpso;
     id<MTLComputePipelineState> fused_adam_kernel_cpso;
+    id<MTLComputePipelineState> apply_mean_noise_kernel_cpso;
     id<MTLComputePipelineState> accumulate_grad_stats_kernel_cpso;
     // GPU densification kernels
     id<MTLComputePipelineState> densify_classify_kernel_cpso;
@@ -164,10 +174,16 @@ struct MetalContext {
 
 // Explicit metallib path (set by Swift/Python wrappers before first use)
 static char* g_metallib_path = NULL;
+static char* g_lpips_weights_path = NULL;
 
 extern "C" void msplat_set_metallib_path(const char* path) {
     free(g_metallib_path);
     g_metallib_path = path ? strdup(path) : NULL;
+}
+
+extern "C" void msplat_set_lpips_weights_path(const char* path) {
+    free(g_lpips_weights_path);
+    g_lpips_weights_path = path ? strdup(path) : NULL;
 }
 
 MetalContext* init_msplat_metal_context() {
@@ -252,9 +268,12 @@ MetalContext* init_msplat_metal_context() {
     ctx->ssim_v_fwd_kernel_cpso                   = load(@"ssim_v_fwd_kernel");
     ctx->ssim_fused_v_fwd_h_bwd_kernel_cpso       = load(@"ssim_fused_v_fwd_h_bwd_kernel");
     ctx->ssim_v_bwd_kernel_cpso                   = load(@"ssim_v_bwd_kernel");
+    ctx->lpips_prepare_nchw_kernel_cpso           = load(@"lpips_prepare_nchw_kernel");
+    ctx->lpips_apply_grad_kernel_cpso             = load(@"lpips_apply_grad_kernel");
     // Backward pipeline
     ctx->project_and_sh_backward_kernel_cpso      = load(@"project_and_sh_backward_kernel");
     ctx->fused_adam_kernel_cpso                    = load(@"fused_adam_kernel");
+    ctx->apply_mean_noise_kernel_cpso             = load(@"apply_mean_noise_kernel");
     ctx->accumulate_grad_stats_kernel_cpso        = load(@"accumulate_grad_stats_kernel");
     // GPU densification
     ctx->densify_classify_kernel_cpso             = load(@"densify_classify_kernel");
@@ -339,8 +358,35 @@ void msplat_drain_stage_times(std::vector<double> stage_times[], int max_stages,
     }
 }
 
+void msplat_apply_mean_noise(
+    int num_points, MTensor &means3d, MTensor &opacities, MTensor &radii,
+    float noise_scale, float max_noise, uint32_t seed
+) {
+    if (num_points <= 0 || noise_scale <= 0.0f || max_noise <= 0.0f) {
+        return;
+    }
+
+    MetalContext* ctx = get_global_context();
+    id<MTLCommandBuffer> command_buffer = ctx->getCommandBuffer();
+    id<MTLComputeCommandEncoder> enc = [command_buffer computeCommandEncoder];
+    NSUInteger tpg = MIN(ctx->apply_mean_noise_kernel_cpso.maxTotalThreadsPerThreadgroup,
+                         (NSUInteger)num_points);
+    uint32_t n = (uint32_t)num_points;
+    [enc setComputePipelineState:ctx->apply_mean_noise_kernel_cpso];
+    ENC_BUF(enc, means3d, 0);
+    ENC_BUF(enc, opacities, 1);
+    ENC_BUF(enc, radii, 2);
+    ENC_SCALAR(enc, n, 3);
+    ENC_SCALAR(enc, noise_scale, 4);
+    ENC_SCALAR(enc, max_noise, 5);
+    ENC_SCALAR(enc, seed, 6);
+    [enc dispatchThreads:MTLSizeMake(num_points, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+    [enc endEncoding];
+}
+
 #define RAST_BLOCK_X 8
 #define RAST_BLOCK_Y 8
+static constexpr int kMaxTileElems = 4096;
 
 // Cached buffer pool — all intermediate GPU buffers are reused across iterations.
 // Sizes only change at densification (every 100 steps); between densifications
@@ -357,6 +403,7 @@ struct FusedTensorCache {
     MTensor loss_intermediates;
     MTensor ssim_h_buf;
     MTensor tile_bins, loss_sum;
+    MTensor lpips_rendered_nchw, lpips_gt_nchw, lpips_grad_nchw, lpips_loss;
 
     // Tile-local sorting buffers
     MTensor tile_offsets, tile_scatter_counters;
@@ -410,13 +457,17 @@ struct FusedTensorCache {
             loss_intermediates = mtensor_empty(dev, {(int64_t)ih, (int64_t)iw, 15}, DType::Float32);
             ssim_h_buf = mtensor_empty(dev, {(int64_t)ih, (int64_t)iw, 15}, DType::Float32);
             v_rendered = mtensor_empty(dev, {ih, iw, 3}, DType::Float32);
+            lpips_rendered_nchw = mtensor_empty(dev, {1, 3, ih, iw}, DType::Float32);
+            lpips_gt_nchw = mtensor_empty(dev, {1, 3, ih, iw}, DType::Float32);
+            lpips_grad_nchw = mtensor_empty(dev, {1, 3, ih, iw}, DType::Float32);
+            lpips_loss = mtensor_empty(dev, {1}, DType::Float32);
         }
         if (nt != num_tiles) {
             num_tiles = nt;
             tile_bins = mtensor_empty(dev, {nt, 2}, DType::Int32);
             tile_offsets = mtensor_empty(dev, {nt}, DType::Int32);
             tile_scatter_counters = mtensor_empty(dev, {nt}, DType::Int32);
-            prealloc_bins = mtensor_empty(dev, {(int64_t)nt * 2048}, DType::Int64);
+            prealloc_bins = mtensor_empty(dev, {(int64_t)nt * kMaxTileElems}, DType::Int64);
         }
         if (!loss_sum.defined()) {
             loss_sum = mtensor_empty(dev, {1}, DType::Float32);
@@ -459,6 +510,273 @@ void cleanup_msplat_metal() {
     g_tcache = FusedTensorCache{};
 }
 
+struct LpipsTensorBlob {
+    std::string name;
+    std::vector<uint32_t> shape;
+    std::vector<float> data;
+};
+
+struct LpipsWeights {
+    std::vector<LpipsTensorBlob> tensors;
+    const LpipsTensorBlob* tensorNamed(const std::string& name) const {
+        for (const auto& t : tensors) {
+            if (t.name == name) return &t;
+        }
+        return nullptr;
+    }
+};
+
+struct LpipsGraphCache {
+    int height = 0;
+    int width = 0;
+    MPSGraph* graph = nil;
+    MPSGraphTensor* input_a = nil;
+    MPSGraphTensor* input_b = nil;
+    MPSGraphTensor* loss = nil;
+    MPSGraphTensor* grad_a = nil;
+};
+
+static std::unique_ptr<LpipsWeights> g_lpips_weights;
+static std::unique_ptr<LpipsGraphCache> g_lpips_graph;
+static std::mutex g_lpips_mutex;
+
+static NSString* discover_lpips_weights_path() {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if (g_lpips_weights_path) {
+        NSString *path = [NSString stringWithUTF8String:g_lpips_weights_path];
+        if ([fm fileExistsAtPath:path]) return path;
+    }
+    if (g_metallib_path) {
+        NSString *dir = [[NSString stringWithUTF8String:g_metallib_path] stringByDeletingLastPathComponent];
+        NSString *path = [dir stringByAppendingPathComponent:@"lpips_vgg.bin"];
+        if ([fm fileExistsAtPath:path]) return path;
+    }
+    Dl_info dl_info;
+    if (dladdr((void*)init_msplat_metal_context, &dl_info) && dl_info.dli_fname) {
+        NSString *dir = [[NSString stringWithUTF8String:dl_info.dli_fname] stringByDeletingLastPathComponent];
+        NSString *path = [dir stringByAppendingPathComponent:@"lpips_vgg.bin"];
+        if ([fm fileExistsAtPath:path]) return path;
+    }
+    NSString *exeDir = [[[NSBundle mainBundle] executablePath] stringByDeletingLastPathComponent];
+    NSString *exePath = [exeDir stringByAppendingPathComponent:@"lpips_vgg.bin"];
+    if (exeDir && [fm fileExistsAtPath:exePath]) return exePath;
+    return nil;
+}
+
+template <typename T>
+static bool read_lpips_value(std::ifstream& in, T& value) {
+    in.read(reinterpret_cast<char*>(&value), sizeof(T));
+    return in.good();
+}
+
+static LpipsWeights* load_lpips_weights() {
+    if (g_lpips_weights) return g_lpips_weights.get();
+
+    NSString *path = discover_lpips_weights_path();
+    if (!path) {
+        fprintf(stderr, "msplat: LPIPS weights not found (lpips_vgg.bin)\n");
+        return nullptr;
+    }
+
+    std::ifstream in([path fileSystemRepresentation], std::ios::binary);
+    char magic[8] = {};
+    in.read(magic, sizeof(magic));
+    if (!in.good() || std::string(magic, sizeof(magic)) != "MSLPIPS1") {
+        fprintf(stderr, "msplat: invalid LPIPS weights file: %s\n", [path UTF8String]);
+        return nullptr;
+    }
+
+    uint32_t count = 0;
+    if (!read_lpips_value(in, count)) return nullptr;
+
+    auto weights = std::make_unique<LpipsWeights>();
+    weights->tensors.reserve(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        uint32_t name_len = 0, rank = 0;
+        uint64_t data_len = 0;
+        if (!read_lpips_value(in, name_len)) return nullptr;
+        LpipsTensorBlob tensor;
+        tensor.name.resize(name_len);
+        in.read(tensor.name.data(), name_len);
+        if (!read_lpips_value(in, rank)) return nullptr;
+        tensor.shape.resize(rank);
+        uint64_t expected = 1;
+        for (uint32_t d = 0; d < rank; ++d) {
+            if (!read_lpips_value(in, tensor.shape[d])) return nullptr;
+            expected *= tensor.shape[d];
+        }
+        if (!read_lpips_value(in, data_len) || data_len != expected) return nullptr;
+        tensor.data.resize((size_t)data_len);
+        in.read(reinterpret_cast<char*>(tensor.data.data()), (std::streamsize)(data_len * sizeof(float)));
+        if (!in.good()) return nullptr;
+        weights->tensors.push_back(std::move(tensor));
+    }
+
+    g_lpips_weights = std::move(weights);
+    return g_lpips_weights.get();
+}
+
+static NSArray<NSNumber*>* shape4(uint32_t a, uint32_t b, uint32_t c, uint32_t d) {
+    return @[@(a), @(b), @(c), @(d)];
+}
+
+static MPSGraphTensor* constant_for_tensor(MPSGraph* graph, const LpipsTensorBlob& t) {
+    NSMutableArray<NSNumber*> *shape = [NSMutableArray arrayWithCapacity:t.shape.size()];
+    for (uint32_t dim : t.shape) [shape addObject:@(dim)];
+    NSData *data = [NSData dataWithBytes:t.data.data() length:t.data.size() * sizeof(float)];
+    return [graph constantWithData:data shape:shape dataType:MPSDataTypeFloat32];
+}
+
+static MPSGraphTensor* add_scalar(MPSGraph* graph, MPSGraphTensor* tensor, float value) {
+    MPSGraphTensor *scalar = [graph constantWithScalar:value dataType:MPSDataTypeFloat32];
+    return [graph additionWithPrimaryTensor:tensor secondaryTensor:scalar name:nil];
+}
+
+static MPSGraphTensor* lpips_conv_relu(MPSGraph* graph, MPSGraphTensor* x,
+                                       const LpipsTensorBlob& weight,
+                                       const LpipsTensorBlob* bias) {
+    MPSGraphConvolution2DOpDescriptor *desc =
+        [MPSGraphConvolution2DOpDescriptor descriptorWithStrideInX:1 strideInY:1
+                                                   dilationRateInX:1 dilationRateInY:1
+                                                            groups:1
+                                                       paddingLeft:1 paddingRight:1
+                                                        paddingTop:1 paddingBottom:1
+                                                      paddingStyle:MPSGraphPaddingStyleExplicit
+                                                        dataLayout:MPSGraphTensorNamedDataLayoutNCHW
+                                                     weightsLayout:MPSGraphTensorNamedDataLayoutOIHW];
+    x = [graph convolution2DWithSourceTensor:x weightsTensor:constant_for_tensor(graph, weight)
+                                  descriptor:desc name:nil];
+    if (bias) {
+        MPSGraphTensor *b = constant_for_tensor(graph, *bias);
+        b = [graph reshapeTensor:b withShape:shape4(1, bias->shape[0], 1, 1) name:nil];
+        x = [graph additionWithPrimaryTensor:x secondaryTensor:b name:nil];
+    }
+    return [graph reLUWithTensor:x name:nil];
+}
+
+static MPSGraphTensor* lpips_head(MPSGraph* graph, MPSGraphTensor* x,
+                                  const LpipsTensorBlob& weight) {
+    MPSGraphConvolution2DOpDescriptor *desc =
+        [MPSGraphConvolution2DOpDescriptor descriptorWithStrideInX:1 strideInY:1
+                                                   dilationRateInX:1 dilationRateInY:1
+                                                            groups:1
+                                                       paddingLeft:0 paddingRight:0
+                                                        paddingTop:0 paddingBottom:0
+                                                      paddingStyle:MPSGraphPaddingStyleExplicit
+                                                        dataLayout:MPSGraphTensorNamedDataLayoutNCHW
+                                                     weightsLayout:MPSGraphTensorNamedDataLayoutOIHW];
+    return [graph convolution2DWithSourceTensor:x weightsTensor:constant_for_tensor(graph, weight)
+                                     descriptor:desc name:nil];
+}
+
+static MPSGraphTensor* lpips_norm(MPSGraph* graph, MPSGraphTensor* x, int height, int width) {
+    MPSGraphTensor *sq = [graph squareWithTensor:x name:nil];
+    MPSGraphTensor *sum = [graph reductionSumWithTensor:sq axes:@[@1] name:nil];
+    sum = [graph reshapeTensor:sum withShape:shape4(1, 1, (uint32_t)height, (uint32_t)width) name:nil];
+    MPSGraphTensor *norm = [graph squareRootWithTensor:add_scalar(graph, sum, 1e-10f) name:nil];
+    return [graph divisionWithPrimaryTensor:x secondaryTensor:norm name:nil];
+}
+
+static MPSGraphTensor* lpips_preprocess(MPSGraph* graph, MPSGraphTensor* x) {
+    MPSGraphTensor *two = [graph constantWithScalar:2.0 dataType:MPSDataTypeFloat32];
+    MPSGraphTensor *one = [graph constantWithScalar:1.0 dataType:MPSDataTypeFloat32];
+    x = [graph multiplicationWithPrimaryTensor:x secondaryTensor:two name:nil];
+    x = [graph subtractionWithPrimaryTensor:x secondaryTensor:one name:nil];
+
+    const float shift_vals[3] = {-0.030f, -0.088f, -0.188f};
+    const float scale_vals[3] = {0.458f, 0.448f, 0.450f};
+    NSData *shift_data = [NSData dataWithBytes:shift_vals length:sizeof(shift_vals)];
+    NSData *scale_data = [NSData dataWithBytes:scale_vals length:sizeof(scale_vals)];
+    MPSGraphTensor *shift = [graph constantWithData:shift_data shape:shape4(1, 3, 1, 1) dataType:MPSDataTypeFloat32];
+    MPSGraphTensor *scale = [graph constantWithData:scale_data shape:shape4(1, 3, 1, 1) dataType:MPSDataTypeFloat32];
+    x = [graph subtractionWithPrimaryTensor:x secondaryTensor:shift name:nil];
+    return [graph divisionWithPrimaryTensor:x secondaryTensor:scale name:nil];
+}
+
+static LpipsGraphCache* get_lpips_graph(int height, int width) {
+    std::lock_guard<std::mutex> lock(g_lpips_mutex);
+    if (height < 16 || width < 16) {
+        fprintf(stderr, "msplat: LPIPS requires images at least 16x16 after downscaling\n");
+        return nullptr;
+    }
+    if (g_lpips_graph && g_lpips_graph->height == height && g_lpips_graph->width == width) {
+        return g_lpips_graph.get();
+    }
+
+    LpipsWeights *weights = load_lpips_weights();
+    if (!weights) return nullptr;
+
+    auto cache = std::make_unique<LpipsGraphCache>();
+    cache->height = height;
+    cache->width = width;
+    cache->graph = [MPSGraph new];
+    MPSGraph *graph = cache->graph;
+
+    cache->input_a = [graph placeholderWithShape:shape4(1, 3, (uint32_t)height, (uint32_t)width)
+                                        dataType:MPSDataTypeFloat32 name:@"lpips_rendered"];
+    cache->input_b = [graph placeholderWithShape:shape4(1, 3, (uint32_t)height, (uint32_t)width)
+                                        dataType:MPSDataTypeFloat32 name:@"lpips_gt"];
+
+    MPSGraphTensor *a = lpips_preprocess(graph, cache->input_a);
+    MPSGraphTensor *b = lpips_preprocess(graph, cache->input_b);
+    MPSGraphTensor *total = [graph constantWithScalar:0.0 dataType:MPSDataTypeFloat32];
+
+    const int block_convs[5] = {2, 2, 3, 3, 3};
+    int h = height, w = width;
+    for (int block = 0; block < 5; ++block) {
+        if (block != 0) {
+            MPSGraphPooling2DOpDescriptor *pool =
+                [MPSGraphPooling2DOpDescriptor descriptorWithKernelWidth:2 kernelHeight:2
+                                                                strideInX:2 strideInY:2
+                                                             paddingStyle:MPSGraphPaddingStyleExplicit
+                                                               dataLayout:MPSGraphTensorNamedDataLayoutNCHW];
+            [pool setExplicitPaddingWithPaddingLeft:0 paddingRight:0 paddingTop:0 paddingBottom:0];
+            a = [graph maxPooling2DWithSourceTensor:a descriptor:pool name:nil];
+            b = [graph maxPooling2DWithSourceTensor:b descriptor:pool name:nil];
+            h /= 2;
+            w /= 2;
+        }
+        for (int conv = 0; conv < block_convs[block]; ++conv) {
+            std::string base = "blocks." + std::to_string(block) + ".convs." + std::to_string(conv);
+            const LpipsTensorBlob *conv_w = weights->tensorNamed(base + ".weight");
+            const LpipsTensorBlob *conv_b = weights->tensorNamed(base + ".bias");
+            if (!conv_w || !conv_b) {
+                fprintf(stderr, "msplat: missing LPIPS tensor %s\n", base.c_str());
+                return nullptr;
+            }
+            a = lpips_conv_relu(graph, a, *conv_w, conv_b);
+            b = lpips_conv_relu(graph, b, *conv_w, conv_b);
+        }
+
+        MPSGraphTensor *na = lpips_norm(graph, a, h, w);
+        MPSGraphTensor *nb = lpips_norm(graph, b, h, w);
+        MPSGraphTensor *diff = [graph subtractionWithPrimaryTensor:na secondaryTensor:nb name:nil];
+        diff = [graph squareWithTensor:diff name:nil];
+
+        const LpipsTensorBlob *head_w = weights->tensorNamed("heads." + std::to_string(block) + ".weight");
+        if (!head_w) {
+            fprintf(stderr, "msplat: missing LPIPS head %d\n", block);
+            return nullptr;
+        }
+        MPSGraphTensor *head = lpips_head(graph, diff, *head_w);
+        MPSGraphTensor *mean = [graph meanOfTensor:head axes:@[@2, @3] name:nil];
+        mean = [graph reshapeTensor:mean withShape:@[@1] name:nil];
+        total = [graph additionWithPrimaryTensor:total secondaryTensor:mean name:nil];
+    }
+
+    cache->loss = total;
+    NSDictionary<MPSGraphTensor*, MPSGraphTensor*> *grads =
+        [graph gradientForPrimaryTensor:cache->loss withTensors:@[cache->input_a] name:nil];
+    cache->grad_a = grads[cache->input_a];
+    if (!cache->grad_a) {
+        fprintf(stderr, "msplat: failed to create LPIPS gradient graph\n");
+        return nullptr;
+    }
+
+    g_lpips_graph = std::move(cache);
+    return g_lpips_graph.get();
+}
+
 // Internal forward pipeline — used by both msplat_render and msplat_train_step.
 // When compute_loss=false, gt/window2d/ssim_weight are ignored.
 static void forward_pipeline(
@@ -479,7 +797,7 @@ static void forward_pipeline(
     int tile_bounds_y = std::get<1>(tile_bounds);
     int num_tiles = tile_bounds_x * tile_bounds_y;
 
-    // --- Overflow check: detect per-tile overflow (> 2048 gaussians in a tile) ---
+    // --- Overflow check: detect per-tile overflow (> kMaxTileElems gaussians in a tile) ---
     // Only warn once to avoid noisy output (per-tile overflow is common at >1M gaussians)
     static bool overflow_warned = false;
     static int iter_count_oc = 0;
@@ -490,8 +808,8 @@ static void forward_pipeline(
         ctx->syncCB();
         int32_t flag_val = *g_tcache.overflow_flag.data<int32_t>();
         if (flag_val > 0) {
-            fprintf(stderr, "WARNING: per-tile overflow (>2048 gaussians in a tile). "
-                    "Some gaussians were dropped from overfull tiles.\n");
+            fprintf(stderr, "WARNING: per-tile overflow (>%d gaussians in a tile). "
+                    "Some gaussians were dropped from overfull tiles.\n", kMaxTileElems);
             overflow_warned = true;
         }
     }
@@ -549,7 +867,7 @@ static void forward_pipeline(
             fprintf(stderr, "  SH degree:      %u (bases: %u)\n", degree, (degree + 1) * (degree + 1));
             fprintf(stderr, "  features_rest:  [%lld x %lld x %lld]\n",
                 (long long)features_rest.size(0), (long long)features_rest.size(1), (long long)features_rest.size(2));
-            fprintf(stderr, "  sort:           tile-local (bitonic, max 2048/tile)\n");
+            fprintf(stderr, "  sort:           tile-local (bitonic, max %d/tile)\n", kMaxTileElems);
             fprintf(stderr, "  sort buffer:    %.1f MB (sort_pairs)\n", (double)capacity * 8.0 / 1e6);
             fprintf(stderr, "  opacities:      [%lld]\n", (long long)opacities.size(0));
             fprintf(stderr, "===========================\n\n");
@@ -788,12 +1106,14 @@ std::tuple<MTensor, float> msplat_train_step(
     MTensor &opacities, MTensor &background,
     int use_mip_splatting,
     MTensor &gt, MTensor &loss_mask, int use_loss_mask,
-    MTensor &window2d, float ssim_weight,
+    MTensor &alpha_target, int use_alpha_loss, float alpha_loss_weight,
+    MTensor &window2d, float ssim_weight, float lpips_loss_weight,
     float loss_inv_n, int features_rest_bases,
     int num_adam_groups,
     MTensor adam_params[], MTensor adam_exp_avg[], MTensor adam_exp_avg_sq[],
     float adam_step_sizes[], float adam_bc2_sqrts[],
     float adam_beta1, float adam_beta2, float adam_eps,
+    int reduce_second_moment,
     MTensor &vis_counts, MTensor &xys_grad_norm, MTensor &max_2d_size,
     float inv_max_dim
 ) {
@@ -802,7 +1122,7 @@ std::tuple<MTensor, float> msplat_train_step(
     int tile_bounds_y = std::get<1>(tile_bounds);
     int num_tiles = tile_bounds_x * tile_bounds_y;
 
-    // --- Overflow check: detect per-tile overflow (> 2048 gaussians in a tile) ---
+    // --- Overflow check: detect per-tile overflow (> kMaxTileElems gaussians in a tile) ---
     // Only warn once to avoid noisy output (per-tile overflow is common at >1M gaussians)
     static bool overflow_warned = false;
     static int iter_count_oc = 0;
@@ -813,8 +1133,8 @@ std::tuple<MTensor, float> msplat_train_step(
         ctx->syncCB();
         int32_t flag_val = *g_tcache.overflow_flag.data<int32_t>();
         if (flag_val > 0) {
-            fprintf(stderr, "WARNING: per-tile overflow (>2048 gaussians in a tile). "
-                    "Some gaussians were dropped from overfull tiles.\n");
+            fprintf(stderr, "WARNING: per-tile overflow (>%d gaussians in a tile). "
+                    "Some gaussians were dropped from overfull tiles.\n", kMaxTileElems);
             overflow_warned = true;
         }
     }
@@ -864,7 +1184,10 @@ std::tuple<MTensor, float> msplat_train_step(
 
     // --- Constants (heap-allocated for Obj-C block capture) ---
     auto loss_img_size = std::make_shared<std::array<uint32_t, 2>>(std::array<uint32_t, 2>{img_width, img_height});
+    uint32_t lpips_numel = img_width * img_height * 3;
     uint32_t use_loss_mask_u32 = use_loss_mask ? 1u : 0u;
+    uint32_t use_alpha_loss_u32 = use_alpha_loss ? 1u : 0u;
+    float alpha_loss_grad_scale = use_alpha_loss ? (alpha_loss_weight / (float)(img_height * img_width)) : 0.0f;
     auto proj_intrins = std::make_shared<std::array<float, 4>>(std::array<float, 4>{fx, fy, cx, cy});
     auto proj_img_size = std::make_shared<std::array<uint32_t, 2>>(std::array<uint32_t, 2>{img_width, img_height});
     auto tile_bounds_arr = std::make_shared<std::array<uint32_t, 4>>(std::array<uint32_t, 4>{
@@ -1031,6 +1354,8 @@ std::tuple<MTensor, float> msplat_train_step(
         ENC_SCALAR(enc, ssim_weight, 4); ENC_SCALAR(enc, loss_inv_n, 5);
         ENC_BUF(enc, loss_intermediates, 6); ENC_BUF(enc, loss_sum, 7);
         ENC_BUF(enc, loss_mask, 8); ENC_SCALAR(enc, use_loss_mask_u32, 9);
+        ENC_BUF(enc, final_Ts, 10); ENC_BUF(enc, alpha_target, 11);
+        ENC_SCALAR(enc, use_alpha_loss_u32, 12); ENC_SCALAR(enc, alpha_loss_weight, 13);
         [enc dispatchThreads:grid threadsPerThreadgroup:tg];
         [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
         // Pass 3: V bwd
@@ -1042,6 +1367,64 @@ std::tuple<MTensor, float> msplat_train_step(
         ENC_BUF(enc, v_rendered, 6);
         ENC_BUF(enc, loss_mask, 7); ENC_SCALAR(enc, use_loss_mask_u32, 8);
         [enc dispatchThreads:grid threadsPerThreadgroup:tg];
+    };
+
+    auto encode_lpips = [&](MPSCommandBuffer *command_buffer) {
+        if (lpips_loss_weight <= 0.0f) return;
+        LpipsGraphCache *lpips = get_lpips_graph((int)img_height, (int)img_width);
+        if (!lpips) std::abort();
+
+        {
+            id<MTLComputeCommandEncoder> enc = [command_buffer computeCommandEncoder];
+            [enc setComputePipelineState:ctx->lpips_prepare_nchw_kernel_cpso];
+            ENC_BUF(enc, out_img, 0); ENC_BUF(enc, gt, 1);
+            [enc setBytes:loss_img_size->data() length:sizeof(*loss_img_size) atIndex:2];
+            ENC_BUF(enc, g_tcache.lpips_rendered_nchw, 3);
+            ENC_BUF(enc, g_tcache.lpips_gt_nchw, 4);
+            [enc dispatchThreads:MTLSizeMake(lpips_numel, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(MIN(ctx->lpips_prepare_nchw_kernel_cpso.maxTotalThreadsPerThreadgroup,
+                                                  (NSUInteger)lpips_numel), 1, 1)];
+            [enc endEncoding];
+        }
+
+        MPSGraphTensorData *inputA = [[[MPSGraphTensorData alloc] initWithMTLBuffer:g_tcache.lpips_rendered_nchw.buffer()
+                                                                              shape:shape4(1, 3, img_height, img_width)
+                                                                           dataType:MPSDataTypeFloat32] autorelease];
+        MPSGraphTensorData *inputB = [[[MPSGraphTensorData alloc] initWithMTLBuffer:g_tcache.lpips_gt_nchw.buffer()
+                                                                              shape:shape4(1, 3, img_height, img_width)
+                                                                           dataType:MPSDataTypeFloat32] autorelease];
+        MPSGraphTensorData *grad = [[[MPSGraphTensorData alloc] initWithMTLBuffer:g_tcache.lpips_grad_nchw.buffer()
+                                                                            shape:shape4(1, 3, img_height, img_width)
+                                                                         dataType:MPSDataTypeFloat32] autorelease];
+        MPSGraphTensorData *lossData = [[[MPSGraphTensorData alloc] initWithMTLBuffer:g_tcache.lpips_loss.buffer()
+                                                                                shape:@[@1]
+                                                                             dataType:MPSDataTypeFloat32] autorelease];
+        NSMutableDictionary *feeds = [NSMutableDictionary dictionaryWithCapacity:2];
+        feeds[lpips->input_a] = inputA;
+        feeds[lpips->input_b] = inputB;
+        NSMutableDictionary *results = [NSMutableDictionary dictionaryWithCapacity:2];
+        results[lpips->grad_a] = grad;
+        results[lpips->loss] = lossData;
+        [lpips->graph encodeToCommandBuffer:command_buffer
+                                      feeds:feeds
+                           targetOperations:nil
+                          resultsDictionary:results
+                        executionDescriptor:nil];
+
+        {
+            id<MTLComputeCommandEncoder> enc = [command_buffer computeCommandEncoder];
+            [enc setComputePipelineState:ctx->lpips_apply_grad_kernel_cpso];
+            ENC_BUF(enc, g_tcache.lpips_grad_nchw, 0);
+            ENC_BUF(enc, g_tcache.lpips_loss, 1);
+            [enc setBytes:loss_img_size->data() length:sizeof(*loss_img_size) atIndex:2];
+            ENC_SCALAR(enc, lpips_loss_weight, 3);
+            ENC_BUF(enc, v_rendered, 4);
+            ENC_BUF(enc, loss_sum, 5);
+            [enc dispatchThreads:MTLSizeMake(lpips_numel, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(MIN(ctx->lpips_apply_grad_kernel_cpso.maxTotalThreadsPerThreadgroup,
+                                                  (NSUInteger)lpips_numel), 1, 1)];
+            [enc endEncoding];
+        }
     };
 
     auto encode_rast_bwd = [&](id<MTLComputeCommandEncoder> enc) {
@@ -1059,6 +1442,8 @@ std::tuple<MTensor, float> msplat_train_step(
             ENC_BUF(enc, final_idx, 10); ENC_BUF(enc, v_rendered, 11);
             ENC_BUF(enc, v_xy, 12); ENC_BUF(enc, v_conic, 13);
             ENC_BUF(enc, v_colors_rast, 14); ENC_BUF(enc, v_opacity, 15);
+            ENC_BUF(enc, alpha_target, 16); ENC_SCALAR(enc, use_alpha_loss_u32, 17);
+            ENC_SCALAR(enc, alpha_loss_grad_scale, 18);
             [enc dispatchThreadgroups:num_tg threadsPerThreadgroup:MTLSizeMake(RAST_BLOCK_X, RAST_BLOCK_Y, 1)];
         } else {
             // Chunked backward
@@ -1091,6 +1476,8 @@ std::tuple<MTensor, float> msplat_train_step(
             ENC_BUF(enc, v_xy, 15); ENC_BUF(enc, v_conic, 16);
             ENC_BUF(enc, v_colors_rast, 17); ENC_BUF(enc, v_opacity, 18);
             ENC_SCALAR(enc, BWD_CHUNK_SIZE, 19); ENC_SCALAR(enc, bwd_K_max, 20);
+            ENC_BUF(enc, alpha_target, 21); ENC_SCALAR(enc, use_alpha_loss_u32, 22);
+            ENC_SCALAR(enc, alpha_loss_grad_scale, 23);
             [enc dispatchThreadgroups:MTLSizeMake(tile_x, tile_y, bwd_K_max) threadsPerThreadgroup:MTLSizeMake(RAST_BLOCK_X, RAST_BLOCK_Y, 1)];
         }
     };
@@ -1100,6 +1487,7 @@ std::tuple<MTensor, float> msplat_train_step(
         float dc_step_size, dc_bc2_sqrt;
         float rest_step_size, rest_bc2_sqrt;
         float beta1, beta2, eps;
+        uint32_t reduce_second_moment;
     };
     auto sh_adam_hp = std::make_shared<SHAdamParams>();
     if (num_adam_groups >= 5) {
@@ -1110,6 +1498,7 @@ std::tuple<MTensor, float> msplat_train_step(
         sh_adam_hp->beta1 = adam_beta1;
         sh_adam_hp->beta2 = adam_beta2;
         sh_adam_hp->eps = adam_eps;
+        sh_adam_hp->reduce_second_moment = reduce_second_moment ? 1u : 0u;
     }
 
     auto encode_proj_sh_bwd_adam = [&](id<MTLComputeCommandEncoder> enc) {
@@ -1258,6 +1647,7 @@ std::tuple<MTensor, float> msplat_train_step(
             enc = make_profiled_encoder(3);
             encode_loss_fwd_bwd(enc);
             [enc endEncoding];
+            encode_lpips(ctx->_currentCB);
 
             // Stage 5: rast_bwd
             enc = make_profiled_encoder(4);
@@ -1334,6 +1724,12 @@ std::tuple<MTensor, float> msplat_train_step(
             // --- Fused loss forward + backward ---
             encode_loss_fwd_bwd(enc);
             [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+            if (lpips_loss_weight > 0.0f) {
+                [enc endEncoding];
+                encode_lpips(ctx->_currentCB);
+                enc = [ctx->getCommandBuffer() computeCommandEncoder];
+                assert(enc && "Failed to create post-LPIPS compute command encoder");
+            }
             encode_rast_bwd(enc);
             [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
             encode_proj_sh_bwd_adam(enc);
@@ -1358,6 +1754,7 @@ std::tuple<MTensor, float> msplat_train_step(
 int msplat_densify(
     int N, int buf_capacity,
     float grad_thresh, float size_thresh, float screen_thresh, int check_screen,
+    float growth_select_fraction, uint32_t growth_seed, int max_splats,
     float cull_alpha_thresh, float cull_scale_thresh, float cull_screen_size, int check_huge,
     MTensor &xys_grad_norm, MTensor &vis_counts, MTensor &max_2d_size,
     float half_max_dim,
@@ -1377,7 +1774,7 @@ int msplat_densify(
     int worst_case = 3 * N;
     assert(worst_case <= buf_capacity && "gpu_densify: 3*N exceeds buf_capacity");
 
-    float log_size_fac = std::log(1.6f);
+    float split_log_scale_factor = std::log(1.0f / std::sqrt(2.0f));
 
     // Strides for each of the 18 buffers (6 params + 12 optimizer states)
     // Order: means(3), scales(3), quats(4), featuresDc(3), featuresRest(fr_stride), opacities(1)
@@ -1402,6 +1799,9 @@ int msplat_densify(
     uint32_t K = (uint32_t)((N + 1023) / 1024);  // threadgroups for prefix sum on N elements
     int check_screen_int = check_screen;
     int check_huge_int = check_huge;
+    float growth_fraction = std::clamp(growth_select_fraction, 0.0f, 1.0f);
+    uint32_t growth_seed_u32 = growth_seed;
+    int max_new_count = std::max(0, std::min(max_splats, worst_case));
 
     id<MTLCommandBuffer> command_buffer = ctx->getCommandBuffer();
     assert(command_buffer && "Failed to retrieve command buffer reference");
@@ -1426,6 +1826,8 @@ int msplat_densify(
             ENC_SCALAR(enc, check_screen_int, 9);
             ENC_BUF(enc, split_flag, 10);
             ENC_BUF(enc, dup_flag, 11);
+            ENC_SCALAR(enc, growth_fraction, 12);
+            ENC_SCALAR(enc, growth_seed_u32, 13);
             [enc dispatchThreads:MTLSizeMake(N, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
         }
         [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
@@ -1470,7 +1872,7 @@ int msplat_densify(
             ENC_BUF(enc, split_flag, 1);
             ENC_BUF(enc, split_prefix, 2);
             ENC_BUF(enc, random_samples, 3);
-            ENC_SCALAR(enc, log_size_fac, 4);
+            ENC_SCALAR(enc, split_log_scale_factor, 4);
             ENC_BUF(enc, means_buf, 5);
             ENC_BUF(enc, scales_buf, 6);
             ENC_BUF(enc, quats_buf, 7);
@@ -1546,6 +1948,7 @@ int msplat_densify(
             ENC_SCALAR(enc, check_huge_int, 10);
             ENC_SCALAR(enc, check_screen_int, 11);
             ENC_BUF(enc, keep_flag, 12);
+            ENC_SCALAR(enc, max_new_count, 13);
             [enc dispatchThreads:MTLSizeMake(worst_case, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
         }
         [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];

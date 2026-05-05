@@ -16,21 +16,40 @@ namespace msplat {
 struct Config {
     int iterations = 30000;
     int shDegree = 3;
-    int shDegreeInterval = 1000;
+    int shDegreeInterval = 1;
     float ssimWeight = 0.2f;
     int numDownscales = 2;
     int resolutionSchedule = 3000;
     int refineEvery = 100;
     int warmupLength = 500;
     int resetAlphaEvery = 30;
-    float densifyGradThresh = 0.0002f;
+    float densifyGradThresh = 0.008f;
     float densifySizeThresh = 0.01f;
     int stopScreenSizeAt = 4000;
     float splitScreenSize = 0.05f;
     bool keepCrs = false;
     bool renderMip = false;
     float downscaleFactor = 1.0f;
-    float bgColor[3] = {0.6130f, 0.0101f, 0.3984f};  // magenta — high contrast for debugging
+    float bgColor[3] = {0.0f, 0.0f, 0.0f};  // Brush-compatible black background
+    float matchAlphaWeight = 0.1f;
+    float backgroundNoiseStrength = 0.1f;
+    float opacityDecay = 0.004f;
+    float scaleDecay = 0.002f;
+    float meanNoiseWeight = 50.0f;
+    int growthStopIter = 15000;
+    int maxSplats = 10000000;
+    float growthSelectFraction = 0.25f;
+    float lrMean = 0.00256f;
+    float lrMeanEnd = 0.0000256f;
+    float lrScale = 0.022f;
+    float lrScaleEnd = 0.022f;
+    float lrRotation = 0.002f;
+    float lrCoeffsDc = 0.012f;
+    float lrCoeffsShScale = 10.0f;
+    float lrOpacity = 0.035f;
+    float lpipsLossWeight = 0.0f;
+    float randomInitSceneScale = 0.0f;  // 0 estimates from cameras when no point cloud exists
+    bool reduceSecondMoment = false;
 };
 
 // ── Stats ───────────────────────────────────────────────────────────────────

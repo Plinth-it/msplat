@@ -15,6 +15,8 @@
 #include <algorithm>
 #include <numeric>
 #include <random>
+#include <array>
+#include <stdexcept>
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -25,25 +27,43 @@ namespace fs = std::filesystem;
 struct TrainingConfig {
     int iterations = 30000;
     int sh_degree = 3;
-    int sh_degree_interval = 1000;
+    int sh_degree_interval = 1;
     float ssim_weight = 0.2f;
     int num_downscales = 2;
     int resolution_schedule = 3000;
     int refine_every = 100;
     int warmup_length = 500;
     int reset_alpha_every = 30;
-    float densify_grad_thresh = 0.0002f;
+    float densify_grad_thresh = 0.008f;
     float densify_size_thresh = 0.01f;
     int stop_screen_size_at = 4000;
+    int growth_stop_iter = 15000;
+    int max_splats = 10000000;
+    float growth_select_fraction = 0.25f;
     float split_screen_size = 0.05f;
+    float match_alpha_weight = 0.1f;
+    float opac_decay = 0.004f;
+    float scale_decay = 0.002f;
+    float mean_noise_weight = 50.0f;
+    float lr_mean = 0.00256f;
+    float lr_mean_end = 0.0000256f;
+    float lr_scale = 0.022f;
+    float lr_scale_end = 0.022f;
+    float lr_rotation = 0.002f;
+    float lr_coeffs_dc = 0.012f;
+    float lr_coeffs_sh_scale = 10.0f;
+    float lr_opac = 0.035f;
+    float lpips_loss_weight = 0.0f;
+    float random_init_scene_scale = 0.0f;
+    bool reduce_second_moment = false;
     bool keep_crs = false;
     bool render_mip = false;
     float downscale_factor = 1.0f;
     std::string output = "splat.ply";
     int save_every = -1;
-    // Magenta default — high contrast against typical scenes, makes
-    // under-reconstructed regions obvious during training.
-    std::vector<float> bg_color = {0.6130f, 0.0101f, 0.3984f};
+    // Brush-compatible default background for transparent image compositing.
+    std::vector<float> bg_color = {0.0f, 0.0f, 0.0f};
+    float background_noise_strength = 0.1f;
 };
 
 // ── TrainingStats ───────────────────────────────────────────────────────────
@@ -122,6 +142,7 @@ public:
     std::vector<size_t> cam_indices;
     size_t cam_iter_pos = 0;
     std::mt19937 rng;
+    std::mt19937 bg_rng;
 
     GaussianTrainer(Dataset &dataset, const TrainingConfig &cfg)
         : config(cfg), dataset_ptr(&dataset)
@@ -134,13 +155,20 @@ public:
             cfg.refine_every, cfg.warmup_length, cfg.reset_alpha_every,
             cfg.densify_grad_thresh, cfg.densify_size_thresh,
             cfg.stop_screen_size_at, cfg.split_screen_size,
-            cfg.iterations, cfg.keep_crs,
+            cfg.iterations, cfg.keep_crs, cfg.growth_stop_iter,
+            cfg.max_splats, cfg.growth_select_fraction,
+            cfg.opac_decay, cfg.scale_decay,
+            cfg.mean_noise_weight,
+            cfg.lr_mean, cfg.lr_mean_end, cfg.lr_scale, cfg.lr_scale_end,
+            cfg.lr_rotation, cfg.lr_coeffs_dc, cfg.lr_coeffs_sh_scale, cfg.lr_opac,
+            cfg.random_init_scene_scale, cfg.reduce_second_moment,
             cfg.bg_color.data(), cfg.render_mip
         );
 
         cam_indices.resize(dataset.train_cams.size());
         std::iota(cam_indices.begin(), cam_indices.end(), 0);
         rng.seed(42);
+        bg_rng.seed(1337);
         shuffle_cameras();
     }
 
@@ -154,27 +182,49 @@ public:
         return cam_indices[cam_iter_pos++];
     }
 
-    TrainingStats step() {
+    std::array<float, 3> sample_background() {
+        std::array<float, 3> bg = {config.bg_color[0], config.bg_color[1], config.bg_color[2]};
+        if (config.background_noise_strength <= 0.0f) {
+            return bg;
+        }
+        std::uniform_real_distribution<float> dist(-config.background_noise_strength,
+                                                    config.background_noise_strength);
+        for (float &channel : bg) channel = std::clamp(channel + dist(bg_rng), 0.0f, 1.0f);
+        return bg;
+    }
+
+    TrainingStats step(int forced_downscale = 0, bool apply_refine = true) {
         current_step++;
         size_t cam_idx = next_camera();
         Camera &cam = dataset_ptr->train_cams[cam_idx];
 
-        int ds = model->getDownscaleFactor(current_step);
-        MTensor &gt = cam.getGPUImage(ds, config.bg_color.data());
+        int ds = forced_downscale > 0 ? forced_downscale : model->getDownscaleFactor(current_step);
+        std::array<float, 3> step_bg = sample_background();
+        MTensor &gt = cam.getGPUImage(ds, step_bg.data());
         MTensor *loss_mask = nullptr;
         MTensor mask;
         float loss_mask_mean = 1.0f;
+        MTensor *alpha_target = nullptr;
+        MTensor alpha;
         if (cam.hasLossMask()) {
             mask = cam.getGPULossMask(ds);
             loss_mask = &mask;
             loss_mask_mean = cam.getLossMaskMean(ds);
+        } else if (cam.imageHasAlpha()) {
+            alpha = cam.getGPULossMask(ds);
+            alpha_target = &alpha;
         }
 
         auto t0 = std::chrono::high_resolution_clock::now();
 
-        model->fullIteration(cam, current_step, gt, loss_mask, loss_mask_mean, config.ssim_weight);
+        model->fullIteration(cam, current_step, gt, loss_mask, loss_mask_mean,
+                             alpha_target, config.match_alpha_weight,
+                             step_bg.data(), config.ssim_weight, config.lpips_loss_weight,
+                             forced_downscale);
         model->schedulersStep(current_step);
-        model->afterTrain(current_step);
+        if (apply_refine) {
+            model->afterTrain(current_step);
+        }
         msplat_commit();
 
         auto t1 = std::chrono::high_resolution_clock::now();
@@ -214,6 +264,7 @@ public:
             MTensor rgb_cpu = rgb.cpu();
             int ds = model->getDownscaleFactor(config.iterations);
             MTensor gt_cpu = cam.getGPUImage(ds, config.bg_color.data()).cpu();
+            quantizeRenderedForEval(rgb_cpu);
 
             sum_psnr += psnr(rgb_cpu, gt_cpu);
             sum_ssim += ssim_eval(rgb_cpu, gt_cpu);
@@ -328,7 +379,13 @@ NB_MODULE(_core, m) {
                 int stop_screen_size_at, float split_screen_size,
                 bool keep_crs, bool render_mip, float downscale_factor,
                 const std::string &output, int save_every,
-                std::vector<float> bg_color) {
+                std::vector<float> bg_color,
+                float match_alpha_weight, float background_noise_strength,
+                float opac_decay, float scale_decay, float mean_noise_weight,
+                int growth_stop_iter, int max_splats, float growth_select_fraction,
+                float lr_mean, float lr_mean_end, float lr_scale, float lr_scale_end,
+                float lr_rotation, float lr_coeffs_dc, float lr_coeffs_sh_scale, float lr_opac,
+                float lpips_loss_weight, float random_init_scene_scale, bool reduce_second_moment) {
             new (cfg) TrainingConfig();
             cfg->iterations = iterations;
             cfg->sh_degree = sh_degree;
@@ -342,7 +399,25 @@ NB_MODULE(_core, m) {
             cfg->densify_grad_thresh = densify_grad_thresh;
             cfg->densify_size_thresh = densify_size_thresh;
             cfg->stop_screen_size_at = stop_screen_size_at;
+            cfg->growth_stop_iter = growth_stop_iter;
+            cfg->max_splats = max_splats;
+            cfg->growth_select_fraction = growth_select_fraction;
             cfg->split_screen_size = split_screen_size;
+            cfg->match_alpha_weight = match_alpha_weight;
+            cfg->opac_decay = opac_decay;
+            cfg->scale_decay = scale_decay;
+            cfg->mean_noise_weight = mean_noise_weight;
+            cfg->lr_mean = lr_mean;
+            cfg->lr_mean_end = lr_mean_end;
+            cfg->lr_scale = lr_scale;
+            cfg->lr_scale_end = lr_scale_end;
+            cfg->lr_rotation = lr_rotation;
+            cfg->lr_coeffs_dc = lr_coeffs_dc;
+            cfg->lr_coeffs_sh_scale = lr_coeffs_sh_scale;
+            cfg->lr_opac = lr_opac;
+            cfg->lpips_loss_weight = lpips_loss_weight;
+            cfg->random_init_scene_scale = random_init_scene_scale;
+            cfg->reduce_second_moment = reduce_second_moment;
             cfg->keep_crs = keep_crs;
             cfg->render_mip = render_mip;
             cfg->downscale_factor = downscale_factor;
@@ -351,17 +426,18 @@ NB_MODULE(_core, m) {
             if (bg_color.size() != 3)
                 throw std::invalid_argument("bg_color must have exactly 3 elements [R, G, B]");
             cfg->bg_color = bg_color;
+            cfg->background_noise_strength = background_noise_strength;
         },
             "iterations"_a = 30000,
             "sh_degree"_a = 3,
-            "sh_degree_interval"_a = 1000,
+            "sh_degree_interval"_a = 1,
             "ssim_weight"_a = 0.2f,
             "num_downscales"_a = 2,
             "resolution_schedule"_a = 3000,
             "refine_every"_a = 100,
             "warmup_length"_a = 500,
             "reset_alpha_every"_a = 30,
-            "densify_grad_thresh"_a = 0.0002f,
+            "densify_grad_thresh"_a = 0.008f,
             "densify_size_thresh"_a = 0.01f,
             "stop_screen_size_at"_a = 4000,
             "split_screen_size"_a = 0.05f,
@@ -370,7 +446,26 @@ NB_MODULE(_core, m) {
             "downscale_factor"_a = 1.0f,
             "output"_a = "splat.ply",
             "save_every"_a = -1,
-            "bg_color"_a = std::vector<float>{0.6130f, 0.0101f, 0.3984f})
+            "bg_color"_a = std::vector<float>{0.0f, 0.0f, 0.0f},
+            "match_alpha_weight"_a = 0.1f,
+            "background_noise_strength"_a = 0.1f,
+            "opac_decay"_a = 0.004f,
+            "scale_decay"_a = 0.002f,
+            "mean_noise_weight"_a = 50.0f,
+            "growth_stop_iter"_a = 15000,
+            "max_splats"_a = 10000000,
+            "growth_select_fraction"_a = 0.25f,
+            "lr_mean"_a = 0.00256f,
+            "lr_mean_end"_a = 0.0000256f,
+            "lr_scale"_a = 0.022f,
+            "lr_scale_end"_a = 0.022f,
+            "lr_rotation"_a = 0.002f,
+            "lr_coeffs_dc"_a = 0.012f,
+            "lr_coeffs_sh_scale"_a = 10.0f,
+            "lr_opac"_a = 0.035f,
+            "lpips_loss_weight"_a = 0.0f,
+            "random_init_scene_scale"_a = 0.0f,
+            "reduce_second_moment"_a = false)
         .def_rw("iterations", &TrainingConfig::iterations)
         .def_rw("sh_degree", &TrainingConfig::sh_degree)
         .def_rw("sh_degree_interval", &TrainingConfig::sh_degree_interval)
@@ -383,14 +478,35 @@ NB_MODULE(_core, m) {
         .def_rw("densify_grad_thresh", &TrainingConfig::densify_grad_thresh)
         .def_rw("densify_size_thresh", &TrainingConfig::densify_size_thresh)
         .def_rw("stop_screen_size_at", &TrainingConfig::stop_screen_size_at)
+        .def_rw("growth_stop_iter", &TrainingConfig::growth_stop_iter)
+        .def_rw("max_splats", &TrainingConfig::max_splats)
+        .def_rw("growth_select_fraction", &TrainingConfig::growth_select_fraction)
         .def_rw("split_screen_size", &TrainingConfig::split_screen_size)
+        .def_rw("match_alpha_weight", &TrainingConfig::match_alpha_weight)
+        .def_rw("opac_decay", &TrainingConfig::opac_decay)
+        .def_rw("scale_decay", &TrainingConfig::scale_decay)
+        .def_rw("mean_noise_weight", &TrainingConfig::mean_noise_weight)
+        .def_rw("lr_mean", &TrainingConfig::lr_mean)
+        .def_rw("lr_mean_end", &TrainingConfig::lr_mean_end)
+        .def_rw("lr_scale", &TrainingConfig::lr_scale)
+        .def_rw("lr_scale_end", &TrainingConfig::lr_scale_end)
+        .def_rw("lr_rotation", &TrainingConfig::lr_rotation)
+        .def_rw("lr_coeffs_dc", &TrainingConfig::lr_coeffs_dc)
+        .def_rw("lr_coeffs_sh_scale", &TrainingConfig::lr_coeffs_sh_scale)
+        .def_rw("lr_opac", &TrainingConfig::lr_opac)
+        .def_rw("lpips_loss_weight", &TrainingConfig::lpips_loss_weight)
+        .def_rw("random_init_scene_scale", &TrainingConfig::random_init_scene_scale,
+            "Scene scale for random init when no point cloud exists. Use 0 to estimate from cameras.")
+        .def_rw("reduce_second_moment", &TrainingConfig::reduce_second_moment,
+            "Use Brush-style scalar second moment for SH Adam updates.")
         .def_rw("keep_crs", &TrainingConfig::keep_crs)
         .def_rw("render_mip", &TrainingConfig::render_mip)
         .def_rw("downscale_factor", &TrainingConfig::downscale_factor)
         .def_rw("output", &TrainingConfig::output)
         .def_rw("save_every", &TrainingConfig::save_every)
         .def_rw("bg_color", &TrainingConfig::bg_color,
-            "Background color as [R, G, B] floats in [0, 1]. Default magenta [0.613, 0.010, 0.398].");
+            "Background color as [R, G, B] floats in [0, 1]. Default black [0, 0, 0].")
+        .def_rw("background_noise_strength", &TrainingConfig::background_noise_strength);
 
     // TrainingStats
     nb::class_<TrainingStats>(m, "TrainingStats",
@@ -425,6 +541,7 @@ NB_MODULE(_core, m) {
         .def(nb::init<Dataset &, const TrainingConfig &>(),
             "dataset"_a, "config"_a, nb::keep_alive<1, 2>())
         .def("step", &GaussianTrainer::step,
+            "forced_downscale"_a = 0, "apply_refine"_a = true,
             "Run a single training iteration. Returns TrainingStats.")
         .def("train", &GaussianTrainer::train,
             "callback"_a, "callback_every"_a = 100,

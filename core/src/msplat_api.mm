@@ -12,6 +12,8 @@
 #include <algorithm>
 #include <numeric>
 #include <random>
+#include <array>
+#include <stdexcept>
 
 namespace msplat {
 
@@ -74,6 +76,7 @@ struct Trainer::Impl {
     std::vector<size_t> camIndices;
     size_t camIterPos = 0;
     std::mt19937 rng{42};
+    std::mt19937 bgRng{1337};
 
     void shuffleCameras() {
         std::shuffle(camIndices.begin(), camIndices.end(), rng);
@@ -83,6 +86,19 @@ struct Trainer::Impl {
     size_t nextCamera() {
         if (camIterPos >= camIndices.size()) shuffleCameras();
         return camIndices[camIterPos++];
+    }
+
+    std::array<float, 3> sampleBackground() {
+        std::array<float, 3> bg = {config.bgColor[0], config.bgColor[1], config.bgColor[2]};
+        if (config.backgroundNoiseStrength <= 0.0f) {
+            return bg;
+        }
+        std::uniform_real_distribution<float> dist(-config.backgroundNoiseStrength,
+                                                    config.backgroundNoiseStrength);
+        for (float& channel : bg) {
+            channel = std::clamp(channel + dist(bgRng), 0.0f, 1.0f);
+        }
+        return bg;
     }
 };
 
@@ -100,7 +116,13 @@ Trainer::Trainer(Dataset& dataset, const Config& config)
         config.refineEvery, config.warmupLength, config.resetAlphaEvery,
         config.densifyGradThresh, config.densifySizeThresh,
         config.stopScreenSizeAt, config.splitScreenSize,
-        config.iterations, config.keepCrs,
+        config.iterations, config.keepCrs, config.growthStopIter,
+        config.maxSplats, config.growthSelectFraction,
+        config.opacityDecay, config.scaleDecay,
+        config.meanNoiseWeight,
+        config.lrMean, config.lrMeanEnd, config.lrScale, config.lrScaleEnd,
+        config.lrRotation, config.lrCoeffsDc, config.lrCoeffsShScale, config.lrOpacity,
+        config.randomInitSceneScale, config.reduceSecondMoment,
         config.bgColor, config.renderMip
     );
 
@@ -117,19 +139,28 @@ Stats Trainer::step() {
     Camera& cam = impl->ds->trainCams[camIdx];
 
     int ds = impl->model->getDownscaleFactor(impl->currentStep);
-    MTensor& gt = cam.getGPUImage(ds, impl->config.bgColor);
+    std::array<float, 3> stepBg = impl->sampleBackground();
+    MTensor& gt = cam.getGPUImage(ds, stepBg.data());
     MTensor *lossMask = nullptr;
     MTensor mask;
     float lossMaskMean = 1.0f;
+    MTensor *alphaTarget = nullptr;
+    MTensor alpha;
     if (cam.hasLossMask()) {
         mask = cam.getGPULossMask(ds);
         lossMask = &mask;
         lossMaskMean = cam.getLossMaskMean(ds);
+    } else if (cam.imageHasAlpha()) {
+        alpha = cam.getGPULossMask(ds);
+        alphaTarget = &alpha;
     }
 
     auto t0 = std::chrono::high_resolution_clock::now();
 
-    impl->model->fullIteration(cam, impl->currentStep, gt, lossMask, lossMaskMean, impl->config.ssimWeight);
+    impl->model->fullIteration(cam, impl->currentStep, gt, lossMask, lossMaskMean,
+                               alphaTarget, impl->config.matchAlphaWeight,
+                               stepBg.data(), impl->config.ssimWeight,
+                               impl->config.lpipsLossWeight);
     impl->model->schedulersStep(impl->currentStep);
     impl->model->afterTrain(impl->currentStep);
     msplat_commit();
@@ -167,6 +198,7 @@ EvalMetrics Trainer::evaluate() {
         MTensor rgbCpu = rgb.cpu();
         int dsf = impl->model->getDownscaleFactor(impl->config.iterations);
         MTensor gtCpu = cam.getGPUImage(dsf, impl->config.bgColor).cpu();
+        quantizeRenderedForEval(rgbCpu);
 
         sumPsnr += psnr(rgbCpu, gtCpu);
         sumSsim += ssim_eval(rgbCpu, gtCpu);
@@ -315,6 +347,25 @@ static msplat::Config configFromC(MsplatConfig c) {
     cfg.densifySizeThresh = c.densifySizeThresh;
     cfg.stopScreenSizeAt = c.stopScreenSizeAt;
     cfg.splitScreenSize = c.splitScreenSize;
+    cfg.growthStopIter = c.growthStopIter;
+    cfg.maxSplats = c.maxSplats;
+    cfg.growthSelectFraction = c.growthSelectFraction;
+    cfg.lrMean = c.lrMean;
+    cfg.lrMeanEnd = c.lrMeanEnd;
+    cfg.lrScale = c.lrScale;
+    cfg.lrScaleEnd = c.lrScaleEnd;
+    cfg.lrRotation = c.lrRotation;
+    cfg.lrCoeffsDc = c.lrCoeffsDc;
+    cfg.lrCoeffsShScale = c.lrCoeffsShScale;
+    cfg.lrOpacity = c.lrOpacity;
+    cfg.lpipsLossWeight = c.lpipsLossWeight;
+    cfg.randomInitSceneScale = c.randomInitSceneScale;
+    cfg.reduceSecondMoment = c.reduceSecondMoment;
+    cfg.matchAlphaWeight = c.matchAlphaWeight;
+    cfg.backgroundNoiseStrength = c.backgroundNoiseStrength;
+    cfg.opacityDecay = c.opacityDecay;
+    cfg.scaleDecay = c.scaleDecay;
+    cfg.meanNoiseWeight = c.meanNoiseWeight;
     cfg.keepCrs = c.keepCrs;
     cfg.renderMip = c.renderMip;
     cfg.downscaleFactor = c.downscaleFactor;

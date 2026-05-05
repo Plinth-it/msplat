@@ -5,6 +5,8 @@
 #include <cmath>
 #include <iostream>
 #include <iomanip>
+#include <array>
+#include <stdexcept>
 #include <CLI/CLI.hpp>
 #include "model.hpp"
 #include "input_data.hpp"
@@ -77,7 +79,7 @@ int main(int argc, char *argv[]) {
     int shDegree = 3;
     app.add_option("--sh-degree", shDegree, "Max spherical harmonics degree")
         ->check(CLI::Range(0, 4));
-    int shDegreeInterval = 1000;
+    int shDegreeInterval = 1;
     app.add_option("--sh-degree-interval", shDegreeInterval, "Increase SH degree every N steps");
     float ssimWeight = 0.2f;
     app.add_option("--ssim-weight", ssimWeight, "SSIM loss weight (0 = L1 only)")
@@ -88,20 +90,78 @@ int main(int argc, char *argv[]) {
     app.add_option("--warmup-length", warmupLength, "Steps before first densification");
     int resetAlphaEvery = 30;
     app.add_option("--reset-alpha-every", resetAlphaEvery, "Reset opacity every N refinements");
-    float densifyGradThresh = 0.0002f;
+    float densifyGradThresh = 0.008f;
     app.add_option("--densify-grad-thresh", densifyGradThresh, "Gradient threshold for split/dup");
     float densifySizeThresh = 0.01f;
     app.add_option("--densify-size-thresh", densifySizeThresh, "Size threshold (dup vs split)");
     int stopScreenSizeAt = 4000;
     app.add_option("--stop-screen-size-at", stopScreenSizeAt, "Stop splitting large gaussians after N steps");
+    int growthStopIter = 15000;
+    app.add_option("--growth-stop-iter", growthStopIter, "Stop splat growth after this iteration")
+        ->check(CLI::Range(0, 1000000));
+    int maxSplats = 10000000;
+    app.add_option("--max-splats", maxSplats, "Maximum splat count allowed during growth")
+        ->check(CLI::Range(1, 100000000));
+    float growthSelectFraction = 0.25f;
+    app.add_option("--growth-select-fraction", growthSelectFraction, "Fraction of high-gradient splats selected for growth")
+        ->check(CLI::Range(0.0f, 1.0f));
     float splitScreenSize = 0.05f;
     app.add_option("--split-screen-size", splitScreenSize, "Screen-space split threshold");
+    float matchAlphaWeight = 0.1f;
+    app.add_option("--match-alpha-weight", matchAlphaWeight, "Alpha L1 loss weight for transparent targets")
+        ->check(CLI::Range(0.0f, 100.0f));
+    float lpipsLossWeight = 0.0f;
+    app.add_option("--lpips-loss-weight", lpipsLossWeight, "LPIPS perceptual loss weight")
+        ->check(CLI::Range(0.0f, 100.0f));
+    float opacityDecay = 0.004f;
+    app.add_option("--opac-decay", opacityDecay, "Opacity shrink applied at refinement steps")
+        ->check(CLI::Range(0.0f, 1.0f));
+    float scaleDecay = 0.002f;
+    app.add_option("--scale-decay", scaleDecay, "Scale shrink applied at refinement steps")
+        ->check(CLI::Range(0.0f, 1.0f));
+    float meanNoiseWeight = 50.0f;
+    app.add_option("--mean-noise-weight", meanNoiseWeight, "Low-opacity mean noise weight during growth")
+        ->check(CLI::Range(0.0f, 100000.0f));
+    float lrMean = 0.00256f;
+    app.add_option("--lr-mean", lrMean, "Initial learning rate for mean parameters")
+        ->check(CLI::PositiveNumber);
+    float lrMeanEnd = 0.0000256f;
+    app.add_option("--lr-mean-end", lrMeanEnd, "Final learning rate for mean parameters")
+        ->check(CLI::PositiveNumber);
+    float lrScale = 0.022f;
+    app.add_option("--lr-scale", lrScale, "Initial learning rate for scale parameters")
+        ->check(CLI::PositiveNumber);
+    float lrScaleEnd = 0.022f;
+    app.add_option("--lr-scale-end", lrScaleEnd, "Final learning rate for scale parameters")
+        ->check(CLI::PositiveNumber);
+    float lrRotation = 0.002f;
+    app.add_option("--lr-rotation", lrRotation, "Learning rate for rotation parameters")
+        ->check(CLI::PositiveNumber);
+    float lrCoeffsDc = 0.012f;
+    app.add_option("--lr-coeffs-dc", lrCoeffsDc, "Learning rate for base SH coefficients")
+        ->check(CLI::PositiveNumber);
+    float lrCoeffsShScale = 10.0f;
+    app.add_option("--lr-coeffs-sh-scale", lrCoeffsShScale, "Divisor for higher-order SH coefficient learning rate")
+        ->check(CLI::PositiveNumber);
+    float lrOpacity = 0.035f;
+    app.add_option("--lr-opac", lrOpacity, "Learning rate for opacity parameters")
+        ->check(CLI::PositiveNumber);
+    float randomInitSceneScale = 0.0f;
+    app.add_option("--random-init-scene-scale", randomInitSceneScale,
+                   "Scene scale for random init when no point cloud exists (0 = estimate from cameras)")
+        ->check(CLI::NonNegativeNumber);
+    bool reduceSecondMoment = false;
+    app.add_flag("--reduce-second-moment", reduceSecondMoment,
+                 "Use Brush-style scalar second moment for SH Adam updates");
+    float backgroundNoiseStrength = 0.1f;
+    app.add_option("--background-noise-strength", backgroundNoiseStrength, "Uniform background jitter strength per training step")
+        ->check(CLI::Range(0.0f, 1.0f));
     bool keepCrs = false;
     app.add_flag("--keep-crs", keepCrs, "Retain input coordinate reference system");
     bool renderMip = false;
     app.add_flag("--render-mip", renderMip, "Use MIP splatting opacity compensation during training and rendering");
-    std::vector<float> bgColor = {0.6130f, 0.0101f, 0.3984f};
-    app.add_option("--bg-color", bgColor, "Background RGB (0-1), default magenta")
+    std::vector<float> bgColor = {0.0f, 0.0f, 0.0f};
+    app.add_option("--bg-color", bgColor, "Background RGB (0-1), default black")
         ->expected(3);
     std::string colmapImagePath;
     app.add_option("--colmap-image-path", colmapImagePath, "Override COLMAP image directory");
@@ -135,12 +195,26 @@ int main(int argc, char *argv[]) {
                      numDownscales, resolutionSchedule, shDegree, shDegreeInterval,
                      refineEvery, warmupLength, resetAlphaEvery, densifyGradThresh,
                      densifySizeThresh, stopScreenSizeAt, splitScreenSize,
-                     numIters, keepCrs,
+                     numIters, keepCrs, growthStopIter,
+                     maxSplats, growthSelectFraction,
+                     opacityDecay, scaleDecay, meanNoiseWeight,
+                     lrMean, lrMeanEnd, lrScale, lrScaleEnd,
+                     lrRotation, lrCoeffsDc, lrCoeffsShScale, lrOpacity,
+                     randomInitSceneScale, reduceSecondMoment,
                      bgColor.data(), renderMip);
 
         std::vector<size_t> camIndices(cams.size());
         std::iota(camIndices.begin(), camIndices.end(), 0);
         InfiniteRandomIterator<size_t> camsIter(camIndices);
+        std::mt19937 bgRng(1337);
+        auto sampleBackground = [&]() {
+            std::array<float, 3> bg = {bgColor[0], bgColor[1], bgColor[2]};
+            if (backgroundNoiseStrength > 0.0f) {
+                std::uniform_real_distribution<float> dist(-backgroundNoiseStrength, backgroundNoiseStrength);
+                for (float &channel : bg) channel = std::clamp(channel + dist(bgRng), 0.0f, 1.0f);
+            }
+            return bg;
+        };
 
         size_t step = 1;
         if (!resume.empty()) step = model.loadPly(resume) + 1;
@@ -161,16 +235,24 @@ int main(int argc, char *argv[]) {
 
             auto iter_start = cpu_now();
             int downscale = model.getDownscaleFactor(step);
-            MTensor gt = cam.getGPUImage(downscale, bgColor.data());
+            std::array<float, 3> stepBg = sampleBackground();
+            MTensor gt = cam.getGPUImage(downscale, stepBg.data());
             MTensor *lossMask = nullptr;
             MTensor mask;
             float lossMaskMean = 1.0f;
+            MTensor *alphaTarget = nullptr;
+            MTensor alpha;
             if (cam.hasLossMask()) {
                 mask = cam.getGPULossMask(downscale);
                 lossMask = &mask;
                 lossMaskMean = cam.getLossMaskMean(downscale);
+            } else if (cam.imageHasAlpha()) {
+                alpha = cam.getGPULossMask(downscale);
+                alphaTarget = &alpha;
             }
-            model.fullIteration(cam, step, gt, lossMask, lossMaskMean, ssimWeight);
+            model.fullIteration(cam, step, gt, lossMask, lossMaskMean,
+                                alphaTarget, matchAlphaWeight, stepBg.data(), ssimWeight,
+                                lpipsLossWeight);
             model.schedulersStep(step);
             model.afterTrain(step);
             msplat_commit();
@@ -305,17 +387,25 @@ int main(int argc, char *argv[]) {
 
                     for (int refineStep = 1; refineStep <= lodRefineSteps; refineStep++) {
                         Camera &cam = cams[camsIter.next()];
-                        MTensor gt = cam.getGPUImage(lodDownscale, bgColor.data());
+                        std::array<float, 3> stepBg = sampleBackground();
+                        MTensor gt = cam.getGPUImage(lodDownscale, stepBg.data());
                         MTensor *lossMask = nullptr;
                         MTensor mask;
                         float lossMaskMean = 1.0f;
+                        MTensor *alphaTarget = nullptr;
+                        MTensor alpha;
                         if (cam.hasLossMask()) {
                             mask = cam.getGPULossMask(lodDownscale);
                             lossMask = &mask;
                             lossMaskMean = cam.getLossMaskMean(lodDownscale);
+                        } else if (cam.imageHasAlpha()) {
+                            alpha = cam.getGPULossMask(lodDownscale);
+                            alphaTarget = &alpha;
                         }
                         int globalStep = numIters + (level - 1) * lodRefineSteps + refineStep;
-                        model.fullIteration(cam, globalStep, gt, lossMask, lossMaskMean, ssimWeight, lodDownscale);
+                        model.fullIteration(cam, globalStep, gt, lossMask, lossMaskMean,
+                                            alphaTarget, matchAlphaWeight, stepBg.data(), ssimWeight,
+                                            lpipsLossWeight, lodDownscale);
                         model.schedulersStep(globalStep);
                         msplat_commit();
                     }
@@ -337,6 +427,7 @@ int main(int argc, char *argv[]) {
                 msplat_gpu_sync();
                 MTensor rgb_cpu = rgb.cpu();
                 MTensor gt_cpu = testCams[i].getGPUImage(model.getDownscaleFactor(numIters), bgColor.data()).cpu();
+                quantizeRenderedForEval(rgb_cpu);
 
                 float p = psnr(rgb_cpu, gt_cpu);
                 float s = ssim_eval(rgb_cpu, gt_cpu);
@@ -359,6 +450,7 @@ int main(int argc, char *argv[]) {
             msplat_gpu_sync();
             MTensor rgb_cpu = rgb.cpu();
             MTensor gt_cpu = valCam->getGPUImage(model.getDownscaleFactor(numIters), bgColor.data()).cpu();
+            quantizeRenderedForEval(rgb_cpu);
 
             std::cout << "\n=== Validation (" << valCam->filePath << ") ===" << std::endl;
             std::cout << "  PSNR:  " << psnr(rgb_cpu, gt_cpu)

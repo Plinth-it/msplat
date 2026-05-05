@@ -925,6 +925,9 @@ kernel void rasterize_backward_kernel(
     device atomic_float* v_conic, // float3
     device atomic_float* v_rgb, // float3
     device atomic_float* v_opacity,
+    constant float* alpha_target,
+    constant uint& use_alpha_loss,
+    constant float& alpha_loss_grad_scale,
     uint3 gp [[thread_position_in_grid]],
     uint3 blockIdx [[threadgroup_position_in_grid]],
     uint tr [[thread_index_in_threadgroup]],
@@ -966,6 +969,10 @@ kernel void rasterize_backward_kernel(
 
     // df/d_out for this pixel
     const float3 v_out = read_packed_float3(v_output, pix_id);
+    const float alpha_loss_grad = (use_alpha_loss != 0 && inside)
+        ? alpha_loss_grad_scale * (((1.0f - T_final) > alpha_target[pix_id]) ? 1.0f
+            : (((1.0f - T_final) < alpha_target[pix_id]) ? -1.0f : 0.0f))
+        : 0.0f;
     // Hoist loop-invariant background load and T_final * bg product
     const float3 bg = {background[0], background[1], background[2]};
     const float3 T_final_bg = T_final * bg;
@@ -1080,6 +1087,7 @@ kernel void rasterize_backward_kernel(
                 const float3 rgb = max(b_rgb + 0.5f, 0.f);
                 // contribution from this pixel + background
                 v_alpha += dot(fma(rgb, T, fma(-buffer, ra, -ra * T_final_bg)), v_out);
+                v_alpha += alpha_loss_grad * T_final * ra;
                 // update the running sum
                 buffer = fma(rgb, fac, buffer);
 
@@ -1678,7 +1686,7 @@ kernel void accumulate_grad_stats_kernel(
 
     float gx = xys_grad[idx * 2];
     float gy = xys_grad[idx * 2 + 1];
-    xys_grad_norm[idx] += sqrt(gx * gx + gy * gy);
+    xys_grad_norm[idx] = max(xys_grad_norm[idx], sqrt(gx * gx + gy * gy));
 
     float r = (float)radii[idx] * inv_max_dim;
     max_2d_size[idx] = max(max_2d_size[idx], r);
@@ -1707,6 +1715,51 @@ kernel void fused_adam_kernel(
 
     exp_avg[tid] = m;
     exp_avg_sq[tid] = v;
+}
+
+inline uint msplat_hash_u32(uint x) {
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+inline float msplat_hash_unit(uint seed, uint idx, uint channel) {
+    uint h = msplat_hash_u32(seed ^ (idx * 0x9e3779b9u) ^ (channel * 0x85ebca6bu));
+    return (((float)(h & 0x00ffffffu)) + 0.5f) * (1.0f / 16777216.0f);
+}
+
+inline float msplat_normal_sample(uint seed, uint idx, uint channel) {
+    float u1 = max(msplat_hash_unit(seed, idx, channel * 2u), 1e-7f);
+    float u2 = msplat_hash_unit(seed, idx, channel * 2u + 1u);
+    return sqrt(-2.0f * log(u1)) * cos(6.283185307179586f * u2);
+}
+
+kernel void apply_mean_noise_kernel(
+    device float* means3d [[buffer(0)]],
+    constant float* opacities [[buffer(1)]],
+    constant int* radii [[buffer(2)]],
+    constant uint& num_points [[buffer(3)]],
+    constant float& noise_scale [[buffer(4)]],
+    constant float& max_noise [[buffer(5)]],
+    constant uint& seed [[buffer(6)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= num_points || radii[idx] <= 0 || noise_scale <= 0.0f) {
+        return;
+    }
+
+    float opacity = 1.0f / (1.0f + exp(-opacities[idx]));
+    float weight = pow(clamp(1.0f - opacity, 0.0f, 1.0f), 150.0f) * noise_scale;
+    if (weight <= 0.0f) {
+        return;
+    }
+
+    means3d[idx * 3 + 0] += clamp(msplat_normal_sample(seed, idx, 0u) * weight, -max_noise, max_noise);
+    means3d[idx * 3 + 1] += clamp(msplat_normal_sample(seed, idx, 1u) * weight, -max_noise, max_noise);
+    means3d[idx * 3 + 2] += clamp(msplat_normal_sample(seed, idx, 2u) * weight, -max_noise, max_noise);
 }
 
 // ===== Fused Projection + SH Kernels =====
@@ -1823,6 +1876,16 @@ inline void adam_update_element(
     eas = v;
 }
 
+inline void adam_update_element_with_v(
+    device float& param, device float& ea, device float& eas,
+    float grad, float v, float step_size, float beta1, float bc2_sqrt, float eps
+) {
+    float m = fma(beta1, ea, (1.0f - beta1) * grad);
+    param -= step_size * m / (sqrt(v) / bc2_sqrt + eps);
+    ea = m;
+    eas = v;
+}
+
 // Packed Adam hyperparameters for SH groups (passed via setBytes)
 struct SHAdamParams {
     float dc_step_size;
@@ -1832,6 +1895,7 @@ struct SHAdamParams {
     float beta1;
     float beta2;
     float eps;
+    uint reduce_second_moment;
 };
 
 kernel void project_and_sh_backward_kernel(
@@ -1944,33 +2008,9 @@ kernel void project_and_sh_backward_kernel(
     uint idx_col = num_channels * idx;
 
     float vc[3] = { v_colors[idx_col], v_colors[idx_col + 1], v_colors[idx_col + 2] };
-
-    // DC: grad = SH_C0 * v_colors[c]
-    for (int c = 0; c < 3; c++) {
-        float g = SH_C0 * vc[c];
-        adam_update_element(features_dc[dc_idx + c], dc_exp_avg[dc_idx + c], dc_exp_avg_sq[dc_idx + c],
-                           g, adam_hp.dc_step_size, adam_hp.beta1, adam_hp.beta2, adam_hp.dc_bc2_sqrt, adam_hp.eps);
-    }
-
-    if (degrees_to_use < 1) return;
-
     float x = viewdir.x, y = viewdir.y, z = viewdir.z;
     float xx = x*x, xy = x*y, xz = x*z, yy = y*y, yz = y*z, zz = z*z;
-
-    // SH degree 1 (3 bases)
     float sh1[3] = { -SH_C1 * y, SH_C1 * z, -SH_C1 * x };
-    for (int b = 0; b < 3; b++) {
-        for (int c = 0; c < 3; c++) {
-            uint i = rest_idx + b * 3 + c;
-            float g = sh1[b] * vc[c];
-            adam_update_element(features_rest[i], rest_exp_avg[i], rest_exp_avg_sq[i],
-                               g, adam_hp.rest_step_size, adam_hp.beta1, adam_hp.beta2, adam_hp.rest_bc2_sqrt, adam_hp.eps);
-        }
-    }
-
-    if (degrees_to_use < 2) return;
-
-    // SH degree 2 (5 bases)
     float sh2[5] = {
         SH_C2[0] * xy,
         SH_C2[1] * yz,
@@ -1978,18 +2018,6 @@ kernel void project_and_sh_backward_kernel(
         SH_C2[3] * xz,
         SH_C2[4] * (xx - yy)
     };
-    for (int b = 0; b < 5; b++) {
-        for (int c = 0; c < 3; c++) {
-            uint i = rest_idx + (3 + b) * 3 + c;
-            float g = sh2[b] * vc[c];
-            adam_update_element(features_rest[i], rest_exp_avg[i], rest_exp_avg_sq[i],
-                               g, adam_hp.rest_step_size, adam_hp.beta1, adam_hp.beta2, adam_hp.rest_bc2_sqrt, adam_hp.eps);
-        }
-    }
-
-    if (degrees_to_use < 3) return;
-
-    // SH degree 3 (7 bases)
     float sh3[7] = {
         SH_C3[0] * y * (3.f * xx - yy),
         SH_C3[1] * xy * z,
@@ -1999,12 +2027,119 @@ kernel void project_and_sh_backward_kernel(
         SH_C3[5] * z * (xx - yy),
         SH_C3[6] * x * (xx - 3.f * yy)
     };
+
+    bool reduce_v = adam_hp.reduce_second_moment != 0;
+    float shared_v = 0.0f;
+    if (reduce_v) {
+        float grad_sq_sum = 0.0f;
+        float old_v_sum = 0.0f;
+        uint total = 0;
+
+        for (int c = 0; c < 3; c++) {
+            float g = SH_C0 * vc[c];
+            grad_sq_sum += g * g;
+            old_v_sum += dc_exp_avg_sq[dc_idx + c];
+            total++;
+        }
+        if (degrees_to_use >= 1) {
+            for (int b = 0; b < 3; b++) {
+                for (int c = 0; c < 3; c++) {
+                    uint i = rest_idx + b * 3 + c;
+                    float g = sh1[b] * vc[c];
+                    grad_sq_sum += g * g;
+                    old_v_sum += rest_exp_avg_sq[i];
+                    total++;
+                }
+            }
+        }
+        if (degrees_to_use >= 2) {
+            for (int b = 0; b < 5; b++) {
+                for (int c = 0; c < 3; c++) {
+                    uint i = rest_idx + (3 + b) * 3 + c;
+                    float g = sh2[b] * vc[c];
+                    grad_sq_sum += g * g;
+                    old_v_sum += rest_exp_avg_sq[i];
+                    total++;
+                }
+            }
+        }
+        if (degrees_to_use >= 3) {
+            for (int b = 0; b < 7; b++) {
+                for (int c = 0; c < 3; c++) {
+                    uint i = rest_idx + (8 + b) * 3 + c;
+                    float g = sh3[b] * vc[c];
+                    grad_sq_sum += g * g;
+                    old_v_sum += rest_exp_avg_sq[i];
+                    total++;
+                }
+            }
+        }
+
+        float inv_total = 1.0f / (float)total;
+        shared_v = fma(adam_hp.beta2, old_v_sum * inv_total,
+                       (1.0f - adam_hp.beta2) * grad_sq_sum * inv_total);
+    }
+
+    // DC: grad = SH_C0 * v_colors[c]
+    for (int c = 0; c < 3; c++) {
+        float g = SH_C0 * vc[c];
+        if (reduce_v) {
+            adam_update_element_with_v(features_dc[dc_idx + c], dc_exp_avg[dc_idx + c], dc_exp_avg_sq[dc_idx + c],
+                                      g, shared_v, adam_hp.dc_step_size, adam_hp.beta1, adam_hp.dc_bc2_sqrt, adam_hp.eps);
+        } else {
+            adam_update_element(features_dc[dc_idx + c], dc_exp_avg[dc_idx + c], dc_exp_avg_sq[dc_idx + c],
+                               g, adam_hp.dc_step_size, adam_hp.beta1, adam_hp.beta2, adam_hp.dc_bc2_sqrt, adam_hp.eps);
+        }
+    }
+
+    if (degrees_to_use < 1) return;
+
+    // SH degree 1 (3 bases)
+    for (int b = 0; b < 3; b++) {
+        for (int c = 0; c < 3; c++) {
+            uint i = rest_idx + b * 3 + c;
+            float g = sh1[b] * vc[c];
+            if (reduce_v) {
+                adam_update_element_with_v(features_rest[i], rest_exp_avg[i], rest_exp_avg_sq[i],
+                                          g, shared_v, adam_hp.rest_step_size, adam_hp.beta1, adam_hp.rest_bc2_sqrt, adam_hp.eps);
+            } else {
+                adam_update_element(features_rest[i], rest_exp_avg[i], rest_exp_avg_sq[i],
+                                   g, adam_hp.rest_step_size, adam_hp.beta1, adam_hp.beta2, adam_hp.rest_bc2_sqrt, adam_hp.eps);
+            }
+        }
+    }
+
+    if (degrees_to_use < 2) return;
+
+    // SH degree 2 (5 bases)
+    for (int b = 0; b < 5; b++) {
+        for (int c = 0; c < 3; c++) {
+            uint i = rest_idx + (3 + b) * 3 + c;
+            float g = sh2[b] * vc[c];
+            if (reduce_v) {
+                adam_update_element_with_v(features_rest[i], rest_exp_avg[i], rest_exp_avg_sq[i],
+                                          g, shared_v, adam_hp.rest_step_size, adam_hp.beta1, adam_hp.rest_bc2_sqrt, adam_hp.eps);
+            } else {
+                adam_update_element(features_rest[i], rest_exp_avg[i], rest_exp_avg_sq[i],
+                                   g, adam_hp.rest_step_size, adam_hp.beta1, adam_hp.beta2, adam_hp.rest_bc2_sqrt, adam_hp.eps);
+            }
+        }
+    }
+
+    if (degrees_to_use < 3) return;
+
+    // SH degree 3 (7 bases)
     for (int b = 0; b < 7; b++) {
         for (int c = 0; c < 3; c++) {
             uint i = rest_idx + (8 + b) * 3 + c;
             float g = sh3[b] * vc[c];
-            adam_update_element(features_rest[i], rest_exp_avg[i], rest_exp_avg_sq[i],
-                               g, adam_hp.rest_step_size, adam_hp.beta1, adam_hp.beta2, adam_hp.rest_bc2_sqrt, adam_hp.eps);
+            if (reduce_v) {
+                adam_update_element_with_v(features_rest[i], rest_exp_avg[i], rest_exp_avg_sq[i],
+                                          g, shared_v, adam_hp.rest_step_size, adam_hp.beta1, adam_hp.rest_bc2_sqrt, adam_hp.eps);
+            } else {
+                adam_update_element(features_rest[i], rest_exp_avg[i], rest_exp_avg_sq[i],
+                                   g, adam_hp.rest_step_size, adam_hp.beta1, adam_hp.beta2, adam_hp.rest_bc2_sqrt, adam_hp.eps);
+            }
         }
     }
 }
@@ -2042,7 +2177,7 @@ kernel void pack_sorted_gaussians_kernel(
 // Eliminates count→prefix_sum→scatter pipeline (3 dispatches + 3 barriers saved).
 
 #define SORT_TG_SIZE 256
-#define MAX_TILE_ELEMS 2048
+#define MAX_TILE_ELEMS 4096
 
 // Scatter each gaussian's intersections directly into pre-allocated per-tile bins.
 // Each tile gets MAX_TILE_ELEMS slots. Per-tile atomics track fill count.
@@ -2522,8 +2657,8 @@ kernel void fused_loss_forward_kernel(
                 }
             }
 
-            float sigma_x_sq = sq_x - mu_x * mu_x;
-            float sigma_y_sq = sq_y - mu_y * mu_y;
+            float sigma_x_sq = max(0.0f, sq_x - mu_x * mu_x);
+            float sigma_y_sq = max(0.0f, sq_y - mu_y * mu_y);
             float sigma_xy = cross_xy - mu_x * mu_y;
 
             uint iidx = (py * W + px) * 15 + c * 5;
@@ -2893,6 +3028,9 @@ kernel void rasterize_backward_chunked_kernel(
     device atomic_float* v_opacity,
     constant uint& chunk_size,
     constant uint& K_max,
+    constant float* alpha_target,
+    constant uint& use_alpha_loss,
+    constant float& alpha_loss_grad_scale,
     uint3 gp [[thread_position_in_grid]],
     uint3 blockIdx [[threadgroup_position_in_grid]],
     uint tr [[thread_index_in_threadgroup]],
@@ -2928,6 +3066,10 @@ kernel void rasterize_backward_chunked_kernel(
     const float3 bg = {background[0], background[1], background[2]};
     const float3 T_final_bg = T_final * bg;
     const float3 v_out = read_packed_float3(v_output, pix_id);
+    const float alpha_loss_grad = (use_alpha_loss != 0 && inside)
+        ? alpha_loss_grad_scale * (((1.0f - T_final) > alpha_target[pix_id]) ? 1.0f
+            : (((1.0f - T_final) < alpha_target[pix_id]) ? -1.0f : 0.0f))
+        : 0.0f;
 
     const int bin_final = inside ? chunk_final_idx[chunk_offset] : -1;
 
@@ -3036,6 +3178,7 @@ kernel void rasterize_backward_chunked_kernel(
 
                 const float3 rgb = max(b_rgb + 0.5f, 0.f);
                 v_alpha += dot(fma(rgb, T, fma(-buffer, ra, -ra * T_final_bg)), v_out);
+                v_alpha += alpha_loss_grad * T_final * ra;
                 buffer = fma(rgb, fac, buffer);
 
                 const float v_sigma = -alpha * v_alpha;
@@ -3229,7 +3372,8 @@ kernel void ssim_v_fwd_kernel(
             float B  = 2.0f * sigma_xy + SSIM_C2;
             float Cd = mu_x * mu_x + mu_y * mu_y + SSIM_C1;
             float D  = sigma_x_sq + sigma_y_sq + SSIM_C2;
-            ssim_sum += (A * B) / (Cd * D);
+            float raw_ssim = (A * B) / (Cd * D);
+            ssim_sum += clamp(raw_ssim, -1.0f, 1.0f);
 
             // L1 for this channel
             float gt_v  = gt[(py * W + px) * 3 + c];
@@ -3267,6 +3411,8 @@ kernel void ssim_fused_v_fwd_h_bwd_kernel(
     constant float& ssim_weight, constant float& inv_n,
     device float* deriv_h_buf, device atomic_float* loss_sum,
     constant float* loss_mask, constant uint& use_loss_mask,
+    constant float* final_Ts, constant float* alpha_target,
+    constant uint& use_alpha_loss, constant float& alpha_loss_weight,
     uint2 gid [[thread_position_in_grid]], uint2 lid [[thread_position_in_threadgroup]],
     uint tr [[thread_index_in_threadgroup]], uint2 tgid [[threadgroup_position_in_grid]],
     uint2 tg_size [[threads_per_threadgroup]]
@@ -3307,20 +3453,23 @@ kernel void ssim_fused_v_fwd_h_bwd_kernel(
                 sq_y += w*tg_hp[tile_y-SSIM_HALF_WIN+k][dx][3];
                 cross_xy += w*tg_hp[tile_y-SSIM_HALF_WIN+k][dx][4];
             }
-            float sigma_x_sq = sq_x - mu_x*mu_x, sigma_y_sq = sq_y - mu_y*mu_y;
+            float sigma_x_sq = max(0.0f, sq_x - mu_x*mu_x);
+            float sigma_y_sq = max(0.0f, sq_y - mu_y*mu_y);
             float sigma_xy = cross_xy - mu_x*mu_y;
             float A = 2.0f*mu_x*mu_y + SSIM_C1, B = 2.0f*sigma_xy + SSIM_C2;
             float Cd = mu_x*mu_x + mu_y*mu_y + SSIM_C1, D = sigma_x_sq + sigma_y_sq + SSIM_C2;
+            float raw_ssim = (A * B) / (Cd * D);
+            bool ssim_clamped = raw_ssim < -1.0f || raw_ssim > 1.0f;
             float iCD = 1.0f / (Cd * D);
             float dmu = 2.0f*B*(mu_x*Cd - A*mu_y) / (Cd*Cd*D);
             float dsyq = -A*B*iCD/D, dsxy = 2.0f*A*iCD;
-            tg_f1[dy][dx] = dmu - 2.0f*mu_y*dsyq - mu_x*dsxy;
-            tg_f2[dy][dx] = 2.0f*dsyq;
-            tg_f3[dy][dx] = dsxy;
+            tg_f1[dy][dx] = ssim_clamped ? 0.0f : dmu - 2.0f*mu_y*dsyq - mu_x*dsxy;
+            tg_f2[dy][dx] = ssim_clamped ? 0.0f : 2.0f*dsyq;
+            tg_f3[dy][dx] = ssim_clamped ? 0.0f : dsxy;
             if (dx >= SSIM_HALF_WIN && dx < SSIM_HALF_WIN + SSIM_TG) {
                 int gpx = base_gx + (int)dx, gpy = base_gy + (int)(dy + SSIM_HALF_WIN);
                 if (gpx >= 0 && gpx < (int)W && gpy >= 0 && gpy < (int)H) {
-                    ssim_sum += (A * B) / (Cd * D);
+                    ssim_sum += clamp(raw_ssim, -1.0f, 1.0f);
                     l1_sum += fabs(gt[(gpy*W+gpx)*3+c] - rendered[(gpy*W+gpx)*3+c]);
                 }
             }
@@ -3343,6 +3492,9 @@ kernel void ssim_fused_v_fwd_h_bwd_kernel(
     float pixel_loss = (px < W && py < H)
         ? mask_weight * (ssim_weight*(1.0f-ssim_sum/3.0f) + (1.0f-ssim_weight)*l1_sum/3.0f)
         : 0.0f;
+    if (use_alpha_loss != 0 && px < W && py < H) {
+        pixel_loss += alpha_loss_weight * fabs(alpha_target[py * W + px] - (1.0f - final_Ts[py * W + px]));
+    }
     threadgroup float tg_sum[256];
     tg_sum[tr] = pixel_loss;
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -3391,23 +3543,27 @@ kernel void ssim_h_bwd_kernel(
                 uint ii = (gy * W + gx) * 15 + c * 5;
                 float mu_x  = intermediates[ii + 0];
                 float mu_y  = intermediates[ii + 1];
-                float sx_sq = intermediates[ii + 2];
-                float sy_sq = intermediates[ii + 3];
+                float sx_sq = max(0.0f, intermediates[ii + 2]);
+                float sy_sq = max(0.0f, intermediates[ii + 3]);
                 float sxy   = intermediates[ii + 4];
 
                 float A   = 2.0f * mu_x * mu_y + SSIM_C1;
                 float B   = 2.0f * sxy + SSIM_C2;
                 float Cd  = mu_x * mu_x + mu_y * mu_y + SSIM_C1;
                 float D   = sx_sq + sy_sq + SSIM_C2;
+                float raw_ssim = (A * B) / (Cd * D);
+                bool ssim_clamped = raw_ssim < -1.0f || raw_ssim > 1.0f;
                 float iCD = 1.0f / (Cd * D);
 
                 float dmu  = 2.0f * B * (mu_x * Cd - A * mu_y) / (Cd * Cd * D);
                 float dsyq = -A * B * iCD / D;
                 float dsxy = 2.0f * A * iCD;
 
-                f1 = dmu - 2.0f * mu_y * dsyq - mu_x * dsxy;
-                f2 = 2.0f * dsyq;
-                f3 = dsxy;
+                if (!ssim_clamped) {
+                    f1 = dmu - 2.0f * mu_y * dsyq - mu_x * dsxy;
+                    f2 = 2.0f * dsyq;
+                    f3 = dsxy;
+                }
             }
             tg_f1[c][sy][sx] = f1;
             tg_f2[c][sy][sx] = f2;
@@ -3508,6 +3664,54 @@ kernel void ssim_v_bwd_kernel(
     }
 }
 
+kernel void lpips_prepare_nchw_kernel(
+    constant float* rendered [[buffer(0)]],
+    constant float* gt [[buffer(1)]],
+    constant uint2& img_size [[buffer(2)]],
+    device float* rendered_nchw [[buffer(3)]],
+    device float* gt_nchw [[buffer(4)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    const uint W = img_size.x;
+    const uint H = img_size.y;
+    const uint pixels = W * H;
+    if (idx >= pixels * 3) return;
+
+    const uint c = idx / pixels;
+    const uint p = idx - c * pixels;
+    const uint y = p / W;
+    const uint x = p - y * W;
+    const uint hwc = (y * W + x) * 3 + c;
+    rendered_nchw[idx] = rendered[hwc];
+    gt_nchw[idx] = gt[hwc];
+}
+
+kernel void lpips_apply_grad_kernel(
+    constant float* grad_nchw [[buffer(0)]],
+    constant float* lpips_loss [[buffer(1)]],
+    constant uint2& img_size [[buffer(2)]],
+    constant float& lpips_weight [[buffer(3)]],
+    device float* v_rendered [[buffer(4)]],
+    device atomic_float* loss_sum [[buffer(5)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    const uint W = img_size.x;
+    const uint H = img_size.y;
+    const uint pixels = W * H;
+    if (idx == 0) {
+        atomic_fetch_add_explicit(loss_sum, lpips_weight * lpips_loss[0] * (float)pixels,
+                                  memory_order_relaxed);
+    }
+    if (idx >= pixels * 3) return;
+
+    const uint c = idx / pixels;
+    const uint p = idx - c * pixels;
+    const uint y = p / W;
+    const uint x = p - y * W;
+    const uint hwc = (y * W + x) * 3 + c;
+    v_rendered[hwc] += lpips_weight * grad_nchw[idx];
+}
+
 // ============================================================
 // GPU Densification Kernels (Phase 3)
 // ============================================================
@@ -3530,24 +3734,29 @@ kernel void densify_classify_kernel(
     constant int& check_screen       [[buffer(9)]],
     device int* split_flag           [[buffer(10)]],
     device int* dup_flag             [[buffer(11)]],
+    constant float& growth_select_fraction [[buffer(12)]],
+    constant uint& growth_seed       [[buffer(13)]],
     uint idx [[thread_position_in_grid]]
 ) {
     if (idx >= (uint)N) return;
     float vc = vis_counts[idx];
     if (vc <= 0.0f) { split_flag[idx] = 0; dup_flag[idx] = 0; return; }
 
-    float avg_grad = (xys_grad_norm[idx] / vc) * half_max_dim;
-    bool high_grad = avg_grad > grad_thresh;
+    float refine_weight = xys_grad_norm[idx] * half_max_dim;
+    bool high_grad = refine_weight > grad_thresh;
 
     float s0 = scales[idx*3], s1 = scales[idx*3+1], s2 = scales[idx*3+2];
     float max_scale = max(max(exp(s0), exp(s1)), exp(s2));
     bool is_large = max_scale > size_thresh;
 
+    bool selected = growth_select_fraction >= 1.0f
+        || msplat_hash_unit(growth_seed, idx, 17u) < growth_select_fraction;
+
     bool do_split = is_large;
     if (check_screen && max_2d_size[idx] > screen_thresh) do_split = true;
-    do_split = do_split && high_grad;
+    do_split = do_split && high_grad && selected;
 
-    bool do_dup = !is_large && high_grad;
+    bool do_dup = !is_large && high_grad && selected;
 
     split_flag[idx] = do_split ? 1 : 0;
     dup_flag[idx]   = do_dup   ? 1 : 0;
@@ -3560,8 +3769,8 @@ kernel void densify_append_split_kernel(
     constant int& N,
     constant int* split_flag         [[buffer(1)]],
     constant int* split_prefix       [[buffer(2)]],  // inclusive prefix sum
-    constant float* random_samples   [[buffer(3)]],  // [2*N, 3] randn
-    constant float& log_size_fac     [[buffer(4)]],  // log(1.6)
+    constant float* random_samples   [[buffer(3)]],  // [N, 3] randn with Brush split std
+    constant float& log_scale_factor [[buffer(4)]],  // log(1/sqrt(2))
     device float* means_buf          [[buffer(5)]],
     device float* scales_buf         [[buffer(6)]],
     device float* quats_buf          [[buffer(7)]],
@@ -3598,36 +3807,42 @@ kernel void densify_append_split_kernel(
     // Parent scale (exp)
     float sx = exp(scales_buf[idx*3]), sy = exp(scales_buf[idx*3+1]), sz = exp(scales_buf[idx*3+2]);
 
-    // For each of 2 children
+    float raw_opacity = opacities_buf[idx];
+    float parent_opacity = 1.0f / (1.0f + exp(-raw_opacity));
+    float new_opacity = 1.0f - sqrt(max(0.0f, 1.0f - parent_opacity));
+    new_opacity = clamp(new_opacity, 1.0f / 255.0f, 1.0f - 1.0f / 255.0f);
+    float new_raw_opacity = log(new_opacity / (1.0f - new_opacity));
+
+    // Mirror split: two children are offset symmetrically around the parent.
     for (int k = 0; k < 2; k++) {
         int child = (k == 0) ? c0 : c1;
-        int rand_idx = ord * 2 + k;
+        float sign = (k == 0) ? -1.0f : 1.0f;
 
         // Scale random sample by parent scale
-        float r0 = random_samples[rand_idx*3]   * sx;
-        float r1 = random_samples[rand_idx*3+1] * sy;
-        float r2 = random_samples[rand_idx*3+2] * sz;
+        float r0 = random_samples[ord*3]   * sx;
+        float r1 = random_samples[ord*3+1] * sy;
+        float r2 = random_samples[ord*3+2] * sz;
 
         // Rotate by parent quaternion: v' = R @ v
         float v0 = (1-2*(qy*qy+qz*qz))*r0 + 2*(qx*qy-qw*qz)*r1 + 2*(qx*qz+qw*qy)*r2;
         float v1 = 2*(qx*qy+qw*qz)*r0 + (1-2*(qx*qx+qz*qz))*r1 + 2*(qy*qz-qw*qx)*r2;
         float v2 = 2*(qx*qz-qw*qy)*r0 + 2*(qy*qz+qw*qx)*r1 + (1-2*(qx*qx+qy*qy))*r2;
 
-        // Child position = parent + rotated offset
-        means_buf[child*3]   = means_buf[idx*3]   + v0;
-        means_buf[child*3+1] = means_buf[idx*3+1] + v1;
-        means_buf[child*3+2] = means_buf[idx*3+2] + v2;
+        // Child position = parent +/- rotated offset
+        means_buf[child*3]   = means_buf[idx*3]   + sign * v0;
+        means_buf[child*3+1] = means_buf[idx*3+1] + sign * v1;
+        means_buf[child*3+2] = means_buf[idx*3+2] + sign * v2;
 
         // Child scale = shrunk parent scale
-        scales_buf[child*3]   = scales_buf[idx*3]   - log_size_fac;
-        scales_buf[child*3+1] = scales_buf[idx*3+1] - log_size_fac;
-        scales_buf[child*3+2] = scales_buf[idx*3+2] - log_size_fac;
+        scales_buf[child*3]   = scales_buf[idx*3]   + log_scale_factor;
+        scales_buf[child*3+1] = scales_buf[idx*3+1] + log_scale_factor;
+        scales_buf[child*3+2] = scales_buf[idx*3+2] + log_scale_factor;
 
-        // Copy parent quaternion, featuresDc, opacities
+        // Copy parent quaternion and color, then split opacity mass across children.
         for (int j = 0; j < 4; j++) quats_buf[child*4+j] = quats_buf[idx*4+j];
         for (int j = 0; j < 3; j++) featuresDc_buf[child*3+j] = featuresDc_buf[idx*3+j];
         for (int j = 0; j < fr_stride; j++) featuresRest_buf[child*fr_stride+j] = featuresRest_buf[idx*fr_stride+j];
-        opacities_buf[child] = opacities_buf[idx];
+        opacities_buf[child] = new_raw_opacity;
 
         // Zero optimizer state for children (strides: 3,3,4,3,fr_stride,1)
         for (int j = 0; j < 3; j++) { adam_ea0[child*3+j] = 0; adam_es0[child*3+j] = 0; }
@@ -3638,10 +3853,7 @@ kernel void densify_append_split_kernel(
         adam_ea5[child] = 0; adam_es5[child] = 0;
     }
 
-    // Shrink parent scale in-place
-    scales_buf[idx*3]   -= log_size_fac;
-    scales_buf[idx*3+1] -= log_size_fac;
-    scales_buf[idx*3+2] -= log_size_fac;
+    // Split parents are culled in densify_cull_classify_kernel.
 }
 
 // Append duplicate copies into backing buffers. One thread per original gaussian.
@@ -3706,34 +3918,35 @@ kernel void densify_cull_classify_kernel(
     constant float* opacities_buf    [[buffer(4)]],
     constant float* scales_buf       [[buffer(5)]],
     constant float* max_2d_size      [[buffer(6)]],  // [N_old] only valid for idx < N_old
-    constant float& cull_alpha_thresh [[buffer(7)]],  // 0.1
-    constant float& cull_scale_thresh [[buffer(8)]],  // 0.5
-    constant float& cull_screen_size  [[buffer(9)]],  // 0.15
+    constant float& cull_alpha_thresh [[buffer(7)]],
+    constant float& cull_scale_thresh [[buffer(8)]],
+    constant float& cull_screen_size  [[buffer(9)]],
     constant int& check_huge         [[buffer(10)]],
     constant int& check_screen       [[buffer(11)]],
     device int* keep_flag            [[buffer(12)]],
+    constant int& max_new_count      [[buffer(13)]],
     uint idx [[thread_position_in_grid]]
 ) {
     int nSplits = (N_old > 0) ? split_prefix[N_old - 1] : 0;
     int nDups   = (N_old > 0) ? dup_prefix[N_old - 1] : 0;
     int N_new = N_old + 2 * nSplits + nDups;
 
+    N_new = min(N_new, max_new_count);
     if (idx >= (uint)N_new) { keep_flag[idx] = 0; return; }
 
     // Sigmoid of opacity
     float opacity_sigmoid = 1.0f / (1.0f + exp(-opacities_buf[idx]));
     bool cull = opacity_sigmoid < cull_alpha_thresh;
 
-    // Split parents are always culled
+    // Split parents are replaced by their two children.
     if (idx < (uint)N_old && split_flag[idx] != 0) cull = true;
 
-    // Huge gaussians
-    if (check_huge) {
-        float s0 = scales_buf[idx*3], s1 = scales_buf[idx*3+1], s2 = scales_buf[idx*3+2];
-        float max_s = max(max(exp(s0), exp(s1)), exp(s2));
-        if (max_s > cull_scale_thresh) cull = true;
-        if (check_screen && idx < (uint)N_old && max_2d_size[idx] > cull_screen_size) cull = true;
-    }
+    (void)scales_buf;
+    (void)max_2d_size;
+    (void)cull_scale_thresh;
+    (void)cull_screen_size;
+    (void)check_huge;
+    (void)check_screen;
 
     keep_flag[idx] = cull ? 0 : 1;
 }

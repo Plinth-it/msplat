@@ -19,11 +19,15 @@ let package = Package(
             name: "Msplat",
             dependencies: ["MsplatCore"],
             path: "Sources/Msplat",
-            resources: [.copy("Resources/default.metallib")],
+            resources: [
+                .copy("Resources/default.metallib"),
+                .copy("Resources/lpips_vgg.bin"),
+            ],
             linkerSettings: [
                 .linkedFramework("Metal"),
                 .linkedFramework("MetalKit"),
                 .linkedFramework("MetalPerformanceShaders"),
+                .linkedFramework("MetalPerformanceShadersGraph"),
                 .linkedFramework("Foundation"),
                 .linkedFramework("ImageIO"),
                 .linkedFramework("CoreGraphics"),

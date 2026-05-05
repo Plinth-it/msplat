@@ -31,27 +31,65 @@ typedef struct {
     bool renderMip;
     float downscaleFactor;
     float bgColor[3];
+    float matchAlphaWeight;
+    float backgroundNoiseStrength;
+    float opacityDecay;
+    float scaleDecay;
+    float meanNoiseWeight;
+    int growthStopIter;
+    int maxSplats;
+    float growthSelectFraction;
+    float lrMean;
+    float lrMeanEnd;
+    float lrScale;
+    float lrScaleEnd;
+    float lrRotation;
+    float lrCoeffsDc;
+    float lrCoeffsShScale;
+    float lrOpacity;
+    float lpipsLossWeight;
+    float randomInitSceneScale;
+    bool reduceSecondMoment;
 } MsplatConfig;
 
 static inline MsplatConfig msplat_default_config(void) {
     MsplatConfig c;
     c.iterations = 30000;
     c.shDegree = 3;
-    c.shDegreeInterval = 1000;
+    c.shDegreeInterval = 1;
     c.ssimWeight = 0.2f;
     c.numDownscales = 2;
     c.resolutionSchedule = 3000;
     c.refineEvery = 100;
     c.warmupLength = 500;
     c.resetAlphaEvery = 30;
-    c.densifyGradThresh = 0.0002f;
+    c.densifyGradThresh = 0.008f;
     c.densifySizeThresh = 0.01f;
     c.stopScreenSizeAt = 4000;
     c.splitScreenSize = 0.05f;
     c.keepCrs = false;
     c.renderMip = false;
     c.downscaleFactor = 1.0f;
-    c.bgColor[0] = 0.6130f; c.bgColor[1] = 0.0101f; c.bgColor[2] = 0.3984f;
+    c.bgColor[0] = 0.0f; c.bgColor[1] = 0.0f; c.bgColor[2] = 0.0f;
+    c.matchAlphaWeight = 0.1f;
+    c.backgroundNoiseStrength = 0.1f;
+    c.opacityDecay = 0.004f;
+    c.scaleDecay = 0.002f;
+    c.meanNoiseWeight = 50.0f;
+    c.growthStopIter = 15000;
+    c.maxSplats = 10000000;
+    c.growthSelectFraction = 0.25f;
+    c.lrMean = 0.00256f;
+    c.lrMeanEnd = 0.0000256f;
+    c.lrScale = 0.022f;
+    c.lrScaleEnd = 0.022f;
+    c.lrRotation = 0.002f;
+    c.lrCoeffsDc = 0.012f;
+    c.lrCoeffsShScale = 10.0f;
+    c.lrOpacity = 0.035f;
+    c.lpipsLossWeight = 0.0f;
+    c.randomInitSceneScale = 0.0f;
+    c.reduceSecondMoment = false;
     return c;
 }
 
@@ -123,6 +161,7 @@ void msplat_dataset_camera_pose(MsplatDataset ds, int cameraIndex, float camToWo
 // ── Lifecycle ───────────────────────────────────────────────────────────────
 
 void msplat_set_metallib_path(const char* path);
+void msplat_set_lpips_weights_path(const char* path);
 void msplat_sync(void);
 void msplat_cleanup(void);
 

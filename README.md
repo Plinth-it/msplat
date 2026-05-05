@@ -49,7 +49,7 @@ Backward:
 
 ### Key design decisions
 
-**Tile-local bitonic sort** instead of global radix sort. Each 16x16 tile independently sorts its gaussians (up to 2048) in threadgroup shared memory. The sort kernel also packs per-gaussian data (xy, opacity, conic, color) inline, eliminating a separate scatter dispatch.
+**Tile-local bitonic sort** instead of global radix sort. Each 16x16 tile independently sorts its gaussians (up to 4096) in threadgroup shared memory. The sort kernel also packs per-gaussian data (xy, opacity, conic, color) inline, eliminating a separate scatter dispatch.
 
 **GPU-resident densification.** The split/clone/cull cycle never leaves the GPU. Classification, growth, and compaction are all compute kernels operating on device buffers. No CPU readback of gradient statistics or gaussian counts.
 
@@ -88,8 +88,30 @@ img = trainer.render_from_pose(pose)  # numpy (H, W, 3) float32
 ```
 
 Supported dataset formats: COLMAP, Nerfstudio, Polycam.
+Evaluation metrics follow Brush's convention by applying an 8-bit roundtrip to
+the rendered RGB before PSNR, SSIM, and L1 are computed.
 Transparent PNG targets are composited against the configured background color
-(`bg_color` / `--bg-color`) during training.
+(`bg_color` / `--bg-color`, default black) during training. Training also uses Brush-style
+background jitter (`background_noise_strength` / `--background-noise-strength`)
+and an alpha L1 term controlled by `match_alpha_weight` / `--match-alpha-weight`.
+Brush's optional LPIPS loss is available through `lpips_loss_weight` /
+`--lpips-loss-weight` using vendored VGG weights and the native Metal backend.
+Brush-style opacity and scale shrink are applied at refinement steps via
+`opac_decay` / `--opac-decay` and `scale_decay` / `--scale-decay`.
+During the growth phase, visible low-opacity splats also receive Brush-style
+mean noise controlled by `mean_noise_weight` / `--mean-noise-weight`.
+Datasets without an input point cloud fall back to Brush-style random splats in
+camera frustums; `random_init_scene_scale` / `--random-init-scene-scale`
+overrides the estimated scene scale.
+Splat growth stops at `growth_stop_iter` / `--growth-stop-iter`, defaulting to
+Brush's 15,000-step cutoff instead of scaling with total iteration count.
+Growth is also bounded by `max_splats` / `--max-splats` and sampled by
+`growth_select_fraction` / `--growth-select-fraction`.
+Brush-style optimizer knobs are exposed as `lr_mean`, `lr_mean_end`,
+`lr_scale`, `lr_scale_end`, `lr_rotation`, `lr_coeffs_dc`,
+`lr_coeffs_sh_scale`, and `lr_opac` with msplat's tuned defaults.
+`reduce_second_moment` / `--reduce-second-moment` matches Brush's scalar
+second-moment Adam math for SH coefficients.
 Nerfstudio `mask_path` frames and sibling `masks/<image-stem>.*` files are used
 as loss masks.
 MIP splatting opacity compensation is available with `render_mip=True` in
@@ -99,7 +121,8 @@ Training can also emit deterministic importance-ranked LOD PLYs with
 budget. LOD ranking uses accumulated training visibility, screen-space
 gradient, and screen-size statistics when available, then falls back to
 static size/opacity. `--lod-refine-steps` decimates the active model and
-optimizes each LOD before export.
+optimizes each LOD before export, using `--lod-image-scale` to match Brush's
+per-level refinement image scaling.
 
 Type stubs (`_core.pyi`) are included for IDE autocompletion.
 

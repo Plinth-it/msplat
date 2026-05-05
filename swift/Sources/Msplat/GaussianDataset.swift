@@ -9,6 +9,9 @@ func ensureMetallibConfigured() {
     if let path = Bundle.module.path(forResource: "default", ofType: "metallib") {
         msplat_set_metallib_path(path)
     }
+    if let path = Bundle.module.path(forResource: "lpips_vgg", ofType: "bin") {
+        msplat_set_lpips_weights_path(path)
+    }
 }
 
 /// A loaded dataset of camera views for training.

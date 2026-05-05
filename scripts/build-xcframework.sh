@@ -30,7 +30,9 @@ xcodebuild -create-xcframework \
 # Copy metallib as Swift package resource
 mkdir -p swift/Sources/Msplat/Resources
 cp build/default.metallib swift/Sources/Msplat/Resources/
+cp core/resources/lpips_vgg.bin swift/Sources/Msplat/Resources/
 
 echo "=== Done ==="
 echo "  MsplatCore.xcframework"
 echo "  swift/Sources/Msplat/Resources/default.metallib"
+echo "  swift/Sources/Msplat/Resources/lpips_vgg.bin"

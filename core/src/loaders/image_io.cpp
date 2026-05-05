@@ -3,6 +3,7 @@
 #include <cstring>
 #include <algorithm>
 #include <stdexcept>
+#include <utility>
 
 #include <CoreGraphics/CoreGraphics.h>
 #include <ImageIO/ImageIO.h>
@@ -97,7 +98,35 @@ void imwriteRGB(const std::string &path, const Image &img) {
     CGImageRelease(cgImage);
 }
 
-// ── Area-based image resize (box filter) ─────────────────────────────────────
+// ── Image resize (triangle filter) ───────────────────────────────────────────
+
+static std::vector<std::vector<std::pair<int, float>>> triangleWeights(int srcLen, int dstLen) {
+    std::vector<std::vector<std::pair<int, float>>> weights(dstLen);
+    float ratio = (float)srcLen / (float)dstLen;
+    float sratio = std::max(ratio, 1.0f);
+    float support = sratio;
+
+    for (int out = 0; out < dstLen; out++) {
+        float input = ((float)out + 0.5f) * ratio;
+        int left = std::clamp((int)std::floor(input - support), 0, srcLen - 1);
+        int right = std::clamp((int)std::ceil(input + support), left + 1, srcLen);
+        input -= 0.5f;
+
+        float sum = 0.0f;
+        auto &row = weights[out];
+        row.reserve(right - left);
+        for (int i = left; i < right; i++) {
+            float w = std::max(1.0f - std::abs(((float)i - input) / sratio), 0.0f);
+            row.push_back({i, w});
+            sum += w;
+        }
+        if (sum > 0.0f) {
+            float inv = 1.0f / sum;
+            for (auto &entry : row) entry.second *= inv;
+        }
+    }
+    return weights;
+}
 
 Image resizeArea(const Image &src, int dstW, int dstH) {
     Image dst;
@@ -107,46 +136,30 @@ Image resizeArea(const Image &src, int dstW, int dstH) {
     bool hasAlpha = src.hasAlpha();
     if (hasAlpha) dst.alpha.resize(dstW * dstH, 0.0f);
 
-    float scaleX = (float)src.width / dstW;
-    float scaleY = (float)src.height / dstH;
+    auto xWeights = triangleWeights(src.width, dstW);
+    auto yWeights = triangleWeights(src.height, dstH);
 
     for (int dy = 0; dy < dstH; dy++) {
-        float srcY0 = dy * scaleY;
-        float srcY1 = (dy + 1) * scaleY;
-
         for (int dx = 0; dx < dstW; dx++) {
-            float srcX0 = dx * scaleX;
-            float srcX1 = (dx + 1) * scaleX;
-
             float sum[3] = {};
             float alphaSum = 0.0f;
-            float totalArea = 0;
 
-            int iy0 = (int)srcY0;
-            int iy1 = std::min((int)std::ceil(srcY1), src.height);
-            int ix0 = (int)srcX0;
-            int ix1 = std::min((int)std::ceil(srcX1), src.width);
-
-            for (int iy = iy0; iy < iy1; iy++) {
-                float wy = std::min((float)(iy + 1), srcY1) - std::max((float)iy, srcY0);
-                for (int ix = ix0; ix < ix1; ix++) {
-                    float wx = std::min((float)(ix + 1), srcX1) - std::max((float)ix, srcX0);
-                    float area = wx * wy;
+            for (const auto &[iy, wy] : yWeights[dy]) {
+                for (const auto &[ix, wx] : xWeights[dx]) {
+                    float w = wx * wy;
                     const float *p = &src.data[(iy * src.width + ix) * 3];
-                    sum[0] += p[0] * area;
-                    sum[1] += p[1] * area;
-                    sum[2] += p[2] * area;
-                    if (hasAlpha) alphaSum += src.alpha[iy * src.width + ix] * area;
-                    totalArea += area;
+                    sum[0] += p[0] * w;
+                    sum[1] += p[1] * w;
+                    sum[2] += p[2] * w;
+                    if (hasAlpha) alphaSum += src.alpha[iy * src.width + ix] * w;
                 }
             }
 
             float *out = &dst.data[(dy * dstW + dx) * 3];
-            float inv = 1.0f / totalArea;
-            out[0] = sum[0] * inv;
-            out[1] = sum[1] * inv;
-            out[2] = sum[2] * inv;
-            if (hasAlpha) dst.alpha[dy * dstW + dx] = alphaSum * inv;
+            out[0] = sum[0];
+            out[1] = sum[1];
+            out[2] = sum[2];
+            if (hasAlpha) dst.alpha[dy * dstW + dx] = alphaSum;
         }
     }
     return dst;

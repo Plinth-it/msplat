@@ -40,7 +40,7 @@ def _write_rgba_png(path, width, height, pixels):
         f.write(png)
 
 
-def _write_minimal_nerfstudio_dataset(root, alpha, mask=False):
+def _write_minimal_nerfstudio_dataset(root, alpha, mask=False, points=True):
     image_path = os.path.join(root, "image.png")
     pixels = bytes([
         255, 0, 0, 255,
@@ -54,20 +54,21 @@ def _write_minimal_nerfstudio_dataset(root, alpha, mask=False):
             0, 0, 0, 255,
         ]))
 
-    with open(os.path.join(root, "points3D.ply"), "w", encoding="utf-8") as f:
-        f.write(
-            "ply\n"
-            "format ascii 1.0\n"
-            "element vertex 1\n"
-            "property float x\n"
-            "property float y\n"
-            "property float z\n"
-            "property uchar red\n"
-            "property uchar green\n"
-            "property uchar blue\n"
-            "end_header\n"
-            "0 0 0 255 255 255\n"
-        )
+    if points:
+        with open(os.path.join(root, "points3D.ply"), "w", encoding="utf-8") as f:
+            f.write(
+                "ply\n"
+                "format ascii 1.0\n"
+                "element vertex 1\n"
+                "property float x\n"
+                "property float y\n"
+                "property float z\n"
+                "property uchar red\n"
+                "property uchar green\n"
+                "property uchar blue\n"
+                "end_header\n"
+                "0 0 0 255 255 255\n"
+            )
 
     transforms = {
         "w": 2,
@@ -161,18 +162,41 @@ def test_training_config_defaults():
     cfg = TrainingConfig()
     assert cfg.iterations == 30000
     assert cfg.sh_degree == 3
+    assert cfg.sh_degree_interval == 1
     assert cfg.ssim_weight == pytest.approx(0.2)
     assert cfg.refine_every == 100
     assert cfg.warmup_length == 500
+    assert cfg.densify_grad_thresh == pytest.approx(0.008)
+    assert cfg.growth_stop_iter == 15000
+    assert cfg.max_splats == 10000000
+    assert cfg.growth_select_fraction == pytest.approx(0.25)
+    assert cfg.match_alpha_weight == pytest.approx(0.1)
+    assert cfg.bg_color == pytest.approx([0.0, 0.0, 0.0])
+    assert cfg.lpips_loss_weight == pytest.approx(0.0)
+    assert cfg.background_noise_strength == pytest.approx(0.1)
+    assert cfg.opac_decay == pytest.approx(0.004)
+    assert cfg.scale_decay == pytest.approx(0.002)
+    assert cfg.mean_noise_weight == pytest.approx(50.0)
+    assert cfg.lr_mean == pytest.approx(0.00256)
+    assert cfg.lr_mean_end == pytest.approx(0.0000256)
+    assert cfg.lr_scale == pytest.approx(0.022)
+    assert cfg.lr_scale_end == pytest.approx(0.022)
+    assert cfg.lr_rotation == pytest.approx(0.002)
+    assert cfg.lr_coeffs_dc == pytest.approx(0.012)
+    assert cfg.lr_coeffs_sh_scale == pytest.approx(10.0)
+    assert cfg.lr_opac == pytest.approx(0.035)
+    assert cfg.random_init_scene_scale == pytest.approx(0.0)
+    assert cfg.reduce_second_moment is False
 
 
 def test_training_config_custom():
     from msplat import TrainingConfig
 
-    cfg = TrainingConfig(iterations=100, sh_degree=1, ssim_weight=0.0)
+    cfg = TrainingConfig(iterations=100, sh_degree=1, ssim_weight=0.0, lpips_loss_weight=0.25)
     assert cfg.iterations == 100
     assert cfg.sh_degree == 1
     assert cfg.ssim_weight == 0.0
+    assert cfg.lpips_loss_weight == pytest.approx(0.25)
 
 
 def test_training_config_mutable():
@@ -259,6 +283,64 @@ def test_train_one_step_with_explicit_mask():
         stats = trainer.step()
 
         assert ds.camera_has_mask(0) is True
+        assert stats.iteration == 1
+        assert stats.splat_count == 1
+
+
+def test_train_one_step_with_transparent_alpha():
+    from msplat import Dataset, GaussianTrainer, TrainingConfig
+
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_minimal_nerfstudio_dataset(tmp, alpha=True)
+        ds = Dataset(tmp)
+        trainer = GaussianTrainer(ds, TrainingConfig(iterations=1, num_downscales=0, ssim_weight=0.0))
+
+        stats = trainer.step()
+
+        assert ds.camera_has_alpha(0) is True
+        assert ds.camera_has_mask(0) is False
+        assert stats.iteration == 1
+        assert stats.splat_count == 1
+
+
+@pytest.mark.skipif(not HAS_GARDEN, reason="garden fixture not available")
+def test_lpips_loss_weight_runs_one_step():
+    from msplat import Dataset, GaussianTrainer, TrainingConfig
+
+    ds = Dataset(GARDEN, downscale_factor=4.0)
+    cfg = TrainingConfig(iterations=1, num_downscales=0, lpips_loss_weight=0.1)
+    trainer = GaussianTrainer(ds, cfg)
+
+    stats = trainer.step()
+
+    assert stats.iteration == 1
+    assert stats.splat_count > 0
+
+
+def test_random_init_when_dataset_has_no_point_cloud():
+    from msplat import Dataset, GaussianTrainer, TrainingConfig
+
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_minimal_nerfstudio_dataset(tmp, alpha=False, points=False)
+        ds = Dataset(tmp)
+        trainer = GaussianTrainer(ds, TrainingConfig(iterations=1, random_init_scene_scale=0.5))
+
+        assert trainer.splat_count == 10000
+
+
+def test_reduce_second_moment_one_step():
+    from msplat import Dataset, GaussianTrainer, TrainingConfig
+
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_minimal_nerfstudio_dataset(tmp, alpha=False)
+        ds = Dataset(tmp)
+        trainer = GaussianTrainer(
+            ds,
+            TrainingConfig(iterations=1, num_downscales=0, reduce_second_moment=True),
+        )
+
+        stats = trainer.step()
+
         assert stats.iteration == 1
         assert stats.splat_count == 1
 
@@ -366,6 +448,7 @@ def test_export_ply():
         assert os.path.exists(path)
         size = os.path.getsize(path)
         assert size > 1000  # non-trivial file
+        assert "comment Generated by msplat at iteration 10" in _ply_comments(path)
     finally:
         os.unlink(path)
 
@@ -417,6 +500,23 @@ def test_decimate_to_lod_can_continue_training():
         assert _ply_vertex_count(path) == 128
     finally:
         os.unlink(path)
+
+
+@pytest.mark.skipif(not HAS_GARDEN, reason="garden dataset not found")
+def test_lod_refine_step_accepts_forced_downscale():
+    """Python LOD refinement can train at a caller-selected image downscale."""
+    from msplat import TrainingConfig, Dataset, GaussianTrainer
+
+    ds = Dataset(GARDEN, downscale_factor=4.0)
+    cfg = TrainingConfig(iterations=2, num_downscales=0)
+    trainer = GaussianTrainer(ds, cfg)
+    trainer.step()
+
+    trainer.decimate_to_lod(128)
+    stats = trainer.step(forced_downscale=2, apply_refine=False)
+
+    assert stats.iteration == 2
+    assert stats.splat_count == 128
 
 
 @pytest.mark.skipif(not HAS_GARDEN, reason="garden dataset not found")
@@ -535,5 +635,41 @@ def test_checkpoint_resume_training():
         assert trainer2.iteration == 100
         assert stats.splat_count > 0
         assert stats.ms_per_step > 0
+    finally:
+        os.unlink(ckpt_path)
+
+
+@pytest.mark.skipif(not HAS_GARDEN, reason="garden dataset not found")
+def test_checkpoint_persists_scale_lr_schedule():
+    """Checkpoint format stores custom scale LR schedule values for resume."""
+    from msplat import TrainingConfig, Dataset, GaussianTrainer
+
+    ds = Dataset(GARDEN, downscale_factor=4.0)
+    cfg = TrainingConfig(
+        iterations=10,
+        num_downscales=0,
+        lr_scale=0.007,
+        lr_scale_end=0.003,
+    )
+    trainer = GaussianTrainer(ds, cfg)
+    trainer.step()
+
+    with tempfile.NamedTemporaryFile(suffix=".msplat", delete=False) as f:
+        ckpt_path = f.name
+
+    try:
+        trainer.save_checkpoint(ckpt_path)
+        with open(ckpt_path, "rb") as f:
+            header = f.read(6 * 4 + 10 * 4)
+
+        magic, version, step, num_active, _, _ = struct.unpack_from("<6I", header, 0)
+        assert magic == 0x4C50534D
+        assert version >= 2
+        assert step == 1
+        assert num_active == trainer.splat_count
+
+        values = struct.unpack_from("<10f", header, 6 * 4)
+        assert values[8] == pytest.approx(0.007)
+        assert values[9] == pytest.approx(0.003)
     finally:
         os.unlink(ckpt_path)

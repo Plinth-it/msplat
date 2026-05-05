@@ -2,6 +2,10 @@
 #include <fstream>
 #include <iostream>
 #include <random>
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <stdexcept>
 #include "model.hpp"
 #include "kdtree_tensor.hpp"
 #include "msplat.hpp"
@@ -10,6 +14,18 @@
 namespace fs = std::filesystem;
 
 static const double C0 = 0.28209479177387814;
+static constexpr float MIN_OPACITY = 1.0f / 255.0f;
+static constexpr int RANDOM_INIT_SPLAT_COUNT = 10000;
+
+struct InitialSplats {
+    std::vector<float> xyz;
+    std::vector<float> featuresDc;
+    std::vector<float> scales;
+    std::vector<float> quats;
+    std::vector<float> opacities;
+    int64_t count = 0;
+    bool random = false;
+};
 
 int numShBases(int degree){
     switch(degree){
@@ -39,81 +55,223 @@ float l1_loss(const MTensor& rendered, const MTensor& gt) {
     return (float)(sum / n);
 }
 
+void quantizeRenderedForEval(MTensor& rendered) {
+    float *r = rendered.data<float>();
+    for (int64_t i = 0; i < rendered.numel(); i++) {
+        r[i] = std::round(std::clamp(r[i], 0.0f, 1.0f) * 255.0f) / 255.0f;
+    }
+}
+
+static float inverseSigmoid(float x) {
+    x = std::clamp(x, 1e-6f, 1.0f - 1e-6f);
+    return std::log(x / (1.0f - x));
+}
+
+static float estimateRandomInitSceneScale(const std::vector<Camera>& cameras) {
+    if (cameras.size() < 2) return 1.0f;
+
+    float totalNearest = 0.0f;
+    for (size_t i = 0; i < cameras.size(); ++i) {
+        float nearest = std::numeric_limits<float>::infinity();
+        const float xi = cameras[i].camToWorld[3];
+        const float yi = cameras[i].camToWorld[7];
+        const float zi = cameras[i].camToWorld[11];
+        for (size_t j = 0; j < cameras.size(); ++j) {
+            if (i == j) continue;
+            const float dx = xi - cameras[j].camToWorld[3];
+            const float dy = yi - cameras[j].camToWorld[7];
+            const float dz = zi - cameras[j].camToWorld[11];
+            nearest = std::min(nearest, std::sqrt(dx * dx + dy * dy + dz * dz));
+        }
+        totalNearest += nearest;
+    }
+
+    return std::max(3.0f * totalNearest / static_cast<float>(cameras.size()), 1.0f);
+}
+
+static InitialSplats createRandomInitialSplats(const std::vector<Camera>& cameras,
+                                               float sceneScaleOverride) {
+    if (cameras.empty()) {
+        throw std::runtime_error("Cannot create random splats without cameras");
+    }
+
+    const int64_t numPoints = RANDOM_INIT_SPLAT_COUNT;
+    const float sceneScale = sceneScaleOverride > 0.0f
+        ? sceneScaleOverride
+        : estimateRandomInitSceneScale(cameras);
+    const float nearDepth = std::max(sceneScale * 0.05f, 1e-6f);
+    const float farDepth = std::max(sceneScale, nearDepth * 1.001f);
+    const float logNear = std::log(nearDepth);
+    const float logFar = std::log(farDepth);
+    const float defaultLogScale = std::log(sceneScale / std::cbrt(static_cast<float>(numPoints)));
+
+    InitialSplats init;
+    init.count = numPoints;
+    init.random = true;
+    init.xyz.resize(numPoints * 3);
+    init.featuresDc.resize(numPoints * 3);
+    init.scales.resize(numPoints * 3, defaultLogScale);
+    init.quats.resize(numPoints * 4);
+    init.opacities.resize(numPoints);
+
+    std::mt19937 rng(42);
+    std::uniform_int_distribution<size_t> camDist(0, cameras.size() - 1);
+    std::uniform_real_distribution<float> unit(0.0f, 1.0f);
+    std::uniform_real_distribution<float> quatDist(-1.0f, 1.0f);
+    std::uniform_real_distribution<float> opacityDist(inverseSigmoid(0.1f), inverseSigmoid(0.25f));
+
+    for (int64_t i = 0; i < numPoints; ++i) {
+        const Camera& cam = cameras[camDist(rng)];
+        const float fovX = 2.0f * std::atan(cam.width / (2.0f * cam.fx));
+        const float fovY = 2.0f * std::atan(cam.height / (2.0f * cam.fy));
+        std::uniform_real_distribution<float> xAngle(-0.5f * fovX, 0.5f * fovX);
+        std::uniform_real_distribution<float> yAngle(-0.5f * fovY, 0.5f * fovY);
+        std::uniform_real_distribution<float> logDepth(logNear, logFar);
+
+        const float depth = std::exp(logDepth(rng));
+        const float localX = std::tan(xAngle(rng)) * depth;
+        const float localY = std::tan(yAngle(rng)) * depth;
+        const float localZ = -depth;
+        const float* m = cam.camToWorld;
+        init.xyz[i*3+0] = m[0] * localX + m[1] * localY + m[2]  * localZ + m[3];
+        init.xyz[i*3+1] = m[4] * localX + m[5] * localY + m[6]  * localZ + m[7];
+        init.xyz[i*3+2] = m[8] * localX + m[9] * localY + m[10] * localZ + m[11];
+
+        for (int c = 0; c < 3; ++c) {
+            init.featuresDc[i*3+c] = (unit(rng) - 0.5f) / C0;
+        }
+
+        float qx = quatDist(rng);
+        float qy = quatDist(rng);
+        float qz = quatDist(rng);
+        float qw = quatDist(rng);
+        float qLen = std::sqrt(qw*qw + qx*qx + qy*qy + qz*qz);
+        qLen = std::max(qLen, 1e-6f);
+        init.quats[i*4+0] = qw / qLen;
+        init.quats[i*4+1] = qx / qLen;
+        init.quats[i*4+2] = qy / qLen;
+        init.quats[i*4+3] = qz / qLen;
+        init.opacities[i] = opacityDist(rng);
+    }
+
+    return init;
+}
+
 // Model constructor
 Model::Model(const InputData &inputData, int numCameras,
     int numDownscales, int resolutionSchedule, int shDegree, int shDegreeInterval,
     int refineEvery, int warmupLength, int resetAlphaEvery, float densifyGradThresh, float densifySizeThresh, int stopScreenSizeAt, float splitScreenSize,
-    int maxSteps, bool keepCrs,
+    int maxSteps, bool keepCrs, int growthStopIter,
+    int maxSplats, float growthSelectFraction,
+    float opacityDecay, float scaleDecay, float meanNoiseWeight,
+    float lrMean, float lrMeanEnd, float lrScale, float lrScaleEnd,
+    float lrRotation, float lrCoeffsDc, float lrCoeffsShScale, float lrOpacity,
+    float randomInitSceneScale, bool reduceSecondMoment,
     const float* bgColor,
     bool renderMip)
     : numCameras(numCameras), numDownscales(numDownscales), resolutionSchedule(resolutionSchedule),
       shDegree(shDegree), shDegreeInterval(shDegreeInterval),
       refineEvery(refineEvery), warmupLength(warmupLength), resetAlphaEvery(resetAlphaEvery),
-      stopSplitAt(maxSteps / 2), densifyGradThresh(densifyGradThresh), densifySizeThresh(densifySizeThresh),
+      stopSplitAt(std::max(growthStopIter, 0)),
+      maxSplats(std::max(maxSplats, 1)),
+      growthSelectFraction(std::clamp(growthSelectFraction, 0.0f, 1.0f)),
+      densifyGradThresh(densifyGradThresh), densifySizeThresh(densifySizeThresh),
       stopScreenSizeAt(stopScreenSizeAt), splitScreenSize(splitScreenSize),
-      maxSteps(maxSteps), keepCrs(keepCrs), renderMip(renderMip) {
+      maxSteps(maxSteps), opacityDecay(opacityDecay), scaleDecay(scaleDecay),
+      meanNoiseWeight(meanNoiseWeight),
+      keepCrs(keepCrs), renderMip(renderMip) {
+    means_lr_init = lrMean;
+    means_lr_final = lrMeanEnd;
+    scales_lr_init = lrScale;
+    scales_lr_final = lrScaleEnd;
+    rotation_lr = lrRotation;
+    coeffs_dc_lr = lrCoeffsDc;
+    coeffs_rest_lr = lrCoeffsDc / std::max(lrCoeffsShScale, 1e-6f);
+    opacity_lr = lrOpacity;
+    this->reduceSecondMoment = reduceSecondMoment;
 
-    int64_t numPoints = inputData.points.count;
+    InitialSplats randomInit;
+    const bool useRandomInit = inputData.points.count == 0;
+    if (useRandomInit) {
+        randomInit = createRandomInitialSplats(inputData.cameras, randomInitSceneScale);
+    }
+
+    int64_t numPoints = useRandomInit ? randomInit.count : inputData.points.count;
     scale = inputData.scale;
     memcpy(translation, inputData.translation, sizeof(translation));
 
     // Means: copy xyz directly to GPU
     means = gpu_empty({numPoints, 3}, DType::Float32);
-    memcpy(means.data_ptr(), inputData.points.xyz.data(), numPoints * 3 * sizeof(float));
+    memcpy(means.data_ptr(),
+           useRandomInit ? randomInit.xyz.data() : inputData.points.xyz.data(),
+           numPoints * 3 * sizeof(float));
 
-    // Scales: KD-tree nearest neighbor distances, log'd, repeated 3x
+    // Scales: KNN for point-cloud init, Brush-style scene-scale default for random init.
     {
-        PointsTensor pt(inputData.points.xyz.data(), numPoints);
-        auto sc = pt.scales();  // vector<float> of length numPoints
         scales = gpu_empty({numPoints, 3}, DType::Float32);
         float *sp = scales.data<float>();
-        for (int64_t i = 0; i < numPoints; i++) {
-            float v = std::log(sc[i]);
-            sp[i*3] = sp[i*3+1] = sp[i*3+2] = v;
+        if (useRandomInit) {
+            memcpy(sp, randomInit.scales.data(), randomInit.scales.size() * sizeof(float));
+        } else {
+            PointsTensor pt(inputData.points.xyz.data(), numPoints);
+            auto sc = pt.scales();  // vector<float> of length numPoints
+            for (int64_t i = 0; i < numPoints; i++) {
+                float v = std::log(sc[i]);
+                sp[i*3] = sp[i*3+1] = sp[i*3+2] = v;
+            }
         }
     }
 
-    // Random quaternions
+    // Point clouds use identity rotations; random init mirrors Brush's random rotations.
     {
-        std::mt19937 rng(42);
-        std::uniform_real_distribution<float> dist(0.0f, 1.0f);
         quats = gpu_empty({numPoints, 4}, DType::Float32);
         float *qp = quats.data<float>();
-        for (int64_t i = 0; i < numPoints; i++) {
-            float u = dist(rng), v = dist(rng), w = dist(rng);
-            qp[i*4+0] = std::sqrt(1-u) * std::sin(2*M_PI*v);
-            qp[i*4+1] = std::sqrt(1-u) * std::cos(2*M_PI*v);
-            qp[i*4+2] = std::sqrt(u) * std::sin(2*M_PI*w);
-            qp[i*4+3] = std::sqrt(u) * std::cos(2*M_PI*w);
+        if (useRandomInit) {
+            memcpy(qp, randomInit.quats.data(), randomInit.quats.size() * sizeof(float));
+        } else {
+            for (int64_t i = 0; i < numPoints; i++) {
+                qp[i*4+0] = 1.0f;
+                qp[i*4+1] = 0.0f;
+                qp[i*4+2] = 0.0f;
+                qp[i*4+3] = 0.0f;
+            }
         }
     }
 
-    // SH features: f_dc = rgb2sh(rgb), f_rest = zeros
+    // SH features: f_dc = rgb2sh(rgb), f_rest = zeros.
     int dimSh = numShBases(shDegree);
     {
         featuresDc = gpu_empty({numPoints, 3}, DType::Float32);
         float *dp = featuresDc.data<float>();
-        const uint8_t *rgb = inputData.points.rgb.data();
-        for (int64_t i = 0; i < numPoints; i++) {
-            for (int c = 0; c < 3; c++)
-                dp[i*3+c] = (float)((rgb[i*3+c] / 255.0 - 0.5) / C0);
+        if (useRandomInit) {
+            memcpy(dp, randomInit.featuresDc.data(), randomInit.featuresDc.size() * sizeof(float));
+        } else {
+            const uint8_t *rgb = inputData.points.rgb.data();
+            for (int64_t i = 0; i < numPoints; i++) {
+                for (int c = 0; c < 3; c++)
+                    dp[i*3+c] = (float)((rgb[i*3+c] / 255.0 - 0.5) / C0);
+            }
         }
         featuresRest = gpu_zeros({numPoints, (int64_t)(dimSh - 1), 3}, DType::Float32);
     }
 
-    // Opacities: logit(0.1) = log(0.1/0.9)
+    // Point-cloud opacity matches Brush point init; random init uses Brush's opacity range.
     {
-        float logit01 = std::log(0.1f / 0.9f);
         opacities = gpu_empty({numPoints, 1}, DType::Float32);
         float *op = opacities.data<float>();
-        for (int64_t i = 0; i < numPoints; i++) op[i] = logit01;
+        if (useRandomInit) {
+            memcpy(op, randomInit.opacities.data(), randomInit.opacities.size() * sizeof(float));
+        } else {
+            for (int64_t i = 0; i < numPoints; i++) op[i] = 0.0f;
+        }
     }
 
-    // Background color — default is magenta (high-contrast against typical scenes,
-    // makes under-reconstructed regions obvious during training)
+    // Brush-compatible default background for transparent image compositing.
     backgroundColor = gpu_empty({3}, DType::Float32);
-    static const float defaultBg[3] = {0.6130f, 0.0101f, 0.3984f};
+    trainingBackgroundColor = gpu_empty({3}, DType::Float32);
+    static const float defaultBg[3] = {0.0f, 0.0f, 0.0f};
     memcpy(backgroundColor.data_ptr(), bgColor ? bgColor : defaultBg, 3 * sizeof(float));
+    memcpy(trainingBackgroundColor.data_ptr(), bgColor ? bgColor : defaultBg, 3 * sizeof(float));
     setupOptimizers();
 }
 
@@ -136,7 +294,10 @@ void Model::setupOptimizers(){
     allocBuf(featuresRest_buf, featuresRest);
     allocBuf(opacities_buf, opacities);
 
-    static constexpr float lr_init[] = {0.00016f, 0.005f, 0.001f, 0.0025f, 0.000125f, 0.05f};
+    const float lr_init[] = {
+        means_lr_init, scales_lr_init, rotation_lr,
+        coeffs_dc_lr, coeffs_rest_lr, opacity_lr
+    };
     MTensor *params[] = {&means, &scales, &quats, &featuresDc, &featuresRest, &opacities};
     for (int g = 0; g < N_ADAM_GROUPS; g++) {
         auto shape = params[g]->shape();
@@ -146,9 +307,6 @@ void Model::setupOptimizers(){
         adam_lr[g] = lr_init[g];
     }
     adam_step_count = 0;
-    means_lr_init = 0.00016f;
-    means_lr_final = 0.0000016f;
-
     densify_split_flag = gpu_zeros({buf_capacity}, DType::Int32);
     densify_dup_flag = gpu_zeros({buf_capacity}, DType::Int32);
     densify_split_prefix = gpu_zeros({buf_capacity}, DType::Int32);
@@ -179,7 +337,13 @@ void Model::releaseOptimizers(){
 
 void Model::schedulersStep(int step){
     float t = std::clamp((float)step / (float)maxSteps, 0.f, 1.f);
-    adam_lr[0] = std::exp(std::log(means_lr_init) * (1.f - t) + std::log(means_lr_final) * t);
+    auto schedule = [t](float start, float end) {
+        start = std::max(start, 1e-12f);
+        end = std::max(end, 1e-12f);
+        return std::exp(std::log(start) * (1.f - t) + std::log(end) * t);
+    };
+    adam_lr[0] = schedule(means_lr_init, means_lr_final);
+    adam_lr[1] = schedule(scales_lr_init, scales_lr_final);
 }
 
 void Model::refreshViews(){
@@ -239,7 +403,9 @@ void Model::afterTrain(int step){
 
     if (step % refineEvery == 0 && step > warmupLength){
         int resetInterval = resetAlphaEvery * refineEvery;
-        bool doDensification = step < stopSplitAt && step % resetInterval > numCameras + refineEvery;
+        bool doDensification = step < stopSplitAt
+            && num_active < maxSplats
+            && step % resetInterval > numCameras + refineEvery;
 
         if (doDensification){
             int numPointsBefore = num_active;
@@ -248,9 +414,10 @@ void Model::afterTrain(int step){
             // Fill random samples for splits (CPU randn, shared memory)
             {
                 std::mt19937 rng(step);
-                std::normal_distribution<float> dist(0.0f, 1.0f);
+                static constexpr float splitOffsetStd = 0.7071067811865476f;
+                std::normal_distribution<float> dist(0.0f, splitOffsetStd);
                 float *p = densify_random_samples.data<float>();
-                for (int64_t i = 0; i < 2 * num_active * 3; i++) p[i] = dist(rng);
+                for (int64_t i = 0; i < num_active * 3; i++) p[i] = dist(rng);
             }
 
             float half_max_dim = 0.5f * static_cast<float>((std::max)(lastWidth, lastHeight));
@@ -261,7 +428,8 @@ void Model::afterTrain(int step){
             int new_count = msplat_densify(
                 num_active, buf_capacity,
                 densifyGradThresh, densifySizeThresh, splitScreenSize, check_screen,
-                0.1f, 0.5f, 0.15f, checkHuge ? 1 : 0,
+                growthSelectFraction, (uint32_t)step, maxSplats,
+                MIN_OPACITY, 0.5f, 0.15f, checkHuge ? 1 : 0,
                 xysGradNorm, visCounts, max2DSize, half_max_dim,
                 means_buf, scales_buf, quats_buf,
                 featuresDc_buf, featuresRest_buf, opacities_buf, fr_stride,
@@ -290,9 +458,39 @@ void Model::afterTrain(int step){
             fprintf(stderr, "Opacity reset at step %d\n", step);
         }
 
+        applyRefineDecay(step);
+
         xysGradNorm.reset();
         visCounts.reset();
         max2DSize.reset();
+    }
+}
+
+void Model::applyRefineDecay(int step) {
+    float trainT = maxSteps > 0 ? (float)step / (float)maxSteps : 1.0f;
+    trainT = std::clamp(trainT, 0.0f, 1.0f);
+    float shrinkStrength = 1.0f - trainT;
+    float minusOpacity = std::max(opacityDecay, 0.0f) * shrinkStrength;
+    float scaleFactor = 1.0f - std::max(scaleDecay, 0.0f) * shrinkStrength;
+    if (minusOpacity <= 0.0f && scaleFactor >= 1.0f) return;
+
+    msplat_gpu_sync();
+
+    if (minusOpacity > 0.0f) {
+        float *op = opacities.data<float>();
+        for (int64_t i = 0; i < opacities.numel(); ++i) {
+            float alpha = 1.0f / (1.0f + std::exp(-op[i]));
+            alpha = std::clamp(alpha - minusOpacity, 1e-12f, 1.0f - 1e-12f);
+            op[i] = std::log(alpha / (1.0f - alpha));
+        }
+    }
+
+    if (scaleFactor < 1.0f) {
+        float logScaleDelta = std::log(std::max(scaleFactor, 1e-12f));
+        float *sc = scales.data<float>();
+        for (int64_t i = 0; i < scales.numel(); ++i) {
+            sc[i] += logScaleDelta;
+        }
     }
 }
 
@@ -379,7 +577,8 @@ int Model::loadPly(const std::string &filename){
 // ── Checkpoint save/load ────────────────────────────────────────────────────
 
 static constexpr uint32_t CKPT_MAGIC = 0x4C50534D; // "MSPL"
-static constexpr uint32_t CKPT_VERSION = 1;
+static constexpr uint32_t CKPT_VERSION = 2;
+static constexpr uint32_t CKPT_MIN_VERSION = 1;
 
 static void writeTensor(std::ofstream &f, MTensor &t) {
     uint32_t ndim = t.ndim();
@@ -427,6 +626,8 @@ void Model::saveCheckpoint(const std::string &filename, int step) {
     f.write(reinterpret_cast<const char*>(adam_lr), sizeof(adam_lr));
     f.write(reinterpret_cast<const char*>(&means_lr_init), sizeof(means_lr_init));
     f.write(reinterpret_cast<const char*>(&means_lr_final), sizeof(means_lr_final));
+    f.write(reinterpret_cast<const char*>(&scales_lr_init), sizeof(scales_lr_init));
+    f.write(reinterpret_cast<const char*>(&scales_lr_final), sizeof(scales_lr_final));
 
     // Gaussian parameters (views — only num_active elements)
     writeTensor(f, means);
@@ -455,7 +656,9 @@ int Model::loadCheckpoint(const std::string &filename) {
     f.read(reinterpret_cast<char*>(&magic), sizeof(magic));
     f.read(reinterpret_cast<char*>(&version), sizeof(version));
     if (magic != CKPT_MAGIC) throw std::runtime_error("Not a valid msplat checkpoint file");
-    if (version != CKPT_VERSION) throw std::runtime_error("Unsupported checkpoint version: " + std::to_string(version));
+    if (version < CKPT_MIN_VERSION || version > CKPT_VERSION) {
+        throw std::runtime_error("Unsupported checkpoint version: " + std::to_string(version));
+    }
 
     // Scalar state
     uint32_t step, numPts, shDeg, adamSteps;
@@ -467,6 +670,10 @@ int Model::loadCheckpoint(const std::string &filename) {
     f.read(reinterpret_cast<char*>(adam_lr), sizeof(adam_lr));
     f.read(reinterpret_cast<char*>(&means_lr_init), sizeof(means_lr_init));
     f.read(reinterpret_cast<char*>(&means_lr_final), sizeof(means_lr_final));
+    if (version >= 2) {
+        f.read(reinterpret_cast<char*>(&scales_lr_init), sizeof(scales_lr_init));
+        f.read(reinterpret_cast<char*>(&scales_lr_final), sizeof(scales_lr_final));
+    }
     adam_step_count = (int)adamSteps;
 
     // Gaussian parameters — read into fresh tensors
@@ -591,7 +798,10 @@ MTensor Model::render(Camera& cam, int step){
         opacities, backgroundColor, renderMip ? 1 : 0);
 }
 
-void Model::fullIteration(Camera& cam, int step, MTensor &gt, MTensor *lossMask, float lossMaskMean, float ssimWeight, int forcedDownscale){
+void Model::fullIteration(Camera& cam, int step, MTensor &gt, MTensor *lossMask, float lossMaskMean,
+                          MTensor *alphaTarget, float matchAlphaWeight,
+                          const float *stepBgColor, float ssimWeight, float lpipsLossWeight,
+                          int forcedDownscale){
     auto s = prepareCam(cam, step, forcedDownscale);
     lastHeight = s.height; lastWidth = s.width;
     int numPoints = means.size(0);
@@ -629,21 +839,35 @@ void Model::fullIteration(Camera& cam, int step, MTensor &gt, MTensor *lossMask,
     float effectiveMaskMean = (lossMask && lossMaskMean > 1e-6f) ? lossMaskMean : 1.0f;
     float lossInvN = 1.0f / ((float)(s.height * s.width * 3) * effectiveMaskMean);
     MTensor &lossMaskTensor = lossMask ? *lossMask : gt;
+    bool useAlphaLoss = alphaTarget && matchAlphaWeight > 0.0f;
+    MTensor &alphaTargetTensor = alphaTarget ? *alphaTarget : gt;
+    if (stepBgColor) {
+        memcpy(trainingBackgroundColor.data_ptr(), stepBgColor, 3 * sizeof(float));
+    }
 
     auto [r, loss] = msplat_train_step(
         numPoints, means, scales, 1.0f,
         quats, cam.cachedViewMat, cam.cachedProjViewMat, s.fx, s.fy, s.cx, s.cy,
         s.height, s.width, s.tileBounds, 0.01f,
         s.degree, s.degreesToUse, s.cam_pos, featuresDc, featuresRest,
-        opacities, backgroundColor, renderMip ? 1 : 0,
+        opacities, trainingBackgroundColor, renderMip ? 1 : 0,
         gt, lossMaskTensor, lossMask ? 1 : 0,
-        window2d, ssimWeight,
+        alphaTargetTensor, useAlphaLoss ? 1 : 0, matchAlphaWeight,
+        window2d, ssimWeight, lpipsLossWeight,
         lossInvN, (int)featuresRest.size(-2),
         N_ADAM_GROUPS,
         adam_p, adam_ea, adam_eas,
         adam_ss, adam_bc2s,
         adam_beta1, adam_beta2, adam_eps,
+        reduceSecondMoment ? 1 : 0,
         visCounts, xysGradNorm, max2DSize, invMaxDim);
+
+    if (step < stopSplitAt && meanNoiseWeight > 0.0f) {
+        constexpr float maxMeanNoise = 1.0f;
+        msplat_apply_mean_noise(numPoints, means, opacities, r,
+                                adam_lr[0] * meanNoiseWeight,
+                                maxMeanNoise, (uint32_t)step);
+    }
 
     radii = r;
 }

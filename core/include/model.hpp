@@ -8,12 +8,21 @@
 int numShBases(int degree);
 float psnr(const MTensor& rendered, const MTensor& gt);
 float l1_loss(const MTensor& rendered, const MTensor& gt);
+void quantizeRenderedForEval(MTensor& rendered);
 
 struct Model{
   Model(const InputData &inputData, int numCameras,
         int numDownscales, int resolutionSchedule, int shDegree, int shDegreeInterval,
         int refineEvery, int warmupLength, int resetAlphaEvery, float densifyGradThresh, float densifySizeThresh, int stopScreenSizeAt, float splitScreenSize,
-        int maxSteps, bool keepCrs,
+        int maxSteps, bool keepCrs, int growthStopIter = 15000,
+        int maxSplats = 10000000, float growthSelectFraction = 0.25f,
+        float opacityDecay = 0.004f, float scaleDecay = 0.002f,
+        float meanNoiseWeight = 50.0f,
+        float lrMean = 0.00256f, float lrMeanEnd = 0.0000256f,
+        float lrScale = 0.022f, float lrScaleEnd = 0.022f,
+        float lrRotation = 0.002f, float lrCoeffsDc = 0.012f,
+        float lrCoeffsShScale = 10.0f, float lrOpacity = 0.035f,
+        float randomInitSceneScale = 0.0f, bool reduceSecondMoment = false,
         const float* bgColor = nullptr,
         bool renderMip = false);
 
@@ -25,6 +34,7 @@ struct Model{
   void schedulersStep(int step);
   int getDownscaleFactor(int step);
   void afterTrain(int step);
+  void applyRefineDecay(int step);
   void save(const std::string &filename, int step);
   void savePly(const std::string &filename, int step);
   void saveLodPly(const std::string &filename, int step, int64_t targetCount);
@@ -41,7 +51,9 @@ struct Model{
   };
   CamSetup prepareCam(Camera& cam, int step, int forcedDownscale = 0);
   void fullIteration(Camera& cam, int step, MTensor &gt, MTensor *lossMask, float lossMaskMean,
-                     float ssimWeight, int forcedDownscale = 0);
+                     MTensor *alphaTarget, float matchAlphaWeight,
+                     const float *stepBgColor, float ssimWeight, float lpipsLossWeight,
+                     int forcedDownscale = 0);
   MTensor render(Camera& cam, int step);
 
   MTensor means;
@@ -58,6 +70,9 @@ struct Model{
   float adam_lr[N_ADAM_GROUPS] = {};
   float adam_beta1 = 0.9f, adam_beta2 = 0.999f, adam_eps = 1e-8f;
   float means_lr_init = 0, means_lr_final = 0;
+  float scales_lr_init = 0, scales_lr_final = 0;
+  float rotation_lr = 0, coeffs_dc_lr = 0, coeffs_rest_lr = 0, opacity_lr = 0;
+  bool reduceSecondMoment = false;
 
   MTensor means_buf, scales_buf, quats_buf, featuresDc_buf, featuresRest_buf, opacities_buf;
   MTensor adam_exp_avg_buf[N_ADAM_GROUPS], adam_exp_avg_sq_buf[N_ADAM_GROUPS];
@@ -81,6 +96,7 @@ struct Model{
   MTensor max2DSize;
 
   MTensor backgroundColor;
+  MTensor trainingBackgroundColor;
   MTensor window2d;  // SSIM window (11,11) f32
 
   int numCameras;
@@ -92,11 +108,16 @@ struct Model{
   int warmupLength;
   int resetAlphaEvery;
   int stopSplitAt;
+  int maxSplats;
+  float growthSelectFraction;
   float densifyGradThresh;
   float densifySizeThresh;
   int stopScreenSizeAt;
   float splitScreenSize;
   int maxSteps;
+  float opacityDecay;
+  float scaleDecay;
+  float meanNoiseWeight;
   bool keepCrs;
   bool renderMip;
 

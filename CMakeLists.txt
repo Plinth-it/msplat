@@ -48,6 +48,7 @@ find_library(FOUNDATION_LIBRARY Foundation REQUIRED)
 find_library(METAL_FRAMEWORK Metal REQUIRED)
 find_library(METALKIT_FRAMEWORK MetalKit REQUIRED)
 find_library(MPS_FRAMEWORK MetalPerformanceShaders REQUIRED)
+find_library(MPSGRAPH_FRAMEWORK MetalPerformanceShadersGraph REQUIRED)
 
 find_library(IMAGEIO_FRAMEWORK ImageIO REQUIRED)
 find_library(COREGRAPHICS_FRAMEWORK CoreGraphics REQUIRED)
@@ -56,6 +57,8 @@ find_library(COREGRAPHICS_FRAMEWORK CoreGraphics REQUIRED)
 
 set(METAL_SOURCE ${CMAKE_SOURCE_DIR}/core/metal/msplat_metal.metal)
 configure_file(${METAL_SOURCE} ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/msplat_metal.metal COPYONLY)
+configure_file(${CMAKE_SOURCE_DIR}/core/resources/lpips_vgg.bin
+               ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/lpips_vgg.bin COPYONLY)
 add_custom_command(
     OUTPUT ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/default.metallib
     COMMAND xcrun -sdk macosx metal -O3 -c
@@ -96,6 +99,7 @@ target_link_libraries(msplat_core PUBLIC
     ${METAL_FRAMEWORK}
     ${METALKIT_FRAMEWORK}
     ${MPS_FRAMEWORK}
+    ${MPSGRAPH_FRAMEWORK}
     ${IMAGEIO_FRAMEWORK}
     ${COREGRAPHICS_FRAMEWORK}
     nlohmann_json::nlohmann_json
@@ -132,4 +136,5 @@ if(MSPLAT_BUILD_PYTHON)
 
     install(TARGETS _core LIBRARY DESTINATION msplat)
     install(FILES ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/default.metallib DESTINATION msplat)
+    install(FILES ${CMAKE_SOURCE_DIR}/core/resources/lpips_vgg.bin DESTINATION msplat)
 endif()

@@ -49,7 +49,7 @@ struct Camera {
     MTensor& getGPULossMask(int downscaleFactor);
     float getLossMaskMean(int downscaleFactor);
     bool imageHasAlpha() const { return image.hasAlpha(); }
-    bool hasLossMask() const { return image.hasAlpha() || !maskImage.empty(); }
+    bool hasLossMask() const { return !maskImage.empty(); } // Alpha is composited, not masked.
     bool hasExplicitMask() const { return !maskImage.empty(); }
     bool hasDistortion() const { return k1 != 0 || k2 != 0 || k3 != 0 || p1 != 0 || p2 != 0; }
 };

@@ -18,7 +18,7 @@ Points readColmapPoints(const std::string &path);
 
 // Image I/O
 Image imreadRGB(const std::string &path);       // returns float32 [0,1] directly
-Image resizeArea(const Image &src, int dstW, int dstH);  // box-filter downscale
+Image resizeArea(const Image &src, int dstW, int dstH);  // triangle-filter resize
 void imwriteRGB(const std::string &path, const Image &img);  // save as PNG
 
 // Undistortion (Brown-Conrady model, alpha=0 crop)

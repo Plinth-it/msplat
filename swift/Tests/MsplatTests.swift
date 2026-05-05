@@ -9,7 +9,15 @@ final class MsplatTests: XCTestCase {
         let config = TrainingConfig()
         XCTAssertEqual(config.iterations, 30_000)
         XCTAssertEqual(config.shDegree, 3)
+        XCTAssertEqual(config.shDegreeInterval, 1)
         XCTAssertEqual(config.ssimWeight, 0.2, accuracy: 0.001)
+        XCTAssertEqual(config.densifyGradThresh, 0.008, accuracy: 0.00001)
+        XCTAssertEqual(config.bgColor.0, 0.0, accuracy: 0.00001)
+        XCTAssertEqual(config.bgColor.1, 0.0, accuracy: 0.00001)
+        XCTAssertEqual(config.bgColor.2, 0.0, accuracy: 0.00001)
+        XCTAssertEqual(config.lpipsLossWeight, 0.0, accuracy: 0.001)
+        XCTAssertEqual(config.randomInitSceneScale, 0.0, accuracy: 0.001)
+        XCTAssertFalse(config.reduceSecondMoment)
     }
 
     func testLoadDataset() throws {

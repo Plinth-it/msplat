@@ -16,27 +16,46 @@ class TrainingConfig:
     densify_grad_thresh: float
     densify_size_thresh: float
     stop_screen_size_at: int
+    growth_stop_iter: int
+    max_splats: int
+    growth_select_fraction: float
     split_screen_size: float
+    match_alpha_weight: float
+    lpips_loss_weight: float
+    opac_decay: float
+    scale_decay: float
+    mean_noise_weight: float
+    lr_mean: float
+    lr_mean_end: float
+    lr_scale: float
+    lr_scale_end: float
+    lr_rotation: float
+    lr_coeffs_dc: float
+    lr_coeffs_sh_scale: float
+    lr_opac: float
+    random_init_scene_scale: float
+    reduce_second_moment: bool
     keep_crs: bool
     render_mip: bool
     downscale_factor: float
     output: str
     save_every: int
     bg_color: list[float]
-    """Background color as [R, G, B] floats in [0, 1]. Default magenta [0.613, 0.010, 0.398]."""
+    """Background color as [R, G, B] floats in [0, 1]. Default black [0, 0, 0]."""
+    background_noise_strength: float
 
     def __init__(
         self,
         iterations: int = 30000,
         sh_degree: int = 3,
-        sh_degree_interval: int = 1000,
+        sh_degree_interval: int = 1,
         ssim_weight: float = 0.2,
         num_downscales: int = 2,
         resolution_schedule: int = 3000,
         refine_every: int = 100,
         warmup_length: int = 500,
         reset_alpha_every: int = 30,
-        densify_grad_thresh: float = 0.0002,
+        densify_grad_thresh: float = 0.008,
         densify_size_thresh: float = 0.01,
         stop_screen_size_at: int = 4000,
         split_screen_size: float = 0.05,
@@ -46,6 +65,25 @@ class TrainingConfig:
         output: str = "splat.ply",
         save_every: int = -1,
         bg_color: list[float] = ...,
+        match_alpha_weight: float = 0.1,
+        background_noise_strength: float = 0.1,
+        opac_decay: float = 0.004,
+        scale_decay: float = 0.002,
+        mean_noise_weight: float = 50.0,
+        growth_stop_iter: int = 15000,
+        max_splats: int = 10000000,
+        growth_select_fraction: float = 0.25,
+        lr_mean: float = 0.00256,
+        lr_mean_end: float = 0.0000256,
+        lr_scale: float = 0.022,
+        lr_scale_end: float = 0.022,
+        lr_rotation: float = 0.002,
+        lr_coeffs_dc: float = 0.012,
+        lr_coeffs_sh_scale: float = 10.0,
+        lr_opac: float = 0.035,
+        lpips_loss_weight: float = 0.0,
+        random_init_scene_scale: float = 0.0,
+        reduce_second_moment: bool = False,
     ) -> None: ...
 
 class TrainingStats:
@@ -104,7 +142,11 @@ class GaussianTrainer:
 
     def __init__(self, dataset: Dataset, config: TrainingConfig) -> None: ...
 
-    def step(self) -> TrainingStats:
+    def step(
+        self,
+        forced_downscale: int = 0,
+        apply_refine: bool = True,
+    ) -> TrainingStats:
         """Run a single training iteration. Returns TrainingStats."""
         ...
 
