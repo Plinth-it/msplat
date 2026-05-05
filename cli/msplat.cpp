@@ -598,7 +598,7 @@ int main(int argc, char *argv[]) {
             std::string stem = outputPath.stem().string();
             for (int level = 1; level <= lodLevels; level++) {
                 int64_t sourceCount = model.means.size(0);
-                int64_t targetCount = std::max<int64_t>(1, (int64_t)std::llround(sourceCount * lodKeepRatio));
+                int64_t targetCount = std::max<int64_t>(1, (int64_t)(sourceCount * lodKeepRatio));
                 fs::path lodPath = dir / (stem + "_lod" + std::to_string(level) + ".ply");
                 if (lodRefineSteps > 0) {
                     model.decimateToLod(targetCount);
