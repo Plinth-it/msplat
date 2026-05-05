@@ -57,7 +57,7 @@ struct Model{
                      MTensor *alphaTarget, float matchAlphaWeight,
                      const float *stepBgColor, float ssimWeight, float lpipsLossWeight,
                      int forcedDownscale = 0);
-  MTensor render(Camera& cam, int step);
+  MTensor render(Camera& cam, int step, const float *bgColorOverride = nullptr);
 
   MTensor means;
   MTensor scales;

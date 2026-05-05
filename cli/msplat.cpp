@@ -389,6 +389,7 @@ int main(int argc, char *argv[]) {
 
             double sumPsnr = 0, sumSsim = 0, sumL1 = 0;
             int nTest = testCams.size();
+            const float evalBg[3] = {0.0f, 0.0f, 0.0f};
             fs::path imageDir;
             if (saveImages) {
                 imageDir = evaluationImageDir(evalStep);
@@ -400,10 +401,10 @@ int main(int argc, char *argv[]) {
             std::cout << ") ===" << std::endl;
 
             for (int i = 0; i < nTest; i++) {
-                MTensor rgb = model.render(testCams[i], evalStep);
+                MTensor rgb = model.render(testCams[i], evalStep, evalBg);
                 msplat_gpu_sync();
                 MTensor rgb_cpu = rgb.cpu();
-                MTensor gt_cpu = testCams[i].getGPUImage(model.getDownscaleFactor(evalStep), bgColor.data()).cpu();
+                MTensor gt_cpu = testCams[i].getGPUImage(model.getDownscaleFactor(evalStep), evalBg).cpu();
                 quantizeRenderedForEval(rgb_cpu);
 
                 float p = psnr(rgb_cpu, gt_cpu);
@@ -643,10 +644,11 @@ int main(int argc, char *argv[]) {
 
         // Validation
         if (valCam) {
-            MTensor rgb = model.render(*valCam, numIters);
+            const float evalBg[3] = {0.0f, 0.0f, 0.0f};
+            MTensor rgb = model.render(*valCam, numIters, evalBg);
             msplat_gpu_sync();
             MTensor rgb_cpu = rgb.cpu();
-            MTensor gt_cpu = valCam->getGPUImage(model.getDownscaleFactor(numIters), bgColor.data()).cpu();
+            MTensor gt_cpu = valCam->getGPUImage(model.getDownscaleFactor(numIters), evalBg).cpu();
             quantizeRenderedForEval(rgb_cpu);
 
             std::cout << "\n=== Validation (" << valCam->filePath << ") ===" << std::endl;

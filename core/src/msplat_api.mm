@@ -191,14 +191,15 @@ EvalMetrics Trainer::evaluate() {
 
     double sumPsnr = 0, sumSsim = 0, sumL1 = 0;
     int n = (int)testCams.size();
+    const float evalBg[3] = {0.0f, 0.0f, 0.0f};
 
     for (int i = 0; i < n; i++) {
         Camera& cam = testCams[i];
-        MTensor rgb = impl->model->render(cam, impl->config.iterations);
+        MTensor rgb = impl->model->render(cam, impl->config.iterations, evalBg);
         msplat_gpu_sync();
         MTensor rgbCpu = rgb.cpu();
         int dsf = impl->model->getDownscaleFactor(impl->config.iterations);
-        MTensor gtCpu = cam.getGPUImage(dsf, impl->config.bgColor).cpu();
+        MTensor gtCpu = cam.getGPUImage(dsf, evalBg).cpu();
         quantizeRenderedForEval(rgbCpu);
 
         sumPsnr += psnr(rgbCpu, gtCpu);

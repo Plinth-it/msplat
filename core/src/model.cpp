@@ -1030,14 +1030,20 @@ Model::CamSetup Model::prepareCam(Camera& cam, int step, int forcedDownscale) {
     return s;
 }
 
-MTensor Model::render(Camera& cam, int step){
+MTensor Model::render(Camera& cam, int step, const float *bgColorOverride){
     auto s = prepareCam(cam, step);
+    MTensor overrideBackground;
+    MTensor &renderBackground = bgColorOverride ? overrideBackground : backgroundColor;
+    if (bgColorOverride) {
+        overrideBackground = gpu_empty({3}, DType::Float32);
+        memcpy(overrideBackground.data_ptr(), bgColorOverride, 3 * sizeof(float));
+    }
     return msplat_render(
         means.size(0), means, scales, 1.0f,
         quats, cam.cachedViewMat, cam.cachedProjViewMat, s.fx, s.fy, s.cx, s.cy,
         s.height, s.width, s.tileBounds, 0.01f,
         s.degree, s.degreesToUse, s.cam_pos, featuresDc, featuresRest,
-        opacities, backgroundColor, renderMip ? 1 : 0);
+        opacities, renderBackground, renderMip ? 1 : 0);
 }
 
 void Model::fullIteration(Camera& cam, int step, MTensor &gt, MTensor *lossMask, float lossMaskMean,
