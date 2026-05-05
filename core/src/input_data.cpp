@@ -173,6 +173,37 @@ void Camera::loadImage(float downscaleFactor, AlphaModeOverride alphaMode) {
     maskImage = std::move(rawMask);
 }
 
+void Camera::applyImageScale(float imageScale) {
+    imageScale = std::clamp(imageScale, 0.0f, 1.0f);
+    if (imageScale >= 1.0f || image.empty()) return;
+
+    int newW = std::max(1, (int)((float)image.width * imageScale));
+    int newH = std::max(1, (int)((float)image.height * imageScale));
+    if (newW == image.width && newH == image.height) return;
+
+    float sx = (float)newW / (float)image.width;
+    float sy = (float)newH / (float)image.height;
+    image = resizeArea(image, newW, newH);
+    if (!maskImage.empty()) maskImage = resizeArea(maskImage, newW, newH);
+
+    fx *= sx;
+    fy *= sy;
+    cx *= sx;
+    cy *= sy;
+    width = newW;
+    height = newH;
+
+    imagePyramids.clear();
+    maskPyramids.clear();
+    mtensorImageCache.clear();
+    mtensorCompositeImageCache.clear();
+    mtensorCompositeImageCacheBackground.clear();
+    mtensorLossMaskCache.clear();
+    lossMaskMeanCache.clear();
+    cachedViewMat.reset();
+    cachedProjViewMat.reset();
+}
+
 Image Camera::getImage(int downscaleFactor) {
     if (downscaleFactor <= 1) return image;
 

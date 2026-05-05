@@ -608,32 +608,39 @@ int main(int argc, char *argv[]) {
                 if (lodRefineSteps > 0) {
                     model.decimateToLod(targetCount);
                     float cumulativeScale = std::pow((float)lodImageScale / 100.0f, (float)level);
-                    int lodDownscale = std::max(1, (int)std::lround(1.0f / std::max(cumulativeScale, 0.01f)));
+                    std::vector<Camera> lodCams;
+                    std::vector<Camera> *lodTrainCams = &cams;
+                    if (cumulativeScale < 1.0f) {
+                        lodCams = cams;
+                        for (Camera &cam : lodCams) cam.applyImageScale(cumulativeScale);
+                        lodTrainCams = &lodCams;
+                    }
                     std::cout << "LOD " << level << "/" << lodLevels << ": " << sourceCount
                               << " -> " << model.means.size(0) << " gaussians, refining "
-                              << lodRefineSteps << " steps at downscale " << lodDownscale << std::endl;
+                              << lodRefineSteps << " steps at image scale "
+                              << (cumulativeScale * 100.0f) << "%" << std::endl;
 
                     for (int refineStep = 1; refineStep <= lodRefineSteps; refineStep++) {
-                        Camera &cam = cams[camsIter.next()];
+                        Camera &cam = (*lodTrainCams)[camsIter.next()];
                         std::array<float, 3> stepBg = sampleBackground();
-                        MTensor gt = cam.getGPUImage(lodDownscale, stepBg.data());
+                        MTensor gt = cam.getGPUImage(1, stepBg.data());
                         MTensor *lossMask = nullptr;
                         MTensor mask;
                         float lossMaskMean = 1.0f;
                         MTensor *alphaTarget = nullptr;
                         MTensor alpha;
                         if (cam.hasLossMask()) {
-                            mask = cam.getGPULossMask(lodDownscale);
+                            mask = cam.getGPULossMask(1);
                             lossMask = &mask;
-                            lossMaskMean = cam.getLossMaskMean(lodDownscale);
+                            lossMaskMean = cam.getLossMaskMean(1);
                         } else if (cam.imageHasAlpha()) {
-                            alpha = cam.getGPULossMask(lodDownscale);
+                            alpha = cam.getGPULossMask(1);
                             alphaTarget = &alpha;
                         }
                         int globalStep = numIters + (level - 1) * lodRefineSteps + refineStep;
                         model.fullIteration(cam, globalStep, gt, lossMask, lossMaskMean,
                                             alphaTarget, matchAlphaWeight, stepBg.data(), ssimWeight,
-                                            lpipsLossWeight, lodDownscale);
+                                            lpipsLossWeight, 1);
                         model.schedulersStep(refineStep);
                         model.afterTrain(globalStep, refineStep, lodRefineSteps);
                         msplat_commit();

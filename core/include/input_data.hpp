@@ -49,6 +49,7 @@ struct Camera {
     float cachedFovX = 0, cachedFovY = 0;
 
     void loadImage(float downscaleFactor, AlphaModeOverride alphaMode = AlphaModeOverride::Auto);
+    void applyImageScale(float imageScale);
     Image getImage(int downscaleFactor);
     Image getMaskImage(int downscaleFactor);
     MTensor& getGPUImage(int downscaleFactor);
