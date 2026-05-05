@@ -143,6 +143,9 @@ int main(int argc, char *argv[]) {
     std::string resume;
     app.add_option("--resume", resume, "Resume training from PLY file")
         ->check(CLI::ExistingFile);
+    int startIter = 0;
+    app.add_option("--start-iter", startIter, "Brush-style iteration to resume from")
+        ->check(CLI::NonNegativeNumber);
 
     // Validation
     bool validate = false;
@@ -174,7 +177,7 @@ int main(int argc, char *argv[]) {
     float downScaleFactor = 1.0f;
     app.add_option("-d,--downscale-factor", downScaleFactor, "Image downscale factor")
         ->check(CLI::Range(1.0f, 32.0f));
-    int maxResolution = 0;
+    int maxResolution = 1920;
     app.add_option("--max-resolution", maxResolution, "Brush-style max loaded image resolution (0 disables)")
         ->check(CLI::NonNegativeNumber);
     int maxFrames = 0;
@@ -420,6 +423,7 @@ int main(int argc, char *argv[]) {
 
         size_t step = 1;
         if (!resume.empty()) step = model.loadPly(resume) + 1;
+        if (startIter > 0) step = static_cast<size_t>(startIter) + 1;
 
         bool benchmarking = std::getenv("BENCHMARK") != nullptr;
         int bench_warmup = 50;
