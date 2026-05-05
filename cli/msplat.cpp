@@ -407,6 +407,7 @@ int main(int argc, char *argv[]) {
                                             alphaTarget, matchAlphaWeight, stepBg.data(), ssimWeight,
                                             lpipsLossWeight, lodDownscale);
                         model.schedulersStep(refineStep);
+                        model.afterTrain(globalStep, refineStep, lodRefineSteps);
                         msplat_commit();
                     }
                     model.save(lodPath.string(), numIters + level * lodRefineSteps);

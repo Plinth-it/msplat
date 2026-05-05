@@ -623,15 +623,20 @@ float Model::prepareBrushRefineFlags(int step, int checkScreen, bool allowGrowth
     return maxAllowedBounds;
 }
 
-void Model::afterTrain(int step){
+void Model::afterTrain(int step, int phaseStep, int phaseTotal){
     if (!radii.defined()) return;
 
-    if (step % refineEvery == 0 && step > warmupLength){
+    int refineStep = phaseStep > 0 ? phaseStep : step;
+    int refineTotal = phaseTotal > 0 ? phaseTotal : maxSteps;
+    float phaseProgress = refineTotal > 0
+        ? std::clamp((float)refineStep / (float)refineTotal, 0.0f, 1.0f)
+        : 1.0f;
+    if (refineStep % refineEvery == 0 && refineStep > warmupLength && phaseProgress <= 0.95f){
         bool resetEnabled = resetAlphaEvery > 0;
         int resetInterval = resetEnabled ? resetAlphaEvery * refineEvery : 0;
         bool allowGrowth = step < stopSplitAt && num_active < maxSplats;
         if (allowGrowth && resetEnabled) {
-            allowGrowth = step % resetInterval > numCameras + refineEvery;
+            allowGrowth = refineStep % resetInterval > numCameras + refineEvery;
         }
 
         {
@@ -680,7 +685,7 @@ void Model::afterTrain(int step){
             std::cout << "Densified: " << numPointsBefore << " -> " << num_active << " gaussians" << std::endl;
         }
 
-        if (resetEnabled && step < stopSplitAt && step % resetInterval == refineEvery){
+        if (resetEnabled && step < stopSplitAt && refineStep % resetInterval == refineEvery){
             msplat_gpu_sync();
             constexpr float resetLogit = -1.3862943611198906f;
             float *op = opacities.data<float>();
