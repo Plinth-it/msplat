@@ -223,7 +223,8 @@ int main(int argc, char *argv[]) {
     float densifySizeThresh = 0.01f;
     app.add_option("--densify-size-thresh", densifySizeThresh, "Size threshold (dup vs split)");
     int stopScreenSizeAt = 15000;
-    app.add_option("--stop-screen-size-at", stopScreenSizeAt, "Stop splitting large gaussians after N steps");
+    auto *stopScreenSizeAtOption = app.add_option("--stop-screen-size-at", stopScreenSizeAt,
+                                                  "Stop splitting large gaussians after N steps (defaults to growth-stop-iter)");
     int growthStopIter = 15000;
     app.add_option("--growth-stop-iter", growthStopIter, "Stop splat growth after this iteration")
         ->check(CLI::Range(0, 1000000));
@@ -301,6 +302,7 @@ int main(int argc, char *argv[]) {
     CLI11_PARSE(app, argc, argv);
 
     if (normalizeCrs) keepCrs = false;
+    if (stopScreenSizeAtOption->count() == 0) stopScreenSizeAt = growthStopIter;
     if (lodDecimationKeep > 0) lodKeepRatio = static_cast<float>(lodDecimationKeep) / 100.0f;
     if (evalSplitEvery > 0) {
         testEvery = evalSplitEvery;
