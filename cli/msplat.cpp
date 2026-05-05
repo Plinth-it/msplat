@@ -127,6 +127,7 @@ static const std::unordered_map<std::string, std::string>& optionCanonicalNames(
         {"--render-mip", "render-mip"}, {"--render-mode", "render-mode"},
         {"--bg-color", "background-color"}, {"--background-color", "background-color"},
         {"--colmap-image-path", "colmap-image-path"},
+        {"--with-viewer", "with-viewer"},
         {"--rerun-enabled", "rerun-enabled"},
         {"--rerun-log-train-stats-every", "rerun-log-train-stats-every"},
         {"--rerun-log-splats-every", "rerun-log-splats-every"},
@@ -491,6 +492,8 @@ int main(int argc, char *argv[]) {
         ->expected(3);
     std::string colmapImagePath;
     app.add_option("--colmap-image-path", colmapImagePath, "Override COLMAP image directory");
+    bool withViewer = false;
+    app.add_option("--with-viewer", withViewer, "Brush viewer compatibility option; accepted but ignored");
     bool rerunEnabled = false;
     app.add_flag("--rerun-enabled", rerunEnabled, "Brush rerun compatibility option; accepted but ignored");
     int rerunLogTrainStatsEvery = 50;
