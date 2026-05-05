@@ -1,5 +1,6 @@
 #include "loaders.hpp"
 #include <nlohmann/json.hpp>
+#include <cmath>
 #include <fstream>
 #include <filesystem>
 #include <algorithm>
@@ -13,6 +14,14 @@ static std::string resolveImagePath(const std::string &path) {
     for (auto ext : {".png", ".jpg", ".jpeg", ".JPG"})
         if (fs::exists(path + ext)) return path + ext;
     return path;
+}
+
+static float fovToFocal(float fovRadians, int pixels) {
+    return 0.5f * static_cast<float>(pixels) / std::tan(0.5f * fovRadians);
+}
+
+static float jsonFloat(const json &doc, const char *key, float fallback) {
+    return doc.contains(key) && !doc[key].is_null() ? doc[key].get<float>() : fallback;
 }
 
 InputData loaders::loadNerfstudio(const std::string &projectRoot) {
@@ -29,21 +38,24 @@ InputData loaders::loadNerfstudio(const std::string &projectRoot) {
 
     InputData data;
     auto appendFrames = [&](const json &doc, const fs::path &baseDir, std::vector<Camera> &out) {
-        // Global defaults (overridden per-frame if present)
+        // Global defaults, overridden per frame when present.
         int gW = doc.value("w", 0), gH = doc.value("h", 0);
-        float gFx = doc.value("fl_x", 0.0f), gFy = doc.value("fl_y", 0.0f);
-        float gCx = doc.value("cx", 0.0f), gCy = doc.value("cy", 0.0f);
-        float gK1 = doc.value("k1", 0.0f), gK2 = doc.value("k2", 0.0f), gK3 = doc.value("k3", 0.0f);
-        float gP1 = doc.value("p1", 0.0f), gP2 = doc.value("p2", 0.0f);
+        float gFx = jsonFloat(doc, "fl_x", 0.0f), gFy = jsonFloat(doc, "fl_y", 0.0f);
+        float gAngleX = jsonFloat(doc, "camera_angle_x", 0.0f);
+        float gAngleY = jsonFloat(doc, "camera_angle_y", 0.0f);
+        float gK1 = jsonFloat(doc, "k1", 0.0f), gK2 = jsonFloat(doc, "k2", 0.0f);
+        float gK3 = jsonFloat(doc, "k3", 0.0f);
+        float gP1 = jsonFloat(doc, "p1", 0.0f), gP2 = jsonFloat(doc, "p2", 0.0f);
 
         for (auto &frame : doc["frames"]) {
             Camera cam;
             cam.width  = frame.value("w", gW);  cam.height = frame.value("h", gH);
-            cam.fx = frame.value("fl_x", gFx);  cam.fy = frame.value("fl_y", gFy);
-            cam.cx = frame.value("cx", gCx);     cam.cy = frame.value("cy", gCy);
-            cam.k1 = frame.value("k1", gK1);     cam.k2 = frame.value("k2", gK2);
-            cam.k3 = frame.value("k3", gK3);
-            cam.p1 = frame.value("p1", gP1);     cam.p2 = frame.value("p2", gP2);
+            cam.fx = jsonFloat(frame, "fl_x", gFx);  cam.fy = jsonFloat(frame, "fl_y", gFy);
+            float angleX = jsonFloat(frame, "camera_angle_x", gAngleX);
+            float angleY = jsonFloat(frame, "camera_angle_y", gAngleY);
+            cam.k1 = jsonFloat(frame, "k1", gK1);     cam.k2 = jsonFloat(frame, "k2", gK2);
+            cam.k3 = jsonFloat(frame, "k3", gK3);
+            cam.p1 = jsonFloat(frame, "p1", gP1);     cam.p2 = jsonFloat(frame, "p2", gP2);
 
             std::string fp = frame["file_path"].get<std::string>();
             fs::path imagePath(fp);
@@ -57,6 +69,26 @@ InputData loaders::loadNerfstudio(const std::string &projectRoot) {
                     ? resolveImagePath(maskPath.string())
                     : resolveImagePath((baseDir / maskPath).string());
             }
+
+            if (cam.width <= 0 || cam.height <= 0) {
+                Image image = imreadRGB(cam.filePath);
+                cam.width = image.width;
+                cam.height = image.height;
+            }
+            if (cam.fx <= 0.0f && angleX > 0.0f && cam.width > 0) {
+                cam.fx = fovToFocal(angleX, cam.width);
+            }
+            if (cam.fy <= 0.0f && angleY > 0.0f && cam.height > 0) {
+                cam.fy = fovToFocal(angleY, cam.height);
+            }
+            if (cam.fx <= 0.0f && cam.fy > 0.0f) cam.fx = cam.fy;
+            if (cam.fy <= 0.0f && cam.fx > 0.0f) cam.fy = cam.fx;
+            if (cam.fx <= 0.0f || cam.fy <= 0.0f) {
+                throw std::runtime_error("Nerfstudio frame missing focal length: " + cam.filePath);
+            }
+
+            cam.cx = jsonFloat(frame, "cx", jsonFloat(doc, "cx", cam.width * 0.5f));
+            cam.cy = jsonFloat(frame, "cy", jsonFloat(doc, "cy", cam.height * 0.5f));
 
             // transform_matrix is 4x4 c2w; flip camera Y/Z into msplat's pose convention.
             auto &tm = frame["transform_matrix"];
