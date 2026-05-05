@@ -364,6 +364,19 @@ static void w2cToCamToWorld(const double quat[4], const double t[3], float out[1
     out[12] = 0;     out[13] = 0;      out[14] = 0;      out[15] = 1;
 }
 
+static bool isFiniteCamera(const Camera &cam) {
+    if (cam.width <= 0 || cam.height <= 0) return false;
+    if (!std::isfinite(cam.fx) || !std::isfinite(cam.fy)
+        || !std::isfinite(cam.cx) || !std::isfinite(cam.cy)) {
+        return false;
+    }
+    if (cam.fx <= 0.0f || cam.fy <= 0.0f) return false;
+    for (float value : cam.camToWorld) {
+        if (!std::isfinite(value)) return false;
+    }
+    return true;
+}
+
 InputData loaders::loadColmap(const std::string &projectRoot, const std::string &imageSourcePath) {
     fs::path root(projectRoot);
     auto model = findSparseModel(root);
@@ -398,6 +411,7 @@ InputData loaders::loadColmap(const std::string &projectRoot, const std::string 
         cam.filePath = findColmapImagePath(root, imageDir, img.filename);
         if (!fs::exists(cam.filePath)) continue;
         w2cToCamToWorld(img.quat, img.t, cam.camToWorld);
+        if (!isFiniteCamera(cam)) continue;
         data.cameras.push_back(cam);
     }
 

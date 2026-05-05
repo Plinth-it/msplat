@@ -24,6 +24,19 @@ static float jsonFloat(const json &doc, const char *key, float fallback) {
     return doc.contains(key) && !doc[key].is_null() ? doc[key].get<float>() : fallback;
 }
 
+static bool isFiniteCamera(const Camera &cam) {
+    if (cam.width <= 0 || cam.height <= 0) return false;
+    if (!std::isfinite(cam.fx) || !std::isfinite(cam.fy)
+        || !std::isfinite(cam.cx) || !std::isfinite(cam.cy)) {
+        return false;
+    }
+    if (cam.fx <= 0.0f || cam.fy <= 0.0f) return false;
+    for (float value : cam.camToWorld) {
+        if (!std::isfinite(value)) return false;
+    }
+    return true;
+}
+
 static fs::path singleJsonFile(const fs::path &root) {
     std::vector<fs::path> jsonFiles;
     for (const auto &entry : fs::directory_iterator(root)) {
@@ -111,6 +124,7 @@ InputData loaders::loadNerfstudio(const std::string &projectRoot) {
                 cam.camToWorld[r*4+1] *= -1.0f;
                 cam.camToWorld[r*4+2] *= -1.0f;
             }
+            if (!isFiniteCamera(cam)) continue;
 
             out.push_back(cam);
         }
