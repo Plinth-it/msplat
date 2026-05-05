@@ -21,7 +21,19 @@ static void quatToRotMat(const double q[4], float R[9]) {
     R[6] = (float)(2*(x*z - w*y));      R[7] = (float)(2*(y*z + w*x));      R[8] = (float)(1 - 2*(x*x + y*y));
 }
 
-enum ColmapModel { SIMPLE_PINHOLE=0, PINHOLE=1, SIMPLE_RADIAL=2, RADIAL=3, OPENCV=4 };
+enum ColmapModel {
+    SIMPLE_PINHOLE = 0,
+    PINHOLE = 1,
+    SIMPLE_RADIAL = 2,
+    RADIAL = 3,
+    OPENCV = 4,
+    OPENCV_FISHEYE = 5,
+    FULL_OPENCV = 6,
+    FOV = 7,
+    SIMPLE_RADIAL_FISHEYE = 8,
+    RADIAL_FISHEYE = 9,
+    THIN_PRISM_FISHEYE = 10,
+};
 
 struct ColmapSparseModel {
     fs::path dir;
@@ -59,6 +71,76 @@ static std::optional<ColmapSparseModel> findSparseModel(const fs::path &root) {
     return std::nullopt;
 }
 
+static size_t colmapModelParamCount(int model) {
+    switch (model) {
+        case SIMPLE_PINHOLE: return 3;
+        case PINHOLE: return 4;
+        case SIMPLE_RADIAL: return 4;
+        case RADIAL: return 5;
+        case OPENCV: return 8;
+        case OPENCV_FISHEYE: return 8;
+        case FULL_OPENCV: return 12;
+        case FOV: return 5;
+        case SIMPLE_RADIAL_FISHEYE: return 4;
+        case RADIAL_FISHEYE: return 5;
+        case THIN_PRISM_FISHEYE: return 12;
+        default: throw std::runtime_error("Unsupported COLMAP camera model: " + std::to_string(model));
+    }
+}
+
+static void applyCameraParams(ColmapCamera &c, const std::vector<double> &params) {
+    if (params.size() != colmapModelParamCount(c.model)) {
+        throw std::runtime_error("Invalid COLMAP camera parameter count");
+    }
+
+    switch (c.model) {
+        case SIMPLE_PINHOLE:
+            c.fx = c.fy = (float)params[0];
+            c.cx = (float)params[1];
+            c.cy = (float)params[2];
+            break;
+        case PINHOLE:
+            c.fx = (float)params[0];
+            c.fy = (float)params[1];
+            c.cx = (float)params[2];
+            c.cy = (float)params[3];
+            break;
+        case SIMPLE_RADIAL:
+        case SIMPLE_RADIAL_FISHEYE:
+            c.fx = c.fy = (float)params[0];
+            c.cx = (float)params[1];
+            c.cy = (float)params[2];
+            c.k1 = c.model == SIMPLE_RADIAL ? (float)params[3] : 0.0f;
+            break;
+        case RADIAL:
+        case RADIAL_FISHEYE:
+            c.fx = c.fy = (float)params[0];
+            c.cx = (float)params[1];
+            c.cy = (float)params[2];
+            c.k1 = c.model == RADIAL ? (float)params[3] : 0.0f;
+            c.k2 = c.model == RADIAL ? (float)params[4] : 0.0f;
+            break;
+        case OPENCV:
+        case OPENCV_FISHEYE:
+        case FULL_OPENCV:
+        case FOV:
+        case THIN_PRISM_FISHEYE:
+            c.fx = (float)params[0];
+            c.fy = (float)params[1];
+            c.cx = (float)params[2];
+            c.cy = (float)params[3];
+            if (c.model == OPENCV) {
+                c.k1 = (float)params[4];
+                c.k2 = (float)params[5];
+                c.p1 = (float)params[6];
+                c.p2 = (float)params[7];
+            }
+            break;
+        default:
+            throw std::runtime_error("Unsupported COLMAP camera model: " + std::to_string(c.model));
+    }
+}
+
 static std::unordered_map<uint32_t, ColmapCamera> readCamerasBin(const std::string &path) {
     std::ifstream f(path, std::ios::binary);
     uint64_t n;
@@ -78,16 +160,12 @@ static std::unordered_map<uint32_t, ColmapCamera> readCamerasBin(const std::stri
         c.height = (int)h;
 
         auto rd = [&]() -> double { double v; f.read(reinterpret_cast<char*>(&v), 8); return v; };
-
-        switch (c.model) {
-            case SIMPLE_PINHOLE: c.fx = c.fy = (float)rd(); c.cx = (float)rd(); c.cy = (float)rd(); break;
-            case PINHOLE:        c.fx = (float)rd(); c.fy = (float)rd(); c.cx = (float)rd(); c.cy = (float)rd(); break;
-            case SIMPLE_RADIAL:  c.fx = c.fy = (float)rd(); c.cx = (float)rd(); c.cy = (float)rd(); c.k1 = (float)rd(); break;
-            case RADIAL:         c.fx = c.fy = (float)rd(); c.cx = (float)rd(); c.cy = (float)rd(); c.k1 = (float)rd(); c.k2 = (float)rd(); break;
-            case OPENCV:         c.fx = (float)rd(); c.fy = (float)rd(); c.cx = (float)rd(); c.cy = (float)rd();
-                                 c.k1 = (float)rd(); c.k2 = (float)rd(); c.p1 = (float)rd(); c.p2 = (float)rd(); break;
-            default: throw std::runtime_error("Unsupported COLMAP camera model: " + std::to_string(c.model));
+        std::vector<double> params;
+        params.reserve(colmapModelParamCount(c.model));
+        for (size_t p = 0; p < colmapModelParamCount(c.model); p++) {
+            params.push_back(rd());
         }
+        applyCameraParams(c, params);
         cams[c.id] = c;
     }
     return cams;
@@ -99,59 +177,13 @@ static int colmapModelFromName(const std::string &name) {
     if (name == "SIMPLE_RADIAL") return SIMPLE_RADIAL;
     if (name == "RADIAL") return RADIAL;
     if (name == "OPENCV") return OPENCV;
+    if (name == "OPENCV_FISHEYE") return OPENCV_FISHEYE;
+    if (name == "FULL_OPENCV") return FULL_OPENCV;
+    if (name == "FOV") return FOV;
+    if (name == "SIMPLE_RADIAL_FISHEYE") return SIMPLE_RADIAL_FISHEYE;
+    if (name == "RADIAL_FISHEYE") return RADIAL_FISHEYE;
+    if (name == "THIN_PRISM_FISHEYE") return THIN_PRISM_FISHEYE;
     throw std::runtime_error("Unsupported COLMAP camera model: " + name);
-}
-
-static void applyCameraParams(ColmapCamera &c, const std::vector<double> &params) {
-    auto requireParams = [&](size_t n) {
-        if (params.size() != n) {
-            throw std::runtime_error("Invalid COLMAP camera parameter count");
-        }
-    };
-
-    switch (c.model) {
-        case SIMPLE_PINHOLE:
-            requireParams(3);
-            c.fx = c.fy = (float)params[0];
-            c.cx = (float)params[1];
-            c.cy = (float)params[2];
-            break;
-        case PINHOLE:
-            requireParams(4);
-            c.fx = (float)params[0];
-            c.fy = (float)params[1];
-            c.cx = (float)params[2];
-            c.cy = (float)params[3];
-            break;
-        case SIMPLE_RADIAL:
-            requireParams(4);
-            c.fx = c.fy = (float)params[0];
-            c.cx = (float)params[1];
-            c.cy = (float)params[2];
-            c.k1 = (float)params[3];
-            break;
-        case RADIAL:
-            requireParams(5);
-            c.fx = c.fy = (float)params[0];
-            c.cx = (float)params[1];
-            c.cy = (float)params[2];
-            c.k1 = (float)params[3];
-            c.k2 = (float)params[4];
-            break;
-        case OPENCV:
-            requireParams(8);
-            c.fx = (float)params[0];
-            c.fy = (float)params[1];
-            c.cx = (float)params[2];
-            c.cy = (float)params[3];
-            c.k1 = (float)params[4];
-            c.k2 = (float)params[5];
-            c.p1 = (float)params[6];
-            c.p2 = (float)params[7];
-            break;
-        default:
-            throw std::runtime_error("Unsupported COLMAP camera model: " + std::to_string(c.model));
-    }
 }
 
 static std::unordered_map<uint32_t, ColmapCamera> readCamerasTxt(const std::string &path) {
