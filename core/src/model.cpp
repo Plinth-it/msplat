@@ -1106,7 +1106,7 @@ void Model::fullIteration(Camera& cam, int step, MTensor &gt, MTensor *lossMask,
         reduceSecondMoment ? 1 : 0,
         visCounts, xysGradNorm, max2DSize, invMaxDim, invWidth, invHeight);
 
-    if (step < stopSplitAt && meanNoiseWeight > 0.0f) {
+    if (meanNoiseWeight > 0.0f) {
         msplat_apply_mean_noise(numPoints, means, opacities, r,
                                 adam_lr[0] * meanNoiseWeight,
                                 meanNoiseMax, (uint32_t)step);

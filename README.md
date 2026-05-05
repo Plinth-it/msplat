@@ -98,8 +98,8 @@ Brush's optional LPIPS loss is available through `lpips_loss_weight` /
 `--lpips-loss-weight` using vendored VGG weights and the native Metal backend.
 Brush-style opacity and scale shrink are applied at refinement steps via
 `opac_decay` / `--opac-decay` and `scale_decay` / `--scale-decay`.
-During the growth phase, visible low-opacity splats also receive Brush-style
-mean noise controlled by `mean_noise_weight` / `--mean-noise-weight`.
+Visible low-opacity splats also receive Brush-style mean noise controlled by
+`mean_noise_weight` / `--mean-noise-weight`.
 Datasets without an input point cloud fall back to Brush-style random splats in
 camera frustums; `random_init_scene_scale` / `--random-init-scene-scale`
 overrides the estimated scene scale.
