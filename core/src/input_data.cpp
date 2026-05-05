@@ -434,11 +434,7 @@ static bool hasSingleNerfstudioJson(const fs::path &root) {
 InputData inputDataFromX(const std::string &path, const std::string &colmapImagePath) {
     fs::path root(path);
 
-    // Nerfstudio: transforms.json or split transforms_train.json.
-    if (fs::exists(root / "transforms.json") || fs::exists(root / "transforms_train.json"))
-        return loaders::loadNerfstudio(path);
-
-    // COLMAP: binary or text model, direct or in sparse[/0].
+    // Brush probes COLMAP before Nerfstudio, so mixed datasets prefer the SfM model.
     if (fs::exists(root / "cameras.bin")
         || fs::exists(root / "cameras.txt")
         || fs::exists(root / "sparse" / "0" / "cameras.bin")
@@ -446,6 +442,10 @@ InputData inputDataFromX(const std::string &path, const std::string &colmapImage
         || fs::exists(root / "sparse" / "cameras.bin")
         || fs::exists(root / "sparse" / "cameras.txt"))
         return loaders::loadColmap(path, colmapImagePath);
+
+    // Nerfstudio: transforms.json or split transforms_train.json.
+    if (fs::exists(root / "transforms.json") || fs::exists(root / "transforms_train.json"))
+        return loaders::loadNerfstudio(path);
 
     // Polycam: keyframes/ directory or cameras.json
     if (fs::exists(root / "keyframes" / "corrected_cameras") || fs::exists(root / "cameras.json"))
