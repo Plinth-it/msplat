@@ -795,6 +795,11 @@ int main(int argc, char *argv[]) {
             std::cout << "\n";
         }
 
+        // Brush evaluates the base model at the end of primary training and
+        // skips evals during LOD phases.
+        bool finalEvalAlreadyRun = evalEvery > 0 && numIters % evalEvery == 0;
+        if (!finalEvalAlreadyRun) runEvaluation(numIters, false);
+
         inputData.saveCameras((fs::path(outputScene).parent_path() / "cameras.json").string(), keepCrs);
         model.save(outputScene, numIters);
         if (lodLevels > 0) {
@@ -856,10 +861,6 @@ int main(int argc, char *argv[]) {
                 model.save(lodPath.string(), numIters + level * lodRefineSteps);
             }
         }
-
-        // Evaluation
-        bool finalEvalAlreadyRun = evalEvery > 0 && numIters % evalEvery == 0;
-        if (!finalEvalAlreadyRun) runEvaluation(numIters, false);
 
         // Validation
         if (valCam) {
