@@ -13,6 +13,8 @@ using namespace metal;
 
 constant float SH_C0 = 0.28209479177387814f;
 constant float MIN_QUAT_NORM_SQR = 1e-6f;
+constant float MAX_PROJECT_Z = 1e10f;
+constant float MAX_COV2D_ENTRY = 1e18f;
 constant float SH_C1 = 0.4886025119029199f;
 constant float SH_C2[] = {
     1.0925484305920792f,
@@ -131,6 +133,10 @@ inline float3x3 quat_to_rotmat(const float4 quat) {
     );
 }
 
+inline bool finite_float3(const float3 value) {
+    return isfinite(value.x) && isfinite(value.y) && isfinite(value.z);
+}
+
 // Returns true if point is behind the near plane (should be culled).
 inline bool clip_near_plane(
     const float3 p, 
@@ -139,7 +145,7 @@ inline bool clip_near_plane(
     float thresh
 ) {
     p_view = transform_4x3(viewmat, p);
-    if (p_view.z <= thresh) {
+    if (!isfinite(p_view.x) || !isfinite(p_view.y) || !(p_view.z > thresh && p_view.z <= MAX_PROJECT_Z)) {
         return true;
     }
     return false;
@@ -235,7 +241,13 @@ float3 project_cov3d_ewa(
                          t1.x*v01 + t1.y*v11 + t1.z*v12,
                          t1.x*v02 + t1.y*v12 + t1.z*v22);
 
-    return float3(dot(tv0, t0) + 0.3f, dot(tv0, t1), dot(tv1, t1) + 0.3f);
+    float3 raw_cov2d = float3(dot(tv0, t0), dot(tv0, t1), dot(tv1, t1));
+    float max_abs = max(max(abs(raw_cov2d.x), abs(raw_cov2d.y)), abs(raw_cov2d.z));
+    if (max_abs > MAX_COV2D_ENTRY) {
+        raw_cov2d *= MAX_COV2D_ENTRY / max_abs;
+    }
+
+    return raw_cov2d + float3(0.3f, 0.0f, 0.3f);
 }
 
 // Thread-local overload: reads cov3d from registers
@@ -278,7 +290,13 @@ float3 project_cov3d_ewa(
                          t1.x*v01 + t1.y*v11 + t1.z*v12,
                          t1.x*v02 + t1.y*v12 + t1.z*v22);
 
-    return float3(dot(tv0, t0) + 0.3f, dot(tv0, t1), dot(tv1, t1) + 0.3f);
+    float3 raw_cov2d = float3(dot(tv0, t0), dot(tv0, t1), dot(tv1, t1));
+    float max_abs = max(max(abs(raw_cov2d.x), abs(raw_cov2d.y)), abs(raw_cov2d.z));
+    if (max_abs > MAX_COV2D_ENTRY) {
+        raw_cov2d *= MAX_COV2D_ENTRY / max_abs;
+    }
+
+    return raw_cov2d + float3(0.3f, 0.0f, 0.3f);
 }
 
 inline bool compute_cov2d_bounds(
@@ -288,8 +306,11 @@ inline bool compute_cov2d_bounds(
 ) {
     // Invert 2x2 covariance (upper triangle in cov2d.xyz) to get the conic,
     // and compute the gaussian's screen-space radius from eigenvalues (3-sigma).
+    if (!finite_float3(cov2d)) {
+        return false;
+    }
     float det = cov2d.x * cov2d.z - cov2d.y * cov2d.y;
-    if (det == 0.f)
+    if (!(det > 0.f) || !isfinite(det))
         return false;
     float inv_det = 1.f / det;
 
@@ -316,8 +337,11 @@ inline float mip_opacity_compensation(const float3 cov2d) {
 }
 
 inline float2 compute_bbox_extent(const float3 conic, const float power_threshold) {
+    if (!finite_float3(conic) || !isfinite(power_threshold)) {
+        return float2(-1.0f);
+    }
     float det = conic.x * conic.z - conic.y * conic.y;
-    if (det <= 0.0f || power_threshold < 0.0f) {
+    if (!(det > 0.0f) || !isfinite(det) || power_threshold < 0.0f) {
         return float2(-1.0f);
     }
     float inv_det = 1.0f / det;
@@ -505,6 +529,9 @@ kernel void project_gaussians_forward_kernel(
     // compute the projected covariance
     // scales are in log-space; exp() here to avoid a separate MPS dispatch
     float3 scale = exp(read_packed_float3(scales, idx));
+    if (!finite_float3(scale)) {
+        return;
+    }
     float4 quat = read_packed_float4(quats, idx);
     if (!valid_quaternion(quat)) {
         return;
@@ -1932,6 +1959,9 @@ kernel void project_and_sh_forward_kernel(
     }
 
     float3 scale = exp(read_packed_float3(scales, idx));
+    if (!finite_float3(scale)) {
+        return;
+    }
     float4 quat = read_packed_float4(quats, idx);
     if (!valid_quaternion(quat)) {
         return;
