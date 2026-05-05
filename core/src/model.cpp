@@ -166,7 +166,7 @@ static InitialSplats createRandomInitialSplats(const std::vector<Camera>& camera
         init.xyz[i*3+2] = m[8] * localX + m[9] * localY + m[10] * localZ + m[11];
 
         for (int c = 0; c < 3; ++c) {
-            init.featuresDc[i*3+c] = (unit(rng) - 0.5f) / C0;
+            init.featuresDc[i*3+c] = unit(rng);
         }
 
         float qx = quatDist(rng);
