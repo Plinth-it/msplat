@@ -7,6 +7,7 @@
 #include <cstring>
 #include <cstdint>
 #include <sstream>
+#include <limits>
 
 static const double C0 = 0.28209479177387814;
 
@@ -14,17 +15,27 @@ static bool hasLodStats(const GaussianLodStats *stats) {
     return stats && stats->visCounts && stats->xysGradNorm && stats->max2DSize;
 }
 
+static bool hasPupScores(const GaussianLodStats *stats) {
+    return stats && stats->pupScores;
+}
+
 static std::vector<size_t> rankedGaussianIndices(GaussianParams &p, const GaussianLodStats *stats = nullptr) {
     int64_t N = p.means.size(0);
     const float *sp = p.scales.data<float>();
     const float *op = p.opacities.data<float>();
-    bool useStats = hasLodStats(stats);
+    bool usePup = hasPupScores(stats);
+    bool useStats = !usePup && hasLodStats(stats);
 
     std::vector<float> scores(N);
     for (int64_t i = 0; i < N; i++) {
-        float s = std::exp(sp[i*3]) + std::exp(sp[i*3+1]) + std::exp(sp[i*3+2]);
-        if (p.keepCrs) s /= p.scale;
-        float score = s / (1.0f + std::exp(-op[i]));
+        float score = 0.0f;
+        if (usePup) {
+            score = stats->pupScores[i];
+        } else {
+            float s = std::exp(sp[i*3]) + std::exp(sp[i*3+1]) + std::exp(sp[i*3+2]);
+            if (p.keepCrs) s /= p.scale;
+            score = s / (1.0f + std::exp(-op[i]));
+        }
         if (useStats) {
             float vis = stats->visCounts[i];
             if (vis > 0.0f) {
@@ -34,7 +45,7 @@ static std::vector<size_t> rankedGaussianIndices(GaussianParams &p, const Gaussi
                 score *= 1.0f + sensitivity;
             }
         }
-        scores[i] = score;
+        scores[i] = std::isfinite(score) ? score : -std::numeric_limits<float>::infinity();
     }
 
     std::vector<size_t> idx(N);
@@ -106,10 +117,10 @@ void saveGaussianLodPly(const std::string &path, GaussianParams &p, int step, in
                         const GaussianLodStats *stats) {
     int64_t N = p.means.size(0);
     targetCount = std::clamp<int64_t>(targetCount, 1, N);
-    bool useStats = hasLodStats(stats);
+    bool useStats = hasPupScores(stats) || hasLodStats(stats);
     std::vector<size_t> order = rankedGaussianIndices(p, stats);
     saveGaussianPlyWithOrder(path, p, step, &order, targetCount,
-                             useStats ? "training-stats" : "static-size-opacity");
+                             hasPupScores(stats) ? "pup-hessian" : (useStats ? "training-stats" : "static-size-opacity"));
 }
 
 LoadedGaussians decimateGaussians(GaussianParams &p, int64_t targetCount,

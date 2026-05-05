@@ -1764,6 +1764,35 @@ kernel void accumulate_grad_stats_kernel(
     max_2d_size[idx] = max(max_2d_size[idx], screen_size);
 }
 
+kernel void accumulate_pup_hessian_kernel(
+    constant int& num_points,
+    constant int* radii [[buffer(1)]],
+    constant float* v_mean3d [[buffer(2)]],
+    constant float* v_scale [[buffer(3)]],
+    device float* pup_hessian [[buffer(4)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= (uint)num_points || radii[idx] <= 0) return;
+
+    float j[6] = {
+        v_mean3d[idx * 3 + 0],
+        v_mean3d[idx * 3 + 1],
+        v_mean3d[idx * 3 + 2],
+        v_scale[idx * 3 + 0],
+        v_scale[idx * 3 + 1],
+        v_scale[idx * 3 + 2],
+    };
+
+    uint base = idx * 36;
+    for (uint row = 0; row < 6; ++row) {
+        float jr = isfinite(j[row]) ? j[row] : 0.0f;
+        for (uint col = 0; col < 6; ++col) {
+            float jc = isfinite(j[col]) ? j[col] : 0.0f;
+            pup_hessian[base + row * 6 + col] += jr * jc;
+        }
+    }
+}
+
 kernel void fused_adam_kernel(
     device float * params [[buffer(0)]],
     device const float * grads [[buffer(1)]],

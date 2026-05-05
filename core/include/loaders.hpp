@@ -49,6 +49,7 @@ struct GaussianLodStats {
     const float *visCounts = nullptr;
     const float *xysGradNorm = nullptr;
     const float *max2DSize = nullptr;
+    const float *pupScores = nullptr;
 };
 
 void saveGaussianPly(const std::string &path, GaussianParams &p, int step);

@@ -163,6 +163,7 @@ struct MetalContext {
     id<MTLComputePipelineState> fused_adam_kernel_cpso;
     id<MTLComputePipelineState> apply_mean_noise_kernel_cpso;
     id<MTLComputePipelineState> accumulate_grad_stats_kernel_cpso;
+    id<MTLComputePipelineState> accumulate_pup_hessian_kernel_cpso;
     // GPU densification kernels
     id<MTLComputePipelineState> densify_classify_kernel_cpso;
     id<MTLComputePipelineState> densify_append_split_kernel_cpso;
@@ -283,6 +284,7 @@ MetalContext* init_msplat_metal_context() {
     ctx->fused_adam_kernel_cpso                    = load(@"fused_adam_kernel");
     ctx->apply_mean_noise_kernel_cpso             = load(@"apply_mean_noise_kernel");
     ctx->accumulate_grad_stats_kernel_cpso        = load(@"accumulate_grad_stats_kernel");
+    ctx->accumulate_pup_hessian_kernel_cpso       = load(@"accumulate_pup_hessian_kernel");
     // GPU densification
     ctx->densify_classify_kernel_cpso             = load(@"densify_classify_kernel");
     ctx->densify_append_split_kernel_cpso         = load(@"densify_append_split_kernel");
@@ -1128,7 +1130,8 @@ std::tuple<MTensor, float> msplat_train_step(
     float adam_beta1, float adam_beta2, float adam_eps,
     int reduce_second_moment,
     MTensor &vis_counts, MTensor &xys_grad_norm, MTensor &max_2d_size,
-    float inv_max_dim, float inv_width, float inv_height
+    float inv_max_dim, float inv_width, float inv_height,
+    MTensor *pup_hessian
 ) {
     MetalContext* ctx = get_global_context();
     int tile_bounds_x = std::get<0>(tile_bounds);
@@ -1587,6 +1590,18 @@ std::tuple<MTensor, float> msplat_train_step(
         [enc dispatchThreads:MTLSizeMake(num_points, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
     };
 
+    auto encode_pup_hessian = [&](id<MTLComputeCommandEncoder> enc) {
+        if (!pup_hessian) return;
+        NSUInteger tpg = MIN(ctx->accumulate_pup_hessian_kernel_cpso.maxTotalThreadsPerThreadgroup, (NSUInteger)num_points);
+        [enc setComputePipelineState:ctx->accumulate_pup_hessian_kernel_cpso];
+        ENC_SCALAR(enc, num_points, 0);
+        ENC_BUF(enc, radii_out, 1);
+        ENC_BUF(enc, v_mean3d, 2);
+        ENC_BUF(enc, v_scale, 3);
+        [enc setBuffer:pup_hessian->buffer() offset:0 atIndex:4];
+        [enc dispatchThreads:MTLSizeMake(num_points, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+    };
+
     // Blit-zero helper (shared by both paths)
     auto do_blit_zero = [&](id<MTLCommandBuffer> cb) {
         id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
@@ -1686,6 +1701,8 @@ std::tuple<MTensor, float> msplat_train_step(
             // Stage 7: grad_stats
             enc = make_profiled_encoder(6);
             encode_grad_stats(enc);
+            [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+            encode_pup_hessian(enc);
             [enc endEncoding];
         });
 
@@ -1761,6 +1778,8 @@ std::tuple<MTensor, float> msplat_train_step(
 
             // --- Accumulate grad stats ---
             encode_grad_stats(enc);
+            [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+            encode_pup_hessian(enc);
 
             [enc endEncoding];
         });

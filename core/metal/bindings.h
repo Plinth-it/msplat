@@ -73,7 +73,8 @@ std::tuple<MTensor, float> msplat_train_step(
     float adam_beta1, float adam_beta2, float adam_eps,
     int reduce_second_moment,
     MTensor &vis_counts, MTensor &xys_grad_norm, MTensor &max_2d_size,
-    float inv_max_dim, float inv_width, float inv_height
+    float inv_max_dim, float inv_width, float inv_height,
+    MTensor *pup_hessian = nullptr
 );
 
 int msplat_densify(
