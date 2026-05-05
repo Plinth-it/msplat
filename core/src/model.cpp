@@ -845,8 +845,19 @@ std::vector<float> Model::computePupLodScores(std::vector<Camera> &cams) {
         lastWidth = s.width;
 
         MTensor gt = cam.getGPUImage(1, bg);
+        MTensor alpha;
+        MTensor *alphaTarget = nullptr;
+        float alphaLossWeight = 0.0f;
+        int pupChannels = 3;
+        if (cam.hasLossMask() || cam.imageHasAlpha()) {
+            alpha = cam.getGPULossMask(1);
+            alphaTarget = &alpha;
+            alphaLossWeight = 0.25f;
+            pupChannels = 4;
+        }
         MTensor &unusedMask = gt;
-        const float lossInvN = 1.0f / static_cast<float>(s.height * s.width * 3);
+        MTensor &alphaTargetTensor = alphaTarget ? *alphaTarget : gt;
+        const float lossInvN = 1.0f / static_cast<float>(s.height * s.width * pupChannels);
         const float invMaxDim = 1.0f / static_cast<float>((std::max)(lastHeight, lastWidth));
         const float invWidth = 1.0f / static_cast<float>((std::max)(lastWidth, 1));
         const float invHeight = 1.0f / static_cast<float>((std::max)(lastHeight, 1));
@@ -858,7 +869,7 @@ std::vector<float> Model::computePupLodScores(std::vector<Camera> &cams) {
             s.degree, s.degreesToUse, s.cam_pos, featuresDc, featuresRest,
             opacities, trainingBackgroundColor, renderMip ? 1 : 0,
             gt, unusedMask, 0,
-            gt, 0, 0.0f,
+            alphaTargetTensor, alphaTarget ? 1 : 0, alphaLossWeight,
             window2d, 0.0f, 0.0f,
             lossInvN, (int)featuresRest.size(-2),
             N_ADAM_GROUPS,
