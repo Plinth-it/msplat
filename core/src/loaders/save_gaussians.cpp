@@ -287,6 +287,22 @@ static float readPlyScalarAsFloat(std::istream &in, const PlyScalarProperty &pro
     return out;
 }
 
+static float parsePlyScalarAsFloat(const std::string &token, const PlyScalarProperty &prop) {
+    if (prop.type == "char" || prop.type == "int8"
+        || prop.type == "short" || prop.type == "int16"
+        || prop.type == "int" || prop.type == "int32"
+        || prop.type == "long" || prop.type == "int64") {
+        return static_cast<float>(std::stoll(token));
+    }
+    if (prop.type == "uchar" || prop.type == "uint8"
+        || prop.type == "ushort" || prop.type == "uint16"
+        || prop.type == "uint" || prop.type == "uint32"
+        || prop.type == "ulong" || prop.type == "uint64") {
+        return static_cast<float>(std::stoull(token));
+    }
+    return std::stof(token);
+}
+
 static bool parseIndexedProperty(const std::string &name, const std::string &prefix, int &index) {
     if (name.rfind(prefix, 0) != 0) return false;
     index = std::stoi(name.substr(prefix.size()));
@@ -313,9 +329,11 @@ LoadedGaussians loadGaussianPly(const std::string &path, float scale, const floa
 
     std::getline(f, line); // "ply"
     if (line.find("ply") == std::string::npos) throw std::runtime_error("Not a PLY file: " + path);
-    std::getline(f, line); // "format binary_little_endian 1.0"
-    if (line.find("format binary_little_endian") == std::string::npos)
-        throw std::runtime_error("Only binary_little_endian PLY files are supported: " + path);
+    std::getline(f, line); // "format ... 1.0"
+    const bool binaryLittleEndian = line.find("format binary_little_endian") != std::string::npos;
+    const bool ascii = line.find("format ascii") != std::string::npos;
+    if (!binaryLittleEndian && !ascii)
+        throw std::runtime_error("Only ascii and binary_little_endian PLY files are supported: " + path);
 
     while (std::getline(f, line)) {
         if (line == "end_header") break;
@@ -394,8 +412,22 @@ LoadedGaussians loadGaussianPly(const std::string &path, float scale, const floa
         if (keep) qtRaw[selected*4] = 1.0f;
         float rgb[3] = {};
         bool hasRgb[3] = {};
-        for (const PlyScalarProperty &prop : vertexProperties) {
-            float value = readPlyScalarAsFloat(f, prop);
+        std::vector<std::string> asciiTokens;
+        if (ascii) {
+            std::getline(f, line);
+            std::istringstream iss(line);
+            std::string token;
+            while (iss >> token) asciiTokens.push_back(token);
+            if (asciiTokens.size() < vertexProperties.size()) {
+                throw std::runtime_error("ASCII PLY vertex row has too few values: " + path);
+            }
+        }
+
+        for (size_t propIndex = 0; propIndex < vertexProperties.size(); ++propIndex) {
+            const PlyScalarProperty &prop = vertexProperties[propIndex];
+            float value = ascii
+                ? parsePlyScalarAsFloat(asciiTokens[propIndex], prop)
+                : readPlyScalarAsFloat(f, prop);
             if (!keep) continue;
 
             int index = 0;

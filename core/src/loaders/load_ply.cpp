@@ -182,7 +182,7 @@ bool isGaussianPly(const std::string &path) {
     std::ifstream f(path, std::ios::binary);
     if (!f.is_open()) return false;
 
-    bool binaryLittleEndian = false;
+    bool supportedFormat = false;
     bool inVertex = false;
     bool hasOpacity = false;
     bool hasScale = false;
@@ -199,7 +199,7 @@ bool isGaussianPly(const std::string &path) {
         if (token == "format") {
             std::string format;
             iss >> format;
-            binaryLittleEndian = format == "binary_little_endian";
+            supportedFormat = format == "binary_little_endian" || format == "ascii";
         } else if (token == "element") {
             std::string elementName;
             iss >> elementName;
@@ -217,7 +217,7 @@ bool isGaussianPly(const std::string &path) {
         }
     }
 
-    return binaryLittleEndian && hasOpacity && hasScale && hasRotation && hasDc;
+    return supportedFormat && hasOpacity && hasScale && hasRotation && hasDc;
 }
 
 bool loadDatasetPlyOverride(const std::string &projectRoot, Points &points,
