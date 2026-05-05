@@ -4,6 +4,7 @@
 #include <fstream>
 #include <sstream>
 #include <cstring>
+#include <cctype>
 
 namespace fs = std::filesystem;
 
@@ -28,6 +29,13 @@ static size_t plyTypeSize(PlyType t) {
         case PlyType::Int32:   return 4;
         default: return 0;
     }
+}
+
+static bool iequals(const std::string &a, const std::string &b) {
+    return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(),
+        [](unsigned char ca, unsigned char cb) {
+            return std::tolower(ca) == std::tolower(cb);
+        });
 }
 
 struct PlyProp {
@@ -213,7 +221,7 @@ bool loadDatasetPlyOverride(const std::string &projectRoot, Points &points,
     std::vector<fs::path> plyPaths;
     for (const auto &entry : fs::recursive_directory_iterator(root)) {
         if (!entry.is_regular_file()) continue;
-        if (entry.path().extension() == ".ply") plyPaths.push_back(entry.path());
+        if (iequals(entry.path().extension().string(), ".ply")) plyPaths.push_back(entry.path());
     }
     if (plyPaths.empty()) return false;
 

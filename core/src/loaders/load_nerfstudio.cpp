@@ -245,9 +245,11 @@ InputData loaders::loadNerfstudio(const std::string &projectRoot) {
 
     // Point cloud
     if (j.contains("ply_file_path")) {
-        std::string p = j["ply_file_path"].get<std::string>();
-        if (p[0] != '/') p = (fs::path(projectRoot) / p).string();
-        if (fs::exists(p)) data.points = readPly(p);
+        fs::path plyPath(j["ply_file_path"].get<std::string>());
+        fs::path resolvedPlyPath = plyPath.is_absolute()
+            ? resolveDatasetPath(datasetIndex, plyPath)
+            : resolveDatasetPath(datasetIndex, transformsDir / plyPath);
+        if (fs::exists(resolvedPlyPath)) data.points = readPly(resolvedPlyPath.string());
     }
     if (data.points.count == 0) {
         for (auto p : {"sparse/0/points3D.ply", "points3D.ply"}) {
