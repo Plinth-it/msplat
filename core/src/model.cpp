@@ -93,27 +93,7 @@ static float estimateRandomInitSceneScale(const std::vector<Camera>& cameras) {
 }
 
 static float estimateMedianExtent(const float *xyz, int64_t count) {
-    if (!xyz || count <= 0) return 1.0f;
-
-    std::vector<float> extents;
-    extents.reserve(3);
-    for (int axis = 0; axis < 3; ++axis) {
-        std::vector<float> values;
-        values.reserve(count);
-        for (int64_t i = 0; i < count; ++i) {
-            float v = xyz[i * 3 + axis];
-            if (std::isfinite(v)) values.push_back(v);
-        }
-        if (values.empty()) continue;
-        std::sort(values.begin(), values.end());
-        size_t lo = static_cast<size_t>(0.1f * static_cast<float>(values.size() - 1));
-        size_t hi = static_cast<size_t>(0.9f * static_cast<float>(values.size() - 1));
-        extents.push_back(values[hi] - values[lo]);
-    }
-
-    if (extents.empty()) return 1.0f;
-    std::sort(extents.begin(), extents.end());
-    return std::max(extents[extents.size() / 2], 0.01f);
+    return std::max(PointsTensor::percentileMedianSize(xyz, count, BOUND_PERCENTILE), 0.01f);
 }
 
 static InitialSplats createRandomInitialSplats(const std::vector<Camera>& cameras,
@@ -458,7 +438,9 @@ float sigmoidf(float x) {
 float percentileInPlace(std::vector<float>& values, float q) {
     if (values.empty()) return 0.0f;
     q = std::clamp(q, 0.0f, 1.0f);
-    size_t idx = static_cast<size_t>(q * static_cast<float>(values.size() - 1));
+    size_t idx = std::min(
+        values.size() - 1,
+        static_cast<size_t>(q * static_cast<float>(values.size())));
     std::nth_element(values.begin(), values.begin() + idx, values.end());
     return values[idx];
 }
@@ -524,16 +506,6 @@ float Model::prepareBrushRefineFlags(int step, int checkScreen, bool allowGrowth
         }
     }
 
-    float maxFiniteScale = 0.0f;
-    for (int i = 0; i < N; ++i) {
-        for (int c = 0; c < 3; ++c) {
-            float scaleValue = std::exp(scalesPtr[i * 3 + c]);
-            if (std::isfinite(scaleValue)) {
-                maxFiniteScale = std::max(maxFiniteScale, scaleValue);
-            }
-        }
-    }
-
     float maxAllowedBounds = std::numeric_limits<float>::max();
     if (!xs.empty()) {
         float loQ = (1.0f - BOUND_PERCENTILE) * 0.5f;
@@ -544,8 +516,8 @@ float Model::prepareBrushRefineFlags(int step, int checkScreen, bool allowGrowth
         cullCenter[0] = 0.5f * (loX + hiX);
         cullCenter[1] = 0.5f * (loY + hiY);
         cullCenter[2] = 0.5f * (loZ + hiZ);
-        float extent = std::max({hiX - loX, hiY - loY, hiZ - loZ, 1e-6f});
-        maxAllowedBounds = std::max(extent, maxFiniteScale) * 100.0f;
+        float extent = 0.5f * std::max({hiX - loX, hiY - loY, hiZ - loZ});
+        maxAllowedBounds = extent * 100.0f;
     } else {
         cullCenter[0] = cullCenter[1] = cullCenter[2] = 0.0f;
     }
