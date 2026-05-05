@@ -272,7 +272,8 @@ static void subsamplePoints(InputData &inputData, int subsampleStep) {
     Points filtered;
     filtered.xyz.reserve((inputData.points.count / subsampleStep + 1) * 3);
     filtered.rgb.reserve((inputData.points.count / subsampleStep + 1) * 3);
-    for (int64_t i = 0; i < inputData.points.count; i += subsampleStep) {
+    int64_t start = inputData.pointsFromPlyOverride ? subsampleStep - 1 : 0;
+    for (int64_t i = start; i < inputData.points.count; i += subsampleStep) {
         filtered.xyz.insert(filtered.xyz.end(),
                             inputData.points.xyz.begin() + i * 3,
                             inputData.points.xyz.begin() + i * 3 + 3);

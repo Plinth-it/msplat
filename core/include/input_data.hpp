@@ -77,6 +77,7 @@ struct InputData {
     Points points;
     std::string initialGaussianPlyPath;
     int initialGaussianSubsampleStep = 1;
+    bool pointsFromPlyOverride = false;
 
     std::tuple<std::vector<Camera>, Camera*> getCameras(bool validate, const std::string &valImage = "random");
     std::tuple<std::vector<Camera>, std::vector<Camera>> splitTrainTest(int testEvery);

@@ -242,7 +242,9 @@ bool loadDatasetPlyOverride(const std::string &projectRoot, Points &points,
     const std::string selectedPath = selected->string();
     points = readPly(selectedPath);
     if (initialGaussianPlyPath) {
-        *initialGaussianPlyPath = isGaussianPly(selectedPath) ? selectedPath : "";
+        const bool gaussianPly = isGaussianPly(selectedPath);
+        *initialGaussianPlyPath = gaussianPly ? selectedPath : "";
+        return !gaussianPly;
     }
     return true;
 }
