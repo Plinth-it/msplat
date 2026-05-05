@@ -1,6 +1,8 @@
 #ifndef KDTREE_TENSOR_H
 #define KDTREE_TENSOR_H
 
+#include <algorithm>
+#include <array>
 #include <nanoflann.hpp>
 #include <vector>
 #include <cmath>
@@ -22,19 +24,50 @@ struct PointsTensor {
         nanoflann::L2_Simple_Adaptor<float, PointsTensor>,
         PointsTensor, 3, size_t>;
 
-    // Compute mean distance to k nearest neighbors for each point.
-    std::vector<float> scales(int k = 4) const {
+    static float percentileMedianSize(const float *points, int64_t pointCount, float percentile) {
+        if (!points || pointCount <= 0) return 2.0f;
+
+        std::array<float, 3> sizes{};
+        for (int axis = 0; axis < 3; ++axis) {
+            std::vector<float> values;
+            values.reserve(pointCount);
+            for (int64_t i = 0; i < pointCount; ++i) {
+                const float value = points[i * 3 + axis];
+                if (std::isfinite(value)) values.push_back(value);
+            }
+            if (values.empty()) return 2.0f;
+
+            std::sort(values.begin(), values.end());
+            const size_t n = values.size();
+            const size_t lo = static_cast<size_t>(
+                (1.0f - percentile) * 0.5f * static_cast<float>(n));
+            const size_t hi = std::min(n - 1, static_cast<size_t>(
+                (1.0f + percentile) * 0.5f * static_cast<float>(n)));
+            sizes[axis] = values[hi] - values[lo];
+        }
+
+        std::sort(sizes.begin(), sizes.end());
+        return sizes[1];
+    }
+
+    // Brush-compatible KNN scale initializer for point-cloud splats.
+    std::vector<float> scales() const {
+        if (count <= 0) return {};
+        if (count < 3) return std::vector<float>(count, 1.0f);
+
         KdTree index(3, *this, {10});
 
         std::vector<float> result(count);
-        std::vector<size_t> indices(k);
-        std::vector<float> dists(k);
+        std::array<size_t, 3> indices{};
+        std::array<float, 3> dists{};
+        const float medianSize = std::max(percentileMedianSize(data, count, 0.75f), 0.01f);
+        const float maxScale = medianSize * 0.1f;
 
         for (int64_t i = 0; i < count; i++) {
-            index.knnSearch(&data[i * 3], k, indices.data(), dists.data());
-            float sum = 0;
-            for (int j = 1; j < k; j++) sum += std::sqrt(dists[j]);
-            result[i] = sum / (k - 1);
+            index.knnSearch(&data[i * 3], indices.size(), indices.data(), dists.data());
+            const float nearest = std::sqrt(dists[1]);
+            const float secondNearest = std::sqrt(dists[2]);
+            result[i] = std::clamp((nearest + secondNearest) * 0.25f, 1e-3f, maxScale);
         }
         return result;
     }
