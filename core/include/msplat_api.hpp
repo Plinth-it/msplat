@@ -23,7 +23,7 @@ struct Config {
     int refineEvery = 200;
     int warmupLength = 0;
     int resetAlphaEvery = 0;
-    float densifyGradThresh = 0.0020f;
+    float densifyGradThresh = 0.0025f;
     float densifySizeThresh = 0.01f;
     int stopScreenSizeAt = 15000;
     float splitScreenSize = 0.25f;

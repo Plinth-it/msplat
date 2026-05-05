@@ -212,7 +212,7 @@ def test_training_config_defaults():
     assert cfg.refine_every == 200
     assert cfg.warmup_length == 0
     assert cfg.reset_alpha_every == 0
-    assert cfg.densify_grad_thresh == pytest.approx(0.0020)
+    assert cfg.densify_grad_thresh == pytest.approx(0.0025)
     assert cfg.stop_screen_size_at == 15000
     assert cfg.split_screen_size == pytest.approx(0.25)
     assert cfg.growth_stop_iter == 15000

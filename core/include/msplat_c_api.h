@@ -63,7 +63,7 @@ static inline MsplatConfig msplat_default_config(void) {
     c.refineEvery = 200;
     c.warmupLength = 0;
     c.resetAlphaEvery = 0;
-    c.densifyGradThresh = 0.0020f;
+    c.densifyGradThresh = 0.0025f;
     c.densifySizeThresh = 0.01f;
     c.stopScreenSizeAt = 15000;
     c.splitScreenSize = 0.25f;

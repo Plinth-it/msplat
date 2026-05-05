@@ -216,7 +216,7 @@ int main(int argc, char *argv[]) {
     app.add_option("--warmup-length", warmupLength, "Steps before first densification");
     int resetAlphaEvery = 0;
     app.add_option("--reset-alpha-every", resetAlphaEvery, "Reset opacity every N refinements, or 0 to disable");
-    float densifyGradThresh = 0.0020f;
+    float densifyGradThresh = 0.0025f;
     app.add_option("--densify-grad-thresh,--growth-grad-threshold", densifyGradThresh, "Gradient threshold for split/dup");
     float densifySizeThresh = 0.01f;
     app.add_option("--densify-size-thresh", densifySizeThresh, "Size threshold (dup vs split)");
