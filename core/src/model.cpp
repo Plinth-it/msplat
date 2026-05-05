@@ -96,6 +96,13 @@ static float estimateMedianExtent(const float *xyz, int64_t count) {
     return std::max(PointsTensor::percentileMedianSize(xyz, count, BOUND_PERCENTILE), 0.01f);
 }
 
+static float scheduledLr(float start, float end, int step, int maxSteps) {
+    float t = maxSteps > 0 ? std::clamp((float)step / (float)maxSteps, 0.0f, 1.0f) : 1.0f;
+    start = std::max(start, 1e-12f);
+    end = std::max(end, 1e-12f);
+    return std::exp(std::log(start) * (1.0f - t) + std::log(end) * t);
+}
+
 static InitialSplats createRandomInitialSplats(const std::vector<Camera>& cameras,
                                                float sceneScaleOverride,
                                                uint32_t randomSeed) {
@@ -189,8 +196,8 @@ Model::Model(const InputData &inputData, int numCameras,
       maxSteps(maxSteps), opacityDecay(opacityDecay), scaleDecay(scaleDecay),
       meanNoiseWeight(meanNoiseWeight),
       keepCrs(keepCrs), renderMip(renderMip) {
-    means_lr_init = lrMean;
-    means_lr_final = lrMeanEnd;
+    baseMeansLrInit = lrMean;
+    baseMeansLrFinal = lrMeanEnd;
     scales_lr_init = lrScale;
     scales_lr_final = lrScaleEnd;
     rotation_lr = lrRotation;
@@ -207,10 +214,7 @@ Model::Model(const InputData &inputData, int numCameras,
 
     int64_t numPoints = useRandomInit ? randomInit.count : inputData.points.count;
     const std::vector<float> &sourceXyz = useRandomInit ? randomInit.xyz : inputData.points.xyz;
-    float meanLrSceneScale = estimateMedianExtent(sourceXyz.data(), numPoints);
-    meanNoiseMax = meanLrSceneScale;
-    means_lr_init *= meanLrSceneScale;
-    means_lr_final *= meanLrSceneScale;
+    updateMeanLrSceneScale(estimateMedianExtent(sourceXyz.data(), numPoints));
 
     scale = inputData.scale;
     memcpy(translation, inputData.translation, sizeof(translation));
@@ -290,6 +294,7 @@ Model::Model(const InputData &inputData, int numCameras,
         opacities = g.opacities;
         if (g.hasRenderMip) renderMip = g.renderMip;
         ensureLoadedShCapacity();
+        updateMeanLrSceneScaleFromActive();
     }
 
     // Brush-compatible default background for transparent image compositing.
@@ -366,15 +371,25 @@ void Model::ensureLoadedShCapacity() {
     featuresRest = gpu_zeros({means.size(0), (int64_t)(numShBases(shDegree) - 1), 3}, DType::Float32);
 }
 
+void Model::updateMeanLrSceneScale(float sceneScale, int scheduleStep) {
+    currentMeanLrSceneScale = std::max(sceneScale, 0.01f);
+    meanNoiseMax = currentMeanLrSceneScale;
+    means_lr_init = baseMeansLrInit * currentMeanLrSceneScale;
+    means_lr_final = baseMeansLrFinal * currentMeanLrSceneScale;
+    if (scheduleStep >= 0) {
+        adam_lr[0] = scheduledLr(means_lr_init, means_lr_final, scheduleStep, maxSteps);
+    }
+}
+
+void Model::updateMeanLrSceneScaleFromActive(int scheduleStep) {
+    if (!means.defined() || means.size(0) <= 0) return;
+    msplat_gpu_sync();
+    updateMeanLrSceneScale(estimateMedianExtent(means.data<float>(), means.size(0)), scheduleStep);
+}
+
 void Model::schedulersStep(int step){
-    float t = std::clamp((float)step / (float)maxSteps, 0.f, 1.f);
-    auto schedule = [t](float start, float end) {
-        start = std::max(start, 1e-12f);
-        end = std::max(end, 1e-12f);
-        return std::exp(std::log(start) * (1.f - t) + std::log(end) * t);
-    };
-    adam_lr[0] = schedule(means_lr_init, means_lr_final);
-    adam_lr[1] = schedule(scales_lr_init, scales_lr_final);
+    adam_lr[0] = scheduledLr(means_lr_init, means_lr_final, step, maxSteps);
+    adam_lr[1] = scheduledLr(scales_lr_init, scales_lr_final, step, maxSteps);
 }
 
 void Model::refreshViews(){
@@ -675,6 +690,7 @@ void Model::afterTrain(int step, int phaseStep, int phaseTotal){
             }
             num_active = new_count;
             refreshViews();
+            updateMeanLrSceneScaleFromActive(step);
             std::cout << "Densified: " << numPointsBefore << " -> " << num_active << " gaussians" << std::endl;
         }
 
@@ -785,6 +801,7 @@ void Model::decimateToLod(int64_t targetCount){
     xysGradNorm.reset();
     visCounts.reset();
     max2DSize.reset();
+    updateMeanLrSceneScaleFromActive();
     setupOptimizers();
 }
 
@@ -804,6 +821,7 @@ int Model::loadPly(const std::string &filename){
     opacities = g.opacities;
     if (g.hasRenderMip) renderMip = g.renderMip;
     ensureLoadedShCapacity();
+    updateMeanLrSceneScaleFromActive();
     setupOptimizers();
     return g.step;
 }
@@ -969,6 +987,19 @@ int Model::loadCheckpoint(const std::string &filename) {
     densify_random_samples = gpu_zeros({buf_capacity, 3}, DType::Float32);
 
     refreshViews();
+    {
+        float loadedMeansLrInit = means_lr_init;
+        float loadedMeansLrFinal = means_lr_final;
+        msplat_gpu_sync();
+        currentMeanLrSceneScale = estimateMedianExtent(means.data<float>(), means.size(0));
+        meanNoiseMax = currentMeanLrSceneScale;
+        if (currentMeanLrSceneScale > 0.0f) {
+            baseMeansLrInit = loadedMeansLrInit / currentMeanLrSceneScale;
+            baseMeansLrFinal = loadedMeansLrFinal / currentMeanLrSceneScale;
+        }
+        means_lr_init = loadedMeansLrInit;
+        means_lr_final = loadedMeansLrFinal;
+    }
 
     std::cout << "Checkpoint loaded: " << filename << " (step " << step
               << ", " << num_active << " gaussians)" << std::endl;

@@ -73,6 +73,8 @@ struct Model{
   float adam_lr[N_ADAM_GROUPS] = {};
   float adam_beta1 = 0.9f, adam_beta2 = 0.999f, adam_eps = 1e-15f;
   float means_lr_init = 0, means_lr_final = 0;
+  float baseMeansLrInit = 0, baseMeansLrFinal = 0;
+  float currentMeanLrSceneScale = 1.0f;
   float meanNoiseMax = 1.0f;
   float scales_lr_init = 0, scales_lr_final = 0;
   float rotation_lr = 0, coeffs_dc_lr = 0, coeffs_rest_lr = 0, opacity_lr = 0;
@@ -84,6 +86,8 @@ struct Model{
   void refreshViews();
   void ensureCapacity(int needed);
   void ensureLoadedShCapacity();
+  void updateMeanLrSceneScale(float sceneScale, int scheduleStep = -1);
+  void updateMeanLrSceneScaleFromActive(int scheduleStep = -1);
 
   MTensor densify_split_flag, densify_dup_flag;
   MTensor densify_split_prefix, densify_dup_prefix;
