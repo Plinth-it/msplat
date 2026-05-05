@@ -73,9 +73,41 @@ static float maskPixelValue(const Image &mask, int index) {
     return std::clamp(0.2126f * p[0] + 0.7152f * p[1] + 0.0722f * p[2], 0.0f, 1.0f);
 }
 
-void Camera::loadImage(float downscaleFactor) {
+static void copyMaskToAlpha(Image &image, const Image &mask) {
+    if (image.empty() || mask.empty()) return;
+    image.alpha.resize((size_t)image.width * (size_t)image.height);
+    for (int i = 0; i < image.width * image.height; i++) {
+        image.alpha[i] = maskPixelValue(mask, i);
+    }
+}
+
+static void unpremultiplyAlpha(Image &image) {
+    if (!image.hasAlpha()) return;
+    for (int i = 0; i < image.width * image.height; i++) {
+        float a = image.alpha[i];
+        if (a > 1e-6f) {
+            float inv = 1.0f / a;
+            image.data[i * 3 + 0] = std::clamp(image.data[i * 3 + 0] * inv, 0.0f, 1.0f);
+            image.data[i * 3 + 1] = std::clamp(image.data[i * 3 + 1] * inv, 0.0f, 1.0f);
+            image.data[i * 3 + 2] = std::clamp(image.data[i * 3 + 2] * inv, 0.0f, 1.0f);
+        }
+    }
+}
+
+static void premultiplyAlpha(Image &image) {
+    if (!image.hasAlpha()) return;
+    for (int i = 0; i < image.width * image.height; i++) {
+        float a = image.alpha[i];
+        image.data[i * 3 + 0] *= a;
+        image.data[i * 3 + 1] *= a;
+        image.data[i * 3 + 2] *= a;
+    }
+}
+
+void Camera::loadImage(float downscaleFactor, AlphaModeOverride alphaMode) {
     Image raw = imreadRGB(filePath);
     if (raw.empty()) return;
+    alphaAsMask = false;
 
     if (maskPath.empty()) maskPath = findMaskPath(filePath);
     Image rawMask;
@@ -118,6 +150,20 @@ void Camera::loadImage(float downscaleFactor) {
         cx = result.cx; cy = result.cy;
         width = result.width; height = result.height;
         k1 = k2 = k3 = p1 = p2 = 0;
+    }
+
+    if (!rawMask.empty() && alphaMode == AlphaModeOverride::Transparent) {
+        unpremultiplyAlpha(raw);
+        copyMaskToAlpha(raw, rawMask);
+        premultiplyAlpha(raw);
+        rawMask = {};
+    } else if (alphaMode == AlphaModeOverride::Masked
+               || (!rawMask.empty() && alphaMode == AlphaModeOverride::Auto)) {
+        if (raw.hasAlpha()) {
+            unpremultiplyAlpha(raw);
+        }
+        alphaAsMask = rawMask.empty() && raw.hasAlpha();
+        if (!rawMask.empty()) raw.alpha.clear();
     }
 
     image = std::move(raw);

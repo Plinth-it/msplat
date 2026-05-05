@@ -20,6 +20,12 @@ struct Image {
     const float* ptr() const { return data.data(); }
 };
 
+enum class AlphaModeOverride {
+    Auto,
+    Masked,
+    Transparent
+};
+
 struct Camera {
     int width = 0, height = 0;
     float fx = 0, fy = 0, cx = 0, cy = 0;
@@ -30,6 +36,7 @@ struct Camera {
     Image image;
     Image maskImage;
     std::string maskPath;
+    bool alphaAsMask = false;
     std::unordered_map<int, Image> imagePyramids;
     std::unordered_map<int, Image> maskPyramids;
     std::unordered_map<int, MTensor> mtensorImageCache;
@@ -41,15 +48,15 @@ struct Camera {
     float cachedCamPos[3] = {};
     float cachedFovX = 0, cachedFovY = 0;
 
-    void loadImage(float downscaleFactor);
+    void loadImage(float downscaleFactor, AlphaModeOverride alphaMode = AlphaModeOverride::Auto);
     Image getImage(int downscaleFactor);
     Image getMaskImage(int downscaleFactor);
     MTensor& getGPUImage(int downscaleFactor);
     MTensor& getGPUImage(int downscaleFactor, const float background[3]);
     MTensor& getGPULossMask(int downscaleFactor);
     float getLossMaskMean(int downscaleFactor);
-    bool imageHasAlpha() const { return image.hasAlpha(); }
-    bool hasLossMask() const { return !maskImage.empty(); } // Alpha is composited, not masked.
+    bool imageHasAlpha() const { return image.hasAlpha() && !alphaAsMask; }
+    bool hasLossMask() const { return !maskImage.empty() || alphaAsMask; }
     bool hasExplicitMask() const { return !maskImage.empty(); }
     bool hasDistortion() const { return k1 != 0 || k2 != 0 || k3 != 0 || p1 != 0 || p2 != 0; }
 };

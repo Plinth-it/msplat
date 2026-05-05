@@ -184,6 +184,8 @@ int main(int argc, char *argv[]) {
     int subsamplePointStep = 1;
     app.add_option("--subsample-points", subsamplePointStep, "Brush-style initial point subsampling step")
         ->check(CLI::PositiveNumber);
+    std::string alphaModeText;
+    app.add_option("--alpha-mode", alphaModeText, "Brush alpha mode override: masked or transparent");
     int numDownscales = 0;
     app.add_option("--num-downscales", numDownscales, "Progressive downscale levels");
     int resolutionSchedule = 3000;
@@ -297,6 +299,17 @@ int main(int argc, char *argv[]) {
             return 1;
         }
     }
+    AlphaModeOverride alphaMode = AlphaModeOverride::Auto;
+    if (!alphaModeText.empty()) {
+        if (alphaModeText == "masked" || alphaModeText == "mask") {
+            alphaMode = AlphaModeOverride::Masked;
+        } else if (alphaModeText == "transparent") {
+            alphaMode = AlphaModeOverride::Transparent;
+        } else {
+            std::cerr << "--alpha-mode must be 'masked' or 'transparent'" << std::endl;
+            return 1;
+        }
+    }
     if (validate || !valRender.empty()) validate = true;
     if (!valRender.empty() && !fs::exists(valRender)) fs::create_directories(valRender);
     downScaleFactor = std::max(downScaleFactor, 1.0f);
@@ -307,7 +320,7 @@ int main(int argc, char *argv[]) {
         subsamplePoints(inputData, subsamplePointStep);
 
         for (auto &cam : inputData.cameras)
-            cam.loadImage(cameraDownscaleFactor(cam, downScaleFactor, maxResolution));
+            cam.loadImage(cameraDownscaleFactor(cam, downScaleFactor, maxResolution), alphaMode);
 
         std::vector<Camera> cams;
         std::vector<Camera> testCams;
