@@ -457,6 +457,11 @@ inline void write_packed_float4(device float* arr, int idx, float4 val) {
     arr[4*idx+3] = val.w;
 }
 
+inline float clean_raw_sh_channel(float raw) {
+    float color = isfinite(raw) ? raw + 0.5f : 0.0f;
+    return clamp(color, -100.0f, 100.0f) - 0.5f;
+}
+
 inline bool valid_quaternion(float4 quat) {
     return isfinite(quat.x) && isfinite(quat.y) && isfinite(quat.z) && isfinite(quat.w)
         && dot(quat, quat) >= MIN_QUAT_NORM_SQR;
@@ -675,6 +680,9 @@ void sh_coeffs_to_color(
         colors[c] = SH_C0 * dc_coeffs[c];
     }
     if (degree < 1) {
+        for (int c = 0; c < CHANNELS; ++c) {
+            colors[c] = clean_raw_sh_channel(colors[c]);
+        }
         return;
     }
 
@@ -730,6 +738,9 @@ void sh_coeffs_to_color(
              SH_C4[7] * xz * (xx - 3.f * yy) * rest_coeffs[22 * CHANNELS + c] +
              SH_C4[8] * (xx * (xx - 3.f * yy) - yy * (3.f * xx - yy)) *
                  rest_coeffs[23 * CHANNELS + c]);
+    }
+    for (int c = 0; c < CHANNELS; ++c) {
+        colors[c] = clean_raw_sh_channel(colors[c]);
     }
 }
 
