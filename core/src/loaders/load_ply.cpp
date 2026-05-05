@@ -163,7 +163,50 @@ Points readPly(const std::string &path) {
     return pts;
 }
 
-bool loadDatasetPlyOverride(const std::string &projectRoot, Points &points) {
+static bool isGaussianPly(const fs::path &path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f.is_open()) return false;
+
+    bool binaryLittleEndian = false;
+    bool inVertex = false;
+    bool hasOpacity = false;
+    bool hasScale = false;
+    bool hasRotation = false;
+    bool hasDc = false;
+
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line == "end_header") break;
+
+        std::istringstream iss(line);
+        std::string token;
+        iss >> token;
+        if (token == "format") {
+            std::string format;
+            iss >> format;
+            binaryLittleEndian = format == "binary_little_endian";
+        } else if (token == "element") {
+            std::string elementName;
+            iss >> elementName;
+            inVertex = elementName == "vertex";
+        } else if (inVertex && token == "property") {
+            std::string type;
+            std::string name;
+            iss >> type;
+            if (type == "list") continue;
+            iss >> name;
+            hasOpacity = hasOpacity || name == "opacity";
+            hasScale = hasScale || name == "scale_0";
+            hasRotation = hasRotation || name == "rot_0";
+            hasDc = hasDc || name == "f_dc_0";
+        }
+    }
+
+    return binaryLittleEndian && hasOpacity && hasScale && hasRotation && hasDc;
+}
+
+bool loadDatasetPlyOverride(const std::string &projectRoot, Points &points,
+                            std::string *initialGaussianPlyPath) {
     fs::path root(projectRoot);
     if (!fs::exists(root)) return false;
 
@@ -180,7 +223,11 @@ bool loadDatasetPlyOverride(const std::string &projectRoot, Points &points) {
     });
     if (selected == plyPaths.end()) selected = std::prev(plyPaths.end());
 
-    points = readPly(selected->string());
+    const std::string selectedPath = selected->string();
+    points = readPly(selectedPath);
+    if (initialGaussianPlyPath) {
+        *initialGaussianPlyPath = isGaussianPly(*selected) ? selectedPath : "";
+    }
     return true;
 }
 

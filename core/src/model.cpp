@@ -298,6 +298,19 @@ Model::Model(const InputData &inputData, int numCameras,
         }
     }
 
+    if (!inputData.initialGaussianPlyPath.empty()) {
+        auto g = loadGaussianPly(inputData.initialGaussianPlyPath, scale, translation, keepCrs,
+                                 inputData.initialGaussianSubsampleStep);
+        means = g.means;
+        scales = g.scales;
+        quats = g.quats;
+        featuresDc = g.featuresDc;
+        featuresRest = g.featuresRest;
+        opacities = g.opacities;
+        if (g.hasRenderMip) renderMip = g.renderMip;
+        ensureLoadedShCapacity();
+    }
+
     // Brush-compatible default background for transparent image compositing.
     backgroundColor = gpu_empty({3}, DType::Float32);
     trainingBackgroundColor = gpu_empty({3}, DType::Float32);
@@ -365,6 +378,11 @@ void Model::releaseOptimizers(){
     densify_split_prefix.reset(); densify_dup_prefix.reset();
     densify_keep_flag.reset(); densify_keep_prefix.reset();
     densify_block_totals.reset(); densify_compact_scratch.reset(); densify_random_samples.reset();
+}
+
+void Model::ensureLoadedShCapacity() {
+    if (featuresRest.size(1) > 0 || shDegree <= 0) return;
+    featuresRest = gpu_zeros({means.size(0), (int64_t)(numShBases(shDegree) - 1), 3}, DType::Float32);
 }
 
 void Model::schedulersStep(int step){
@@ -812,6 +830,7 @@ int Model::loadPly(const std::string &filename){
     featuresRest = g.featuresRest;
     opacities = g.opacities;
     if (g.hasRenderMip) renderMip = g.renderMip;
+    ensureLoadedShCapacity();
     setupOptimizers();
     return g.step;
 }

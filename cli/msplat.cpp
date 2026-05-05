@@ -80,6 +80,7 @@ static void filterCameras(InputData &inputData, int maxFrames, int subsampleFram
 
 static void subsamplePoints(InputData &inputData, int subsampleStep) {
     if (subsampleStep <= 1 || inputData.points.count <= 0) return;
+    inputData.initialGaussianSubsampleStep = subsampleStep;
 
     Points filtered;
     filtered.xyz.reserve((inputData.points.count / subsampleStep + 1) * 3);

@@ -12,7 +12,8 @@ namespace loaders {
 
 // PLY point cloud reader
 Points readPly(const std::string &path);
-bool loadDatasetPlyOverride(const std::string &projectRoot, Points &points);
+bool loadDatasetPlyOverride(const std::string &projectRoot, Points &points,
+                            std::string *initialGaussianPlyPath = nullptr);
 
 // COLMAP binary point cloud reader
 Points readColmapPoints(const std::string &path);
@@ -63,6 +64,7 @@ struct LoadedGaussians {
 };
 LoadedGaussians decimateGaussians(GaussianParams &p, int64_t targetCount,
                                   const GaussianLodStats *stats = nullptr);
-LoadedGaussians loadGaussianPly(const std::string &path, float scale, const float translation[3], bool keepCrs);
+LoadedGaussians loadGaussianPly(const std::string &path, float scale, const float translation[3],
+                                bool keepCrs, int subsampleStep = 1);
 
 #endif

@@ -82,6 +82,7 @@ struct Model{
   int num_active = 0, buf_capacity = 0;
   void refreshViews();
   void ensureCapacity(int needed);
+  void ensureLoadedShCapacity();
 
   MTensor densify_split_flag, densify_dup_flag;
   MTensor densify_split_prefix, densify_dup_prefix;

@@ -265,8 +265,10 @@ static bool parseIndexedProperty(const std::string &name, const std::string &pre
     return true;
 }
 
-LoadedGaussians loadGaussianPly(const std::string &path, float scale, const float translation[3], bool keepCrs) {
+LoadedGaussians loadGaussianPly(const std::string &path, float scale, const float translation[3],
+                                bool keepCrs, int subsampleStep) {
     msplat_gpu_sync();
+    subsampleStep = std::max(subsampleStep, 1);
 
     std::ifstream f(path, std::ios::binary);
     if (!f.is_open()) throw std::runtime_error("Cannot open PLY file: " + path);
@@ -277,6 +279,7 @@ LoadedGaussians loadGaussianPly(const std::string &path, float scale, const floa
     int numDc = 0, numFr = 0;
     bool hasRenderMip = false;
     bool renderMip = false;
+    bool hasRgbColor = false;
     bool inVertex = false;
     std::vector<PlyScalarProperty> vertexProperties;
 
@@ -331,49 +334,72 @@ LoadedGaussians loadGaussianPly(const std::string &path, float scale, const floa
             int index = 0;
             if (parseIndexedProperty(name, "f_dc_", index)) numDc = std::max(numDc, index + 1);
             if (parseIndexedProperty(name, "f_rest_", index)) numFr = std::max(numFr, index + 1);
+            if (name == "red" || name == "green" || name == "blue"
+                || name == "r" || name == "g" || name == "b") {
+                hasRgbColor = true;
+            }
         }
     }
 
     if (numPoints == 0) throw std::runtime_error("PLY has no vertices");
     if (vertexProperties.empty()) throw std::runtime_error("PLY has no vertex properties: " + path);
+    if (numDc == 0 && hasRgbColor) numDc = 3;
     int frBases = numFr / 3;
+
+    const int selectedPoints = (numPoints + subsampleStep - 1) / subsampleStep;
 
     // Read rows by property name. Brush and common INRIA Gaussian PLYs do not
     // guarantee the same property order as msplat exports.
-    std::vector<float> meansRaw(numPoints * 3);
-    std::vector<float> dcRaw(numPoints * numDc);
-    std::vector<float> frRaw(numPoints * numFr);
-    std::vector<float> opRaw(numPoints);
-    std::vector<float> scRaw(numPoints * 3);
-    std::vector<float> qtRaw(numPoints * 4);
+    std::vector<float> meansRaw(selectedPoints * 3);
+    std::vector<float> dcRaw(selectedPoints * numDc);
+    std::vector<float> frRaw(selectedPoints * numFr);
+    std::vector<float> opRaw(selectedPoints);
+    std::vector<float> scRaw(selectedPoints * 3);
+    std::vector<float> qtRaw(selectedPoints * 4);
 
+    int selected = 0;
     for (int i = 0; i < numPoints; i++) {
-        qtRaw[i*4] = 1.0f;
+        const bool keep = i % subsampleStep == 0;
+        if (keep) qtRaw[selected*4] = 1.0f;
+        float rgb[3] = {};
+        bool hasRgb[3] = {};
         for (const PlyScalarProperty &prop : vertexProperties) {
             float value = readPlyScalarAsFloat(f, prop);
+            if (!keep) continue;
+
             int index = 0;
-            if (prop.name == "x") meansRaw[i*3] = value;
-            else if (prop.name == "y") meansRaw[i*3+1] = value;
-            else if (prop.name == "z") meansRaw[i*3+2] = value;
-            else if (prop.name == "opacity") opRaw[i] = value;
-            else if (prop.name == "scale_0") scRaw[i*3] = value;
-            else if (prop.name == "scale_1") scRaw[i*3+1] = value;
-            else if (prop.name == "scale_2") scRaw[i*3+2] = value;
-            else if (prop.name == "rot_0") qtRaw[i*4] = value;
-            else if (prop.name == "rot_1") qtRaw[i*4+1] = value;
-            else if (prop.name == "rot_2") qtRaw[i*4+2] = value;
-            else if (prop.name == "rot_3") qtRaw[i*4+3] = value;
-            else if (parseIndexedProperty(prop.name, "f_dc_", index) && index < numDc) dcRaw[i*numDc + index] = value;
-            else if (parseIndexedProperty(prop.name, "f_rest_", index) && index < numFr) frRaw[i*numFr + index] = value;
+            if (prop.name == "x") meansRaw[selected*3] = value;
+            else if (prop.name == "y") meansRaw[selected*3+1] = value;
+            else if (prop.name == "z") meansRaw[selected*3+2] = value;
+            else if (prop.name == "opacity") opRaw[selected] = value;
+            else if (prop.name == "scale_0") scRaw[selected*3] = value;
+            else if (prop.name == "scale_1") scRaw[selected*3+1] = value;
+            else if (prop.name == "scale_2") scRaw[selected*3+2] = value;
+            else if (prop.name == "rot_0") qtRaw[selected*4] = value;
+            else if (prop.name == "rot_1") qtRaw[selected*4+1] = value;
+            else if (prop.name == "rot_2") qtRaw[selected*4+2] = value;
+            else if (prop.name == "rot_3") qtRaw[selected*4+3] = value;
+            else if (parseIndexedProperty(prop.name, "f_dc_", index) && index < numDc) dcRaw[selected*numDc + index] = value;
+            else if (parseIndexedProperty(prop.name, "f_rest_", index) && index < numFr) frRaw[selected*numFr + index] = value;
+            else if (prop.name == "red" || prop.name == "r") { rgb[0] = value; hasRgb[0] = true; }
+            else if (prop.name == "green" || prop.name == "g") { rgb[1] = value; hasRgb[1] = true; }
+            else if (prop.name == "blue" || prop.name == "b") { rgb[2] = value; hasRgb[2] = true; }
         }
+        if (keep && hasRgb[0] && hasRgb[1] && hasRgb[2] && numDc >= 3) {
+            for (int c = 0; c < 3; c++) {
+                float channel = rgb[c] > 1.0f ? rgb[c] / 255.0f : rgb[c];
+                dcRaw[selected*numDc + c] = (std::clamp(channel, 0.0f, 1.0f) - 0.5f) / (float)C0;
+            }
+        }
+        if (keep) selected++;
     }
 
     // CRS transform
     if (keepCrs) {
-        for (int i = 0; i < numPoints; i++)
+        for (int i = 0; i < selectedPoints; i++)
             for (int j = 0; j < 3; j++)
                 meansRaw[i*3+j] = (meansRaw[i*3+j] - translation[j]) * scale;
-        for (int i = 0; i < numPoints * 3; i++)
+        for (int i = 0; i < selectedPoints * 3; i++)
             scRaw[i] = std::log(scale * std::exp(scRaw[i]));
     }
 
@@ -387,16 +413,16 @@ LoadedGaussians loadGaussianPly(const std::string &path, float scale, const floa
         memcpy(t.data_ptr(), src, bytes);
         return t;
     };
-    g.means = upload({(int64_t)numPoints, 3}, meansRaw.data(), meansRaw.size() * 4);
-    g.featuresDc = upload({(int64_t)numPoints, (int64_t)numDc}, dcRaw.data(), dcRaw.size() * 4);
-    g.opacities = upload({(int64_t)numPoints, 1}, opRaw.data(), opRaw.size() * 4);
-    g.scales = upload({(int64_t)numPoints, 3}, scRaw.data(), scRaw.size() * 4);
-    g.quats = upload({(int64_t)numPoints, 4}, qtRaw.data(), qtRaw.size() * 4);
+    g.means = upload({(int64_t)selectedPoints, 3}, meansRaw.data(), meansRaw.size() * 4);
+    g.featuresDc = upload({(int64_t)selectedPoints, (int64_t)numDc}, dcRaw.data(), dcRaw.size() * 4);
+    g.opacities = upload({(int64_t)selectedPoints, 1}, opRaw.data(), opRaw.size() * 4);
+    g.scales = upload({(int64_t)selectedPoints, 3}, scRaw.data(), scRaw.size() * 4);
+    g.quats = upload({(int64_t)selectedPoints, 4}, qtRaw.data(), qtRaw.size() * 4);
 
     // Transpose featuresRest: PLY [N, 3, frBases] → internal [N, frBases, 3]
-    g.featuresRest = gpu_empty({(int64_t)numPoints, (int64_t)frBases, 3}, DType::Float32);
+    g.featuresRest = gpu_empty({(int64_t)selectedPoints, (int64_t)frBases, 3}, DType::Float32);
     float *frOut = g.featuresRest.data<float>();
-    for (int i = 0; i < numPoints; i++)
+    for (int i = 0; i < selectedPoints; i++)
         for (int ch = 0; ch < 3; ch++)
             for (int b = 0; b < frBases; b++)
                 frOut[i*frBases*3 + b*3 + ch] = frRaw[i*numFr + ch*frBases + b];

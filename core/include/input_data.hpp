@@ -73,6 +73,8 @@ struct InputData {
     float scale = 1.0f;
     float translation[3] = {};
     Points points;
+    std::string initialGaussianPlyPath;
+    int initialGaussianSubsampleStep = 1;
 
     std::tuple<std::vector<Camera>, Camera*> getCameras(bool validate, const std::string &valImage = "random");
     std::tuple<std::vector<Camera>, std::vector<Camera>> splitTrainTest(int testEvery);

@@ -89,7 +89,7 @@ InputData loaders::loadPolycam(const std::string &projectRoot) {
         auto path = (root / p).string();
         if (fs::exists(path)) { data.points = readPly(path); break; }
     }
-    loadDatasetPlyOverride(projectRoot, data.points);
+    loadDatasetPlyOverride(projectRoot, data.points, &data.initialGaussianPlyPath);
 
     autoScaleAndCenter(data);
     return data;

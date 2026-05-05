@@ -411,7 +411,7 @@ InputData loaders::loadColmap(const std::string &projectRoot, const std::string 
         data.points = readColmapPointsTxt(pointsTxt.string());
     else if (fs::exists(pointsPly))
         data.points = readPly(pointsPly.string());
-    loadDatasetPlyOverride(projectRoot, data.points);
+    loadDatasetPlyOverride(projectRoot, data.points, &data.initialGaussianPlyPath);
 
     autoScaleAndCenter(data);
     return data;
