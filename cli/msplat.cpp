@@ -101,6 +101,7 @@ static const std::unordered_map<std::string, std::string>& optionCanonicalNames(
         {"--max-splats", "max-splats"}, {"--growth-select-fraction", "growth-select-fraction"},
         {"--split-screen-size", "split-at-screen-size"}, {"--split-at-screen-size", "split-at-screen-size"},
         {"--match-alpha-weight", "match-alpha-weight"}, {"--lpips-loss-weight", "lpips-loss-weight"},
+        {"--aux-loss-time", "aux-loss-time"},
         {"--opac-decay", "opac-decay"}, {"--scale-decay", "scale-decay"},
         {"--mean-noise-weight", "mean-noise-weight"}, {"--lr-mean", "lr-mean"},
         {"--lr-mean-end", "lr-mean-end"}, {"--lr-scale", "lr-scale"},
@@ -113,6 +114,10 @@ static const std::unordered_map<std::string, std::string>& optionCanonicalNames(
         {"--render-mip", "render-mip"}, {"--render-mode", "render-mode"},
         {"--bg-color", "background-color"}, {"--background-color", "background-color"},
         {"--colmap-image-path", "colmap-image-path"},
+        {"--rerun-enabled", "rerun-enabled"},
+        {"--rerun-log-train-stats-every", "rerun-log-train-stats-every"},
+        {"--rerun-log-splats-every", "rerun-log-splats-every"},
+        {"--rerun-max-img-size", "rerun-max-img-size"},
     };
     return names;
 }
@@ -126,7 +131,7 @@ static std::string canonicalOptionKey(const std::string &token) {
 static int optionValueCount(const std::string &key) {
     static const std::unordered_set<std::string> flags = {
         "val", "eval", "eval-save-to-disk", "reduce-second-moment",
-        "keep-crs", "normalize-crs", "render-mip",
+        "keep-crs", "normalize-crs", "render-mip", "rerun-enabled",
     };
     if (key.empty() || flags.count(key) > 0) return 0;
     if (key == "background-color") return 3;
@@ -412,6 +417,9 @@ int main(int argc, char *argv[]) {
     float lpipsLossWeight = 0.0f;
     app.add_option("--lpips-loss-weight", lpipsLossWeight, "LPIPS perceptual loss weight")
         ->check(CLI::Range(0.0f, 100.0f));
+    float auxLossTime = 0.8f;
+    app.add_option("--aux-loss-time", auxLossTime, "Brush compatibility option; accepted but currently unused")
+        ->check(CLI::Range(0.0f, 1.0f));
     float opacityDecay = 0.004f;
     app.add_option("--opac-decay", opacityDecay, "Opacity shrink applied at refinement steps")
         ->check(CLI::Range(0.0f, 1.0f));
@@ -469,6 +477,20 @@ int main(int argc, char *argv[]) {
         ->expected(3);
     std::string colmapImagePath;
     app.add_option("--colmap-image-path", colmapImagePath, "Override COLMAP image directory");
+    bool rerunEnabled = false;
+    app.add_flag("--rerun-enabled", rerunEnabled, "Brush rerun compatibility option; accepted but ignored");
+    int rerunLogTrainStatsEvery = 50;
+    app.add_option("--rerun-log-train-stats-every", rerunLogTrainStatsEvery,
+                   "Brush rerun compatibility option; accepted but ignored")
+        ->check(CLI::PositiveNumber);
+    int rerunLogSplatsEvery = 0;
+    app.add_option("--rerun-log-splats-every", rerunLogSplatsEvery,
+                   "Brush rerun compatibility option; accepted but ignored")
+        ->check(CLI::NonNegativeNumber);
+    int rerunMaxImgSize = 512;
+    app.add_option("--rerun-max-img-size", rerunMaxImgSize,
+                   "Brush rerun compatibility option; accepted but ignored")
+        ->check(CLI::PositiveNumber);
 
     std::vector<std::string> mergedArgs = argvWithDatasetArgs(argc, argv);
     std::vector<char*> mergedArgv;
