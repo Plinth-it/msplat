@@ -103,6 +103,34 @@ static float scheduledLr(float start, float end, int step, int maxSteps) {
     return std::exp(std::log(start) * (1.0f - t) + std::log(end) * t);
 }
 
+static float logDet6x6(const float *m) {
+    float l[36] = {};
+    for (int j = 0; j < 6; ++j) {
+        float sum = 0.0f;
+        for (int k = 0; k < j; ++k) {
+            sum += l[j * 6 + k] * l[j * 6 + k];
+        }
+        const float diag = m[j * 6 + j] - sum;
+        if (diag <= 0.0f || !std::isfinite(diag)) {
+            return -std::numeric_limits<float>::infinity();
+        }
+        l[j * 6 + j] = std::sqrt(diag);
+        for (int i = j + 1; i < 6; ++i) {
+            sum = 0.0f;
+            for (int k = 0; k < j; ++k) {
+                sum += l[i * 6 + k] * l[j * 6 + k];
+            }
+            l[i * 6 + j] = (m[i * 6 + j] - sum) / l[j * 6 + j];
+        }
+    }
+
+    float logDet = 0.0f;
+    for (int i = 0; i < 6; ++i) {
+        logDet += std::log(l[i * 6 + i]);
+    }
+    return 2.0f * logDet;
+}
+
 static InitialSplats createRandomInitialSplats(const std::vector<Camera>& cameras,
                                                float sceneScaleOverride,
                                                uint32_t randomSeed) {
@@ -775,6 +803,94 @@ void Model::saveLodPly(const std::string &filename, int step, int64_t targetCoun
     saveGaussianLodPly(filename, p, step, targetCount, statsPtr);
 }
 
+std::vector<float> Model::computePupLodScores(std::vector<Camera> &cams) {
+    const int numPoints = static_cast<int>(means.size(0));
+    if (numPoints <= 0) return {};
+    if (cams.empty()) {
+        throw std::runtime_error("Cannot compute PUP LOD scores without training cameras");
+    }
+
+    if (!window2d.defined()) {
+        auto w = createSSIMWindow(11, 1.5f);
+        window2d = gpu_empty({11, 11}, DType::Float32);
+        memcpy(window2d.data_ptr(), w.data(), w.size() * sizeof(float));
+    }
+
+    MTensor pupHessian = gpu_zeros({numPoints, 36}, DType::Float32);
+    MTensor tmpVis = gpu_zeros({numPoints}, DType::Float32);
+    MTensor tmpGrad = gpu_zeros({numPoints}, DType::Float32);
+    MTensor tmpScreen = gpu_zeros({numPoints}, DType::Float32);
+
+    MTensor *params[] = {&means, &scales, &quats, &featuresDc, &featuresRest, &opacities};
+    MTensor adamP[N_ADAM_GROUPS];
+    MTensor tempAvg[N_ADAM_GROUPS];
+    MTensor tempSq[N_ADAM_GROUPS];
+    float zeroSteps[N_ADAM_GROUPS] = {};
+    float adamBc2[N_ADAM_GROUPS] = {};
+    for (int i = 0; i < N_ADAM_GROUPS; ++i) {
+        adamP[i] = *params[i];
+        tempAvg[i] = gpu_zeros(params[i]->shape(), DType::Float32);
+        tempSq[i] = gpu_zeros(params[i]->shape(), DType::Float32);
+        adamBc2[i] = 1.0f;
+    }
+
+    const float bg[3] = {0.0f, 0.0f, 0.0f};
+    memcpy(trainingBackgroundColor.data_ptr(), bg, 3 * sizeof(float));
+
+    for (size_t viewIndex = 0; viewIndex < cams.size(); ++viewIndex) {
+        Camera &cam = cams[viewIndex];
+        std::cout << "PUP scoring: view " << (viewIndex + 1) << "/" << cams.size() << std::endl;
+        auto s = prepareCam(cam, maxSteps, 1);
+        lastHeight = s.height;
+        lastWidth = s.width;
+
+        MTensor gt = cam.getGPUImage(1, bg);
+        MTensor &unusedMask = gt;
+        const float lossInvN = 1.0f / static_cast<float>(s.height * s.width * 3);
+        const float invMaxDim = 1.0f / static_cast<float>((std::max)(lastHeight, lastWidth));
+        const float invWidth = 1.0f / static_cast<float>((std::max)(lastWidth, 1));
+        const float invHeight = 1.0f / static_cast<float>((std::max)(lastHeight, 1));
+
+        msplat_train_step(
+            numPoints, means, scales, 1.0f,
+            quats, cam.cachedViewMat, cam.cachedProjViewMat, s.fx, s.fy, s.cx, s.cy,
+            s.height, s.width, s.tileBounds, 0.01f,
+            s.degree, s.degreesToUse, s.cam_pos, featuresDc, featuresRest,
+            opacities, trainingBackgroundColor, renderMip ? 1 : 0,
+            gt, unusedMask, 0,
+            gt, 0, 0.0f,
+            window2d, 0.0f, 0.0f,
+            lossInvN, (int)featuresRest.size(-2),
+            N_ADAM_GROUPS,
+            adamP, tempAvg, tempSq,
+            zeroSteps, adamBc2,
+            adam_beta1, adam_beta2, adam_eps,
+            reduceSecondMoment ? 1 : 0,
+            tmpVis, tmpGrad, tmpScreen, invMaxDim, invWidth, invHeight,
+            &pupHessian);
+        msplat_commit();
+    }
+
+    msplat_gpu_sync();
+    MTensor hessianCpu = pupHessian.cpu();
+    const float *hessian = hessianCpu.data<float>();
+    std::vector<float> scores(numPoints);
+    for (int i = 0; i < numPoints; ++i) {
+        scores[i] = logDet6x6(hessian + i * 36);
+    }
+
+    pupHessian.reset();
+    tmpVis.reset();
+    tmpGrad.reset();
+    tmpScreen.reset();
+    for (int i = 0; i < N_ADAM_GROUPS; ++i) {
+        tempAvg[i].reset();
+        tempSq[i].reset();
+    }
+
+    return scores;
+}
+
 void Model::decimateToLod(int64_t targetCount){
     GaussianParams p{means, scales, quats, featuresDc, featuresRest, opacities,
                      scale, {translation[0], translation[1], translation[2]}, keepCrs, renderMip};
@@ -792,6 +908,30 @@ void Model::decimateToLod(int64_t targetCount){
     }
 
     auto g = decimateGaussians(p, targetCount, statsPtr);
+    means = g.means;
+    scales = g.scales;
+    quats = g.quats;
+    featuresDc = g.featuresDc;
+    featuresRest = g.featuresRest;
+    opacities = g.opacities;
+    xysGradNorm.reset();
+    visCounts.reset();
+    max2DSize.reset();
+    updateMeanLrSceneScaleFromActive();
+    setupOptimizers();
+}
+
+void Model::decimateToLod(int64_t targetCount, const std::vector<float> &scores){
+    if ((int64_t)scores.size() != means.size(0)) {
+        throw std::runtime_error("PUP LOD score count does not match active Gaussian count");
+    }
+
+    GaussianParams p{means, scales, quats, featuresDc, featuresRest, opacities,
+                     scale, {translation[0], translation[1], translation[2]}, keepCrs, renderMip};
+    GaussianLodStats stats;
+    stats.pupScores = scores.data();
+
+    auto g = decimateGaussians(p, targetCount, &stats);
     means = g.means;
     scales = g.scales;
     quats = g.quats;

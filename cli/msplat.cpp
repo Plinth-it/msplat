@@ -605,9 +605,14 @@ int main(int argc, char *argv[]) {
                 int64_t sourceCount = model.means.size(0);
                 int64_t targetCount = std::max<int64_t>(1, (int64_t)(sourceCount * lodKeepRatio));
                 fs::path lodPath = dir / (stem + "_lod" + std::to_string(level) + ".ply");
+                std::cout << "LOD " << level << "/" << lodLevels
+                          << ": computing PUP sensitivity scores..." << std::endl;
+                std::vector<float> pupScores = model.computePupLodScores(cams);
+                model.decimateToLod(targetCount, pupScores);
+                float cumulativeScale = std::pow((float)lodImageScale / 100.0f, (float)level);
+                std::cout << "LOD " << level << "/" << lodLevels << ": " << sourceCount
+                          << " -> " << model.means.size(0) << " gaussians";
                 if (lodRefineSteps > 0) {
-                    model.decimateToLod(targetCount);
-                    float cumulativeScale = std::pow((float)lodImageScale / 100.0f, (float)level);
                     std::vector<Camera> lodCams;
                     std::vector<Camera> *lodTrainCams = &cams;
                     if (cumulativeScale < 1.0f) {
@@ -615,10 +620,9 @@ int main(int argc, char *argv[]) {
                         for (Camera &cam : lodCams) cam.applyImageScale(cumulativeScale);
                         lodTrainCams = &lodCams;
                     }
-                    std::cout << "LOD " << level << "/" << lodLevels << ": " << sourceCount
-                              << " -> " << model.means.size(0) << " gaussians, refining "
-                              << lodRefineSteps << " steps at image scale "
-                              << (cumulativeScale * 100.0f) << "%" << std::endl;
+                    std::cout << ", refining " << lodRefineSteps
+                              << " steps at image scale " << (cumulativeScale * 100.0f) << "%";
+                    std::cout << std::endl;
 
                     for (int refineStep = 1; refineStep <= lodRefineSteps; refineStep++) {
                         Camera &cam = (*lodTrainCams)[camsIter.next()];
@@ -645,10 +649,10 @@ int main(int argc, char *argv[]) {
                         model.afterTrain(globalStep, refineStep, lodRefineSteps);
                         msplat_commit();
                     }
-                    model.save(lodPath.string(), numIters + level * lodRefineSteps);
                 } else {
-                    model.saveLodPly(lodPath.string(), numIters, targetCount);
+                    std::cout << std::endl;
                 }
+                model.save(lodPath.string(), numIters + level * lodRefineSteps);
             }
         }
 

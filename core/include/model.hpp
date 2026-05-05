@@ -5,6 +5,7 @@
 #include "ssim.hpp"
 #include "input_data.hpp"
 #include <cstdint>
+#include <vector>
 
 int numShBases(int degree);
 float psnr(const MTensor& rendered, const MTensor& gt);
@@ -41,7 +42,9 @@ struct Model{
   void save(const std::string &filename, int step);
   void savePly(const std::string &filename, int step);
   void saveLodPly(const std::string &filename, int step, int64_t targetCount);
+  std::vector<float> computePupLodScores(std::vector<Camera> &cams);
   void decimateToLod(int64_t targetCount);
+  void decimateToLod(int64_t targetCount, const std::vector<float> &scores);
   void saveSplat(const std::string &filename);
   int loadPly(const std::string &filename);
   void saveCheckpoint(const std::string &filename, int step);
