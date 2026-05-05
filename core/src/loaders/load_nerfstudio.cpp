@@ -24,10 +24,21 @@ static float jsonFloat(const json &doc, const char *key, float fallback) {
     return doc.contains(key) && !doc[key].is_null() ? doc[key].get<float>() : fallback;
 }
 
+static fs::path singleJsonFile(const fs::path &root) {
+    std::vector<fs::path> jsonFiles;
+    for (const auto &entry : fs::directory_iterator(root)) {
+        if (entry.is_regular_file() && entry.path().extension() == ".json") {
+            jsonFiles.push_back(entry.path());
+        }
+    }
+    return jsonFiles.size() == 1 ? jsonFiles.front() : fs::path();
+}
+
 InputData loaders::loadNerfstudio(const std::string &projectRoot) {
     fs::path root(projectRoot);
     fs::path transformsPath = root / "transforms.json";
     if (!fs::exists(transformsPath)) transformsPath = root / "transforms_train.json";
+    if (!fs::exists(transformsPath)) transformsPath = singleJsonFile(root);
 
     std::ifstream f(transformsPath.string());
     if (!f.is_open()) {

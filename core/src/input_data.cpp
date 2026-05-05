@@ -416,6 +416,21 @@ void InputData::saveCameras(const std::string &filename, bool keepCrs) const {
 
 // ── Format dispatcher ───────────────────────────────────────────────────────
 
+static bool hasSingleNerfstudioJson(const fs::path &root) {
+    std::vector<fs::path> jsonFiles;
+    for (const auto &entry : fs::directory_iterator(root)) {
+        if (entry.is_regular_file() && entry.path().extension() == ".json") {
+            jsonFiles.push_back(entry.path());
+        }
+    }
+    if (jsonFiles.size() != 1) return false;
+
+    std::ifstream f(jsonFiles.front());
+    if (!f.is_open()) return false;
+    json doc = json::parse(f, nullptr, false);
+    return !doc.is_discarded() && doc.contains("frames") && doc["frames"].is_array();
+}
+
 InputData inputDataFromX(const std::string &path, const std::string &colmapImagePath) {
     fs::path root(path);
 
@@ -436,6 +451,10 @@ InputData inputDataFromX(const std::string &path, const std::string &colmapImage
     if (fs::exists(root / "keyframes" / "corrected_cameras") || fs::exists(root / "cameras.json"))
         return loaders::loadPolycam(path);
 
+    // Brush also accepts a single Nerfstudio JSON file with an arbitrary name.
+    if (hasSingleNerfstudioJson(root))
+        return loaders::loadNerfstudio(path);
+
     throw std::runtime_error("Unrecognized dataset format in: " + path +
-        "\nSupported: COLMAP (cameras.bin/cameras.txt), Nerfstudio (transforms.json/transforms_train.json), Polycam (keyframes/)");
+        "\nSupported: COLMAP (cameras.bin/cameras.txt), Nerfstudio (transforms.json/transforms_train.json/single json), Polycam (keyframes/)");
 }
