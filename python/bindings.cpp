@@ -22,6 +22,9 @@ namespace nb = nanobind;
 using namespace nb::literals;
 namespace fs = std::filesystem;
 
+extern "C" void msplat_set_metallib_path(const char* path);
+extern "C" void msplat_set_lpips_weights_path(const char* path);
+
 // ── TrainingConfig ──────────────────────────────────────────────────────────
 
 struct TrainingConfig {
@@ -29,30 +32,30 @@ struct TrainingConfig {
     int sh_degree = 3;
     int sh_degree_interval = 1;
     float ssim_weight = 0.2f;
-    int num_downscales = 2;
+    int num_downscales = 0;
     int resolution_schedule = 3000;
-    int refine_every = 100;
-    int warmup_length = 500;
-    int reset_alpha_every = 30;
-    float densify_grad_thresh = 0.008f;
+    int refine_every = 200;
+    int warmup_length = 0;
+    int reset_alpha_every = 0;
+    float densify_grad_thresh = 0.0020f;
     float densify_size_thresh = 0.01f;
-    int stop_screen_size_at = 4000;
+    int stop_screen_size_at = 15000;
     int growth_stop_iter = 15000;
     int max_splats = 10000000;
     float growth_select_fraction = 0.25f;
-    float split_screen_size = 0.05f;
+    float split_screen_size = 0.25f;
     float match_alpha_weight = 0.1f;
     float opac_decay = 0.004f;
     float scale_decay = 0.002f;
     float mean_noise_weight = 50.0f;
-    float lr_mean = 0.00256f;
-    float lr_mean_end = 0.0000256f;
-    float lr_scale = 0.022f;
-    float lr_scale_end = 0.022f;
+    float lr_mean = 2e-5f;
+    float lr_mean_end = 2e-7f;
+    float lr_scale = 7e-3f;
+    float lr_scale_end = 5e-3f;
     float lr_rotation = 0.002f;
-    float lr_coeffs_dc = 0.012f;
+    float lr_coeffs_dc = 2e-3f;
     float lr_coeffs_sh_scale = 10.0f;
-    float lr_opac = 0.035f;
+    float lr_opac = 0.012f;
     float lpips_loss_weight = 0.0f;
     float random_init_scene_scale = 0.0f;
     bool reduce_second_moment = false;
@@ -350,6 +353,12 @@ public:
         model->saveSplat(path);
     }
 
+    int load_ply(const std::string &path) {
+        current_step = model->loadPly(path);
+        shuffle_cameras();
+        return current_step;
+    }
+
     void save_checkpoint(const std::string &path) {
         model->saveCheckpoint(path, current_step);
     }
@@ -432,15 +441,15 @@ NB_MODULE(_core, m) {
             "sh_degree"_a = 3,
             "sh_degree_interval"_a = 1,
             "ssim_weight"_a = 0.2f,
-            "num_downscales"_a = 2,
+            "num_downscales"_a = 0,
             "resolution_schedule"_a = 3000,
-            "refine_every"_a = 100,
-            "warmup_length"_a = 500,
-            "reset_alpha_every"_a = 30,
-            "densify_grad_thresh"_a = 0.008f,
+            "refine_every"_a = 200,
+            "warmup_length"_a = 0,
+            "reset_alpha_every"_a = 0,
+            "densify_grad_thresh"_a = 0.0020f,
             "densify_size_thresh"_a = 0.01f,
-            "stop_screen_size_at"_a = 4000,
-            "split_screen_size"_a = 0.05f,
+            "stop_screen_size_at"_a = 15000,
+            "split_screen_size"_a = 0.25f,
             "keep_crs"_a = false,
             "render_mip"_a = false,
             "downscale_factor"_a = 1.0f,
@@ -455,14 +464,14 @@ NB_MODULE(_core, m) {
             "growth_stop_iter"_a = 15000,
             "max_splats"_a = 10000000,
             "growth_select_fraction"_a = 0.25f,
-            "lr_mean"_a = 0.00256f,
-            "lr_mean_end"_a = 0.0000256f,
-            "lr_scale"_a = 0.022f,
-            "lr_scale_end"_a = 0.022f,
+            "lr_mean"_a = 2e-5f,
+            "lr_mean_end"_a = 2e-7f,
+            "lr_scale"_a = 7e-3f,
+            "lr_scale_end"_a = 5e-3f,
             "lr_rotation"_a = 0.002f,
-            "lr_coeffs_dc"_a = 0.012f,
+            "lr_coeffs_dc"_a = 2e-3f,
             "lr_coeffs_sh_scale"_a = 10.0f,
-            "lr_opac"_a = 0.035f,
+            "lr_opac"_a = 0.012f,
             "lpips_loss_weight"_a = 0.0f,
             "random_init_scene_scale"_a = 0.0f,
             "reduce_second_moment"_a = false)
@@ -566,6 +575,8 @@ NB_MODULE(_core, m) {
             "Decimate the active model in memory to at most target_count Gaussians.")
         .def("export_splat", &GaussianTrainer::export_splat, "path"_a,
             "Export the current Gaussians as a .splat file.")
+        .def("load_ply", &GaussianTrainer::load_ply, "path"_a,
+            "Load Gaussians from a trained PLY file and resume from its saved iteration.")
         .def("save_checkpoint", &GaussianTrainer::save_checkpoint, "path"_a,
             "Save a training checkpoint.")
         .def("load_checkpoint", &GaussianTrainer::load_checkpoint, "path"_a,
@@ -576,6 +587,10 @@ NB_MODULE(_core, m) {
             "Current training iteration.");
 
     // Utility
+    m.def("_set_metallib_path", &msplat_set_metallib_path, "path"_a,
+        "Set the default.metallib resource path.");
+    m.def("_set_lpips_weights_path", &msplat_set_lpips_weights_path, "path"_a,
+        "Set the LPIPS weights resource path.");
     m.def("sync", &msplat_gpu_sync, "Synchronize GPU (wait for all commands to complete)");
     m.def("cleanup", &cleanup_msplat_metal, "Release all cached GPU resources");
 }

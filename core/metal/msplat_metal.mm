@@ -223,6 +223,14 @@ MetalContext* init_msplat_metal_context() {
                 metal_library = [device newLibraryWithURL:[NSURL fileURLWithPath:path] error:&error];
             }
         }
+        // 3. Source-tree editable install / repo-local CLI usage.
+        if (!metal_library) {
+            NSString *path = [[[NSFileManager defaultManager] currentDirectoryPath]
+                stringByAppendingPathComponent:@"build/default.metallib"];
+            if ([fm fileExistsAtPath:path]) {
+                metal_library = [device newLibraryWithURL:[NSURL fileURLWithPath:path] error:&error];
+            }
+        }
     }
 
     if (!metal_library) {
@@ -424,7 +432,7 @@ struct FusedTensorCache {
 
     // Backward gradient accumulators
     MTensor v_rendered;
-    MTensor v_xy, v_conic, v_colors_rast, v_opacity, v_depth;
+    MTensor v_xy, v_conic, v_colors_rast, v_opacity, v_refine, v_depth;
     MTensor v_mean3d, v_scale, v_quat, v_features_dc, v_features_rest;
 
     void ensure_forward(int np, int64_t cap, int ih, int iw, int nt,
@@ -495,6 +503,7 @@ struct FusedTensorCache {
             v_conic = mtensor_empty(dev, {np, 3}, DType::Float32);
             v_colors_rast = mtensor_empty(dev, {np, 3}, DType::Float32);
             v_opacity = mtensor_empty(dev, {np, 1}, DType::Float32);
+            v_refine = mtensor_empty(dev, {np}, DType::Float32);
             v_depth = mtensor_empty(dev, {np}, DType::Float32);
             v_mean3d = mtensor_empty(dev, {np, 3}, DType::Float32);
             v_scale = mtensor_empty(dev, {np, 3}, DType::Float32);
@@ -893,6 +902,7 @@ static void forward_pipeline(
         ENC_BUF(enc, features_dc, 19); ENC_BUF(enc, features_rest, 20);
         ENC_BUF(enc, colors, 21); ENC_BUF(enc, aabb, 22);
         ENC_BUF(enc, opacity_comp, 23); ENC_SCALAR(enc, use_mip_splatting_u32, 24);
+        ENC_BUF(enc, opacities, 25);
 
         [enc dispatchThreads:MTLSizeMake(num_points, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
     };
@@ -909,6 +919,9 @@ static void forward_pipeline(
             ENC_BUF(enc, g_tcache.tile_scatter_counters, 6);
             ENC_BUF(enc, g_tcache.prealloc_bins, 7);
             ENC_BUF(enc, g_tcache.overflow_flag, 8);
+            ENC_BUF(enc, conics, 9);
+            ENC_BUF(enc, opacities, 10);
+            ENC_BUF(enc, opacity_comp, 11);
             [enc dispatchThreads:MTLSizeMake(num_points, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
         }
         [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
@@ -1115,7 +1128,7 @@ std::tuple<MTensor, float> msplat_train_step(
     float adam_beta1, float adam_beta2, float adam_eps,
     int reduce_second_moment,
     MTensor &vis_counts, MTensor &xys_grad_norm, MTensor &max_2d_size,
-    float inv_max_dim
+    float inv_max_dim, float inv_width, float inv_height
 ) {
     MetalContext* ctx = get_global_context();
     int tile_bounds_x = std::get<0>(tile_bounds);
@@ -1171,6 +1184,7 @@ std::tuple<MTensor, float> msplat_train_step(
     MTensor &v_conic = g_tcache.v_conic;
     MTensor &v_colors_rast = g_tcache.v_colors_rast;
     MTensor &v_opacity = g_tcache.v_opacity;
+    MTensor &v_refine = g_tcache.v_refine;
     MTensor &v_depth = g_tcache.v_depth;
     MTensor &v_mean3d = g_tcache.v_mean3d;
     MTensor &v_scale = g_tcache.v_scale;
@@ -1250,6 +1264,7 @@ std::tuple<MTensor, float> msplat_train_step(
         ENC_BUF(enc, features_dc, 19); ENC_BUF(enc, features_rest, 20);
         ENC_BUF(enc, colors, 21); ENC_BUF(enc, aabb, 22);
         ENC_BUF(enc, opacity_comp, 23); ENC_SCALAR(enc, use_mip_splatting_u32, 24);
+        ENC_BUF(enc, opacities, 25);
 
         [enc dispatchThreads:MTLSizeMake(num_points, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
     };
@@ -1266,6 +1281,9 @@ std::tuple<MTensor, float> msplat_train_step(
             ENC_BUF(enc, g_tcache.tile_scatter_counters, 6);
             ENC_BUF(enc, g_tcache.prealloc_bins, 7);
             ENC_BUF(enc, g_tcache.overflow_flag, 8);
+            ENC_BUF(enc, conics, 9);
+            ENC_BUF(enc, opacities, 10);
+            ENC_BUF(enc, opacity_comp, 11);
             [enc dispatchThreads:MTLSizeMake(num_points, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
         }
         [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
@@ -1442,8 +1460,9 @@ std::tuple<MTensor, float> msplat_train_step(
             ENC_BUF(enc, final_idx, 10); ENC_BUF(enc, v_rendered, 11);
             ENC_BUF(enc, v_xy, 12); ENC_BUF(enc, v_conic, 13);
             ENC_BUF(enc, v_colors_rast, 14); ENC_BUF(enc, v_opacity, 15);
-            ENC_BUF(enc, alpha_target, 16); ENC_SCALAR(enc, use_alpha_loss_u32, 17);
-            ENC_SCALAR(enc, alpha_loss_grad_scale, 18);
+            ENC_BUF(enc, v_refine, 16);
+            ENC_BUF(enc, alpha_target, 17); ENC_SCALAR(enc, use_alpha_loss_u32, 18);
+            ENC_SCALAR(enc, alpha_loss_grad_scale, 19);
             [enc dispatchThreadgroups:num_tg threadsPerThreadgroup:MTLSizeMake(RAST_BLOCK_X, RAST_BLOCK_Y, 1)];
         } else {
             // Chunked backward
@@ -1475,9 +1494,10 @@ std::tuple<MTensor, float> msplat_train_step(
             ENC_BUF(enc, v_rendered, 14);
             ENC_BUF(enc, v_xy, 15); ENC_BUF(enc, v_conic, 16);
             ENC_BUF(enc, v_colors_rast, 17); ENC_BUF(enc, v_opacity, 18);
-            ENC_SCALAR(enc, BWD_CHUNK_SIZE, 19); ENC_SCALAR(enc, bwd_K_max, 20);
-            ENC_BUF(enc, alpha_target, 21); ENC_SCALAR(enc, use_alpha_loss_u32, 22);
-            ENC_SCALAR(enc, alpha_loss_grad_scale, 23);
+            ENC_BUF(enc, v_refine, 19);
+            ENC_SCALAR(enc, BWD_CHUNK_SIZE, 20); ENC_SCALAR(enc, bwd_K_max, 21);
+            ENC_BUF(enc, alpha_target, 22); ENC_SCALAR(enc, use_alpha_loss_u32, 23);
+            ENC_SCALAR(enc, alpha_loss_grad_scale, 24);
             [enc dispatchThreadgroups:MTLSizeMake(tile_x, tile_y, bwd_K_max) threadsPerThreadgroup:MTLSizeMake(RAST_BLOCK_X, RAST_BLOCK_Y, 1)];
         }
     };
@@ -1556,11 +1576,14 @@ std::tuple<MTensor, float> msplat_train_step(
         [enc setComputePipelineState:ctx->accumulate_grad_stats_kernel_cpso];
         ENC_SCALAR(enc, num_points, 0);
         ENC_BUF(enc, radii_out, 1);
-        ENC_BUF(enc, v_xy, 2);
+        ENC_BUF(enc, v_refine, 2);
         ENC_BUF(enc, vis_counts, 3);
         ENC_BUF(enc, xys_grad_norm, 4);
         ENC_BUF(enc, max_2d_size, 5);
-        ENC_SCALAR(enc, inv_max_dim, 6);
+        ENC_BUF(enc, aabb, 6);
+        ENC_SCALAR(enc, inv_max_dim, 7);
+        ENC_SCALAR(enc, inv_width, 8);
+        ENC_SCALAR(enc, inv_height, 9);
         [enc dispatchThreads:MTLSizeMake(num_points, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
     };
 
@@ -1575,6 +1598,7 @@ std::tuple<MTensor, float> msplat_train_step(
         [blit fillBuffer:v_conic.buffer() range:NSMakeRange(0, v_conic.nbytes()) value:0];
         [blit fillBuffer:v_colors_rast.buffer() range:NSMakeRange(0, v_colors_rast.nbytes()) value:0];
         [blit fillBuffer:v_opacity.buffer() range:NSMakeRange(0, v_opacity.nbytes()) value:0];
+        [blit fillBuffer:v_refine.buffer() range:NSMakeRange(0, v_refine.nbytes()) value:0];
         [blit fillBuffer:v_depth.buffer() range:NSMakeRange(0, v_depth.nbytes()) value:0];
         [blit fillBuffer:v_mean3d.buffer() range:NSMakeRange(0, v_mean3d.nbytes()) value:0];
         [blit fillBuffer:v_scale.buffer() range:NSMakeRange(0, v_scale.nbytes()) value:0];
@@ -1756,6 +1780,7 @@ int msplat_densify(
     float grad_thresh, float size_thresh, float screen_thresh, int check_screen,
     float growth_select_fraction, uint32_t growth_seed, int max_splats,
     float cull_alpha_thresh, float cull_scale_thresh, float cull_screen_size, int check_huge,
+    const float *cull_center, float cull_bounds_thresh, int use_precomputed_flags,
     MTensor &xys_grad_norm, MTensor &vis_counts, MTensor &max_2d_size,
     float half_max_dim,
     MTensor &means_buf, MTensor &scales_buf, MTensor &quats_buf,
@@ -1802,6 +1827,13 @@ int msplat_densify(
     float growth_fraction = std::clamp(growth_select_fraction, 0.0f, 1.0f);
     uint32_t growth_seed_u32 = growth_seed;
     int max_new_count = std::max(0, std::min(max_splats, worst_case));
+    int use_precomputed_flags_int = use_precomputed_flags;
+    std::array<float, 4> cull_center4 = {
+        cull_center ? cull_center[0] : 0.0f,
+        cull_center ? cull_center[1] : 0.0f,
+        cull_center ? cull_center[2] : 0.0f,
+        0.0f
+    };
 
     id<MTLCommandBuffer> command_buffer = ctx->getCommandBuffer();
     assert(command_buffer && "Failed to retrieve command buffer reference");
@@ -1811,7 +1843,7 @@ int msplat_densify(
         assert(enc && "Failed to create compute command encoder");
 
         // ---- Stage 1: Classify (split/dup) ----
-        {
+        if (!use_precomputed_flags_int) {
             NSUInteger tpg = MIN(ctx->densify_classify_kernel_cpso.maxTotalThreadsPerThreadgroup, (NSUInteger)N);
             [enc setComputePipelineState:ctx->densify_classify_kernel_cpso];
             ENC_SCALAR(enc, N_u32, 0);
@@ -1949,6 +1981,14 @@ int msplat_densify(
             ENC_SCALAR(enc, check_screen_int, 11);
             ENC_BUF(enc, keep_flag, 12);
             ENC_SCALAR(enc, max_new_count, 13);
+            ENC_BUF(enc, means_buf, 14);
+            ENC_BUF(enc, quats_buf, 15);
+            ENC_BUF(enc, featuresDc_buf, 16);
+            ENC_BUF(enc, featuresRest_buf, 17);
+            int fr_stride_val = fr_stride;
+            ENC_SCALAR(enc, fr_stride_val, 18);
+            [enc setBytes:cull_center4.data() length:sizeof(cull_center4) atIndex:19];
+            ENC_SCALAR(enc, cull_bounds_thresh, 20);
             [enc dispatchThreads:MTLSizeMake(worst_case, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
         }
         [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];

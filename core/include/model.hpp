@@ -18,10 +18,10 @@ struct Model{
         int maxSplats = 10000000, float growthSelectFraction = 0.25f,
         float opacityDecay = 0.004f, float scaleDecay = 0.002f,
         float meanNoiseWeight = 50.0f,
-        float lrMean = 0.00256f, float lrMeanEnd = 0.0000256f,
-        float lrScale = 0.022f, float lrScaleEnd = 0.022f,
-        float lrRotation = 0.002f, float lrCoeffsDc = 0.012f,
-        float lrCoeffsShScale = 10.0f, float lrOpacity = 0.035f,
+        float lrMean = 2e-5f, float lrMeanEnd = 2e-7f,
+        float lrScale = 7e-3f, float lrScaleEnd = 5e-3f,
+        float lrRotation = 0.002f, float lrCoeffsDc = 2e-3f,
+        float lrCoeffsShScale = 10.0f, float lrOpacity = 0.012f,
         float randomInitSceneScale = 0.0f, bool reduceSecondMoment = false,
         const float* bgColor = nullptr,
         bool renderMip = false);
@@ -34,6 +34,7 @@ struct Model{
   void schedulersStep(int step);
   int getDownscaleFactor(int step);
   void afterTrain(int step);
+  float prepareBrushRefineFlags(int step, int checkScreen, float cullCenter[3]);
   void applyRefineDecay(int step);
   void save(const std::string &filename, int step);
   void savePly(const std::string &filename, int step);

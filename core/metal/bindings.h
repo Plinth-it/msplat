@@ -73,7 +73,7 @@ std::tuple<MTensor, float> msplat_train_step(
     float adam_beta1, float adam_beta2, float adam_eps,
     int reduce_second_moment,
     MTensor &vis_counts, MTensor &xys_grad_norm, MTensor &max_2d_size,
-    float inv_max_dim
+    float inv_max_dim, float inv_width, float inv_height
 );
 
 int msplat_densify(
@@ -81,6 +81,7 @@ int msplat_densify(
     float grad_thresh, float size_thresh, float screen_thresh, int check_screen,
     float growth_select_fraction, uint32_t growth_seed, int max_splats,
     float cull_alpha_thresh, float cull_scale_thresh, float cull_screen_size, int check_huge,
+    const float *cull_center, float cull_bounds_thresh, int use_precomputed_flags,
     MTensor &xys_grad_norm, MTensor &vis_counts, MTensor &max_2d_size,
     float half_max_dim,
     MTensor &means_buf, MTensor &scales_buf, MTensor &quats_buf,

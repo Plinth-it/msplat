@@ -40,6 +40,7 @@ struct GaussianParams {
     float scale;          // CRS scale factor
     float translation[3]; // CRS translation
     bool keepCrs;
+    bool renderMip;
 };
 
 struct GaussianLodStats {
@@ -56,6 +57,8 @@ void saveGaussianSplat(const std::string &path, GaussianParams &p);
 struct LoadedGaussians {
     MTensor means, scales, quats, featuresDc, featuresRest, opacities;
     int step;
+    bool hasRenderMip = false;
+    bool renderMip = false;
 };
 LoadedGaussians decimateGaussians(GaussianParams &p, int64_t targetCount,
                                   const GaussianLodStats *stats = nullptr);

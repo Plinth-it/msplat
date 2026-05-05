@@ -302,6 +302,12 @@ void Trainer::exportSplat(const std::string& path) {
     impl->model->saveSplat(path);
 }
 
+int Trainer::loadPly(const std::string& path) {
+    impl->currentStep = impl->model->loadPly(path);
+    impl->shuffleCameras();
+    return impl->currentStep;
+}
+
 void Trainer::saveCheckpoint(const std::string& path) {
     impl->model->saveCheckpoint(path, impl->currentStep);
 }
@@ -463,6 +469,10 @@ void msplat_trainer_decimate_to_lod(MsplatTrainer t, int targetCount) {
 
 void msplat_trainer_export_splat(MsplatTrainer t, const char* path) {
     static_cast<msplat::Trainer*>(t)->exportSplat(std::string(path));
+}
+
+int msplat_trainer_load_ply(MsplatTrainer t, const char* path) {
+    return static_cast<msplat::Trainer*>(t)->loadPly(std::string(path));
 }
 
 void msplat_trainer_save_checkpoint(MsplatTrainer t, const char* path) {

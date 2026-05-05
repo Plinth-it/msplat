@@ -72,7 +72,7 @@ int main(int argc, char *argv[]) {
     float downScaleFactor = 1.0f;
     app.add_option("-d,--downscale-factor", downScaleFactor, "Image downscale factor")
         ->check(CLI::Range(1.0f, 32.0f));
-    int numDownscales = 2;
+    int numDownscales = 0;
     app.add_option("--num-downscales", numDownscales, "Progressive downscale levels");
     int resolutionSchedule = 3000;
     app.add_option("--resolution-schedule", resolutionSchedule, "Double resolution every N steps");
@@ -84,17 +84,17 @@ int main(int argc, char *argv[]) {
     float ssimWeight = 0.2f;
     app.add_option("--ssim-weight", ssimWeight, "SSIM loss weight (0 = L1 only)")
         ->check(CLI::Range(0.0f, 1.0f));
-    int refineEvery = 100;
+    int refineEvery = 200;
     app.add_option("--refine-every", refineEvery, "Densify/prune every N steps");
-    int warmupLength = 500;
+    int warmupLength = 0;
     app.add_option("--warmup-length", warmupLength, "Steps before first densification");
-    int resetAlphaEvery = 30;
-    app.add_option("--reset-alpha-every", resetAlphaEvery, "Reset opacity every N refinements");
-    float densifyGradThresh = 0.008f;
+    int resetAlphaEvery = 0;
+    app.add_option("--reset-alpha-every", resetAlphaEvery, "Reset opacity every N refinements, or 0 to disable");
+    float densifyGradThresh = 0.0020f;
     app.add_option("--densify-grad-thresh", densifyGradThresh, "Gradient threshold for split/dup");
     float densifySizeThresh = 0.01f;
     app.add_option("--densify-size-thresh", densifySizeThresh, "Size threshold (dup vs split)");
-    int stopScreenSizeAt = 4000;
+    int stopScreenSizeAt = 15000;
     app.add_option("--stop-screen-size-at", stopScreenSizeAt, "Stop splitting large gaussians after N steps");
     int growthStopIter = 15000;
     app.add_option("--growth-stop-iter", growthStopIter, "Stop splat growth after this iteration")
@@ -105,7 +105,7 @@ int main(int argc, char *argv[]) {
     float growthSelectFraction = 0.25f;
     app.add_option("--growth-select-fraction", growthSelectFraction, "Fraction of high-gradient splats selected for growth")
         ->check(CLI::Range(0.0f, 1.0f));
-    float splitScreenSize = 0.05f;
+    float splitScreenSize = 0.25f;
     app.add_option("--split-screen-size", splitScreenSize, "Screen-space split threshold");
     float matchAlphaWeight = 0.1f;
     app.add_option("--match-alpha-weight", matchAlphaWeight, "Alpha L1 loss weight for transparent targets")
@@ -122,28 +122,28 @@ int main(int argc, char *argv[]) {
     float meanNoiseWeight = 50.0f;
     app.add_option("--mean-noise-weight", meanNoiseWeight, "Low-opacity mean noise weight during growth")
         ->check(CLI::Range(0.0f, 100000.0f));
-    float lrMean = 0.00256f;
+    float lrMean = 2e-5f;
     app.add_option("--lr-mean", lrMean, "Initial learning rate for mean parameters")
         ->check(CLI::PositiveNumber);
-    float lrMeanEnd = 0.0000256f;
+    float lrMeanEnd = 2e-7f;
     app.add_option("--lr-mean-end", lrMeanEnd, "Final learning rate for mean parameters")
         ->check(CLI::PositiveNumber);
-    float lrScale = 0.022f;
+    float lrScale = 7e-3f;
     app.add_option("--lr-scale", lrScale, "Initial learning rate for scale parameters")
         ->check(CLI::PositiveNumber);
-    float lrScaleEnd = 0.022f;
+    float lrScaleEnd = 5e-3f;
     app.add_option("--lr-scale-end", lrScaleEnd, "Final learning rate for scale parameters")
         ->check(CLI::PositiveNumber);
     float lrRotation = 0.002f;
     app.add_option("--lr-rotation", lrRotation, "Learning rate for rotation parameters")
         ->check(CLI::PositiveNumber);
-    float lrCoeffsDc = 0.012f;
+    float lrCoeffsDc = 2e-3f;
     app.add_option("--lr-coeffs-dc", lrCoeffsDc, "Learning rate for base SH coefficients")
         ->check(CLI::PositiveNumber);
     float lrCoeffsShScale = 10.0f;
     app.add_option("--lr-coeffs-sh-scale", lrCoeffsShScale, "Divisor for higher-order SH coefficient learning rate")
         ->check(CLI::PositiveNumber);
-    float lrOpacity = 0.035f;
+    float lrOpacity = 0.012f;
     app.add_option("--lr-opac", lrOpacity, "Learning rate for opacity parameters")
         ->check(CLI::PositiveNumber);
     float randomInitSceneScale = 0.0f;

@@ -50,15 +50,15 @@ class TrainingConfig:
         sh_degree: int = 3,
         sh_degree_interval: int = 1,
         ssim_weight: float = 0.2,
-        num_downscales: int = 2,
+        num_downscales: int = 0,
         resolution_schedule: int = 3000,
-        refine_every: int = 100,
-        warmup_length: int = 500,
-        reset_alpha_every: int = 30,
-        densify_grad_thresh: float = 0.008,
+        refine_every: int = 200,
+        warmup_length: int = 0,
+        reset_alpha_every: int = 0,
+        densify_grad_thresh: float = 0.0020,
         densify_size_thresh: float = 0.01,
-        stop_screen_size_at: int = 4000,
-        split_screen_size: float = 0.05,
+        stop_screen_size_at: int = 15000,
+        split_screen_size: float = 0.25,
         keep_crs: bool = False,
         render_mip: bool = False,
         downscale_factor: float = 1.0,
@@ -73,14 +73,14 @@ class TrainingConfig:
         growth_stop_iter: int = 15000,
         max_splats: int = 10000000,
         growth_select_fraction: float = 0.25,
-        lr_mean: float = 0.00256,
-        lr_mean_end: float = 0.0000256,
-        lr_scale: float = 0.022,
-        lr_scale_end: float = 0.022,
+        lr_mean: float = 0.00002,
+        lr_mean_end: float = 0.0000002,
+        lr_scale: float = 0.007,
+        lr_scale_end: float = 0.005,
         lr_rotation: float = 0.002,
-        lr_coeffs_dc: float = 0.012,
+        lr_coeffs_dc: float = 0.002,
         lr_coeffs_sh_scale: float = 10.0,
-        lr_opac: float = 0.035,
+        lr_opac: float = 0.012,
         lpips_loss_weight: float = 0.0,
         random_init_scene_scale: float = 0.0,
         reduce_second_moment: bool = False,
@@ -200,6 +200,10 @@ class GaussianTrainer:
         """Export the current Gaussians as a .splat file."""
         ...
 
+    def load_ply(self, path: str) -> int:
+        """Load Gaussians from a trained PLY file and resume from its saved iteration."""
+        ...
+
     def save_checkpoint(self, path: str) -> None:
         """Save a training checkpoint."""
         ...
@@ -224,4 +228,12 @@ def sync() -> None:
 
 def cleanup() -> None:
     """Release all cached GPU resources."""
+    ...
+
+def _set_metallib_path(path: str) -> None:
+    """Set the default.metallib resource path."""
+    ...
+
+def _set_lpips_weights_path(path: str) -> None:
+    """Set the LPIPS weights resource path."""
     ...

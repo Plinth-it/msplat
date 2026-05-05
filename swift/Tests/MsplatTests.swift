@@ -11,7 +11,19 @@ final class MsplatTests: XCTestCase {
         XCTAssertEqual(config.shDegree, 3)
         XCTAssertEqual(config.shDegreeInterval, 1)
         XCTAssertEqual(config.ssimWeight, 0.2, accuracy: 0.001)
-        XCTAssertEqual(config.densifyGradThresh, 0.008, accuracy: 0.00001)
+        XCTAssertEqual(config.numDownscales, 0)
+        XCTAssertEqual(config.refineEvery, 200)
+        XCTAssertEqual(config.warmupLength, 0)
+        XCTAssertEqual(config.resetAlphaEvery, 0)
+        XCTAssertEqual(config.densifyGradThresh, 0.0020, accuracy: 0.00001)
+        XCTAssertEqual(config.stopScreenSizeAt, 15_000)
+        XCTAssertEqual(config.splitScreenSize, 0.25, accuracy: 0.00001)
+        XCTAssertEqual(config.lrMean, 0.00002, accuracy: 0.0000001)
+        XCTAssertEqual(config.lrMeanEnd, 0.0000002, accuracy: 0.00000001)
+        XCTAssertEqual(config.lrScale, 0.007, accuracy: 0.000001)
+        XCTAssertEqual(config.lrScaleEnd, 0.005, accuracy: 0.000001)
+        XCTAssertEqual(config.lrCoeffsDc, 0.002, accuracy: 0.000001)
+        XCTAssertEqual(config.lrOpacity, 0.012, accuracy: 0.000001)
         XCTAssertEqual(config.bgColor.0, 0.0, accuracy: 0.00001)
         XCTAssertEqual(config.bgColor.1, 0.0, accuracy: 0.00001)
         XCTAssertEqual(config.bgColor.2, 0.0, accuracy: 0.00001)
@@ -89,5 +101,49 @@ final class MsplatTests: XCTestCase {
         XCTAssertGreaterThan(fileSize, 0)
 
         try FileManager.default.removeItem(atPath: tmpPath)
+    }
+
+    func testLoadPlyReturnsIteration() throws {
+        let dataset = GaussianDataset(
+            path: Self.gardenPath,
+            downscaleFactor: 4.0
+        )
+        var config = TrainingConfig()
+        config.iterations = 1
+        config.numDownscales = 0
+
+        let tmpPath = NSTemporaryDirectory() + "msplat_test_load.ply"
+        do {
+            let source = GaussianTrainer(dataset: dataset, config: config)
+            source.step()
+            source.exportPly(to: tmpPath)
+
+            let loaded = GaussianTrainer(dataset: dataset, config: config)
+            let iteration = loaded.loadPly(from: tmpPath)
+            XCTAssertEqual(iteration, 1)
+            XCTAssertEqual(loaded.iteration, 1)
+            XCTAssertEqual(loaded.splatCount, source.splatCount)
+        }
+
+        try FileManager.default.removeItem(atPath: tmpPath)
+    }
+
+    func testTrainerDeinitDoesNotCleanupSharedMetalState() throws {
+        let dataset = GaussianDataset(
+            path: Self.gardenPath,
+            downscaleFactor: 4.0
+        )
+        var config = TrainingConfig()
+        config.iterations = 2
+        config.numDownscales = 0
+
+        let survivor = GaussianTrainer(dataset: dataset, config: config)
+        do {
+            let shortLived = GaussianTrainer(dataset: dataset, config: config)
+            XCTAssertGreaterThan(shortLived.step().splatCount, 0)
+        }
+
+        XCTAssertGreaterThan(survivor.step().splatCount, 0)
+        XCTAssertGreaterThan(survivor.render(cameraIndex: 0).pixels.count, 0)
     }
 }

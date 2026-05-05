@@ -314,6 +314,64 @@ inline float mip_opacity_compensation(const float3 cov2d) {
     return sqrt(det_orig / det_blurred);
 }
 
+inline float2 compute_bbox_extent(const float3 conic, const float power_threshold) {
+    float det = conic.x * conic.z - conic.y * conic.y;
+    if (det <= 0.0f || power_threshold < 0.0f) {
+        return float2(-1.0f);
+    }
+    float inv_det = 1.0f / det;
+    return float2(
+        sqrt(2.0f * power_threshold * conic.z * inv_det),
+        sqrt(2.0f * power_threshold * conic.x * inv_det)
+    );
+}
+
+inline float gaussian_sigma(const float2 pixel_coord, const float3 conic, const float2 xy) {
+    float2 delta = pixel_coord - xy;
+    return 0.5f * (conic.x * delta.x * delta.x + conic.z * delta.y * delta.y)
+        + conic.y * delta.x * delta.y;
+}
+
+inline float4 tile_rect(const uint2 tile) {
+    float2 rect_min = float2(tile) * float2((float)BLOCK_X, (float)BLOCK_Y);
+    float2 rect_max = rect_min + float2((float)BLOCK_X, (float)BLOCK_Y);
+    return float4(rect_min.x, rect_min.y, rect_max.x, rect_max.y);
+}
+
+inline bool will_primitive_contribute(
+    const float4 rect,
+    const float2 mean,
+    const float3 conic,
+    const float power_threshold
+) {
+    bool x_left = mean.x < rect.x;
+    bool x_right = mean.x > rect.z;
+    bool in_x_range = !(x_left || x_right);
+
+    bool y_above = mean.y < rect.y;
+    bool y_below = mean.y > rect.w;
+    bool in_y_range = !(y_above || y_below);
+
+    if (in_x_range && in_y_range) {
+        return true;
+    }
+
+    float2 closest_corner = float2(x_left ? rect.x : rect.z, y_above ? rect.y : rect.w);
+    float width = rect.z - rect.x;
+    float height = rect.w - rect.y;
+    float2 d = float2(x_left ? width : -width, y_above ? height : -height);
+    float2 diff = mean - closest_corner;
+
+    float tx = in_y_range ? 0.0f
+        : clamp((d.x * conic.x * diff.x + d.x * conic.y * diff.y)
+            / (d.x * conic.x * d.x), 0.0f, 1.0f);
+    float ty = in_x_range ? 0.0f
+        : clamp((d.y * conic.y * diff.x + d.y * conic.z * diff.y)
+            / (d.y * conic.z * d.y), 0.0f, 1.0f);
+    float2 max_contribution_point = closest_corner + float2(tx, ty) * d;
+    return gaussian_sigma(mean, conic, max_contribution_point) <= power_threshold;
+}
+
 // Project 3D point to pixel coordinates via projection matrix.
 inline float2 project_pix(
     constant float *mat, const float3 p, const uint2 img_size, const float2 pp
@@ -925,6 +983,7 @@ kernel void rasterize_backward_kernel(
     device atomic_float* v_conic, // float3
     device atomic_float* v_rgb, // float3
     device atomic_float* v_opacity,
+    device atomic_float* v_refine,
     constant float* alpha_target,
     constant uint& use_alpha_loss,
     constant float& alpha_loss_grad_scale,
@@ -1073,6 +1132,7 @@ kernel void rasterize_backward_kernel(
             float3 v_conic_local = {0.f, 0.f, 0.f};
             float2 v_xy_local = {0.f, 0.f};
             float v_opacity_local = 0.f;
+            float v_refine_local = 0.f;
             //initialize everything to 0, only set if the lane is valid
             if(valid && alpha<0.999f){
                 // compute the current T for this gaussian
@@ -1101,12 +1161,15 @@ kernel void rasterize_backward_kernel(
                     fma(b_conic.y, delta.x, b_conic.z * delta.y));
                 // Fused sigmoid derivative: dL/d(logit) = -v_sigma * (1 - opac)
                 v_opacity_local = -v_sigma * (1.f - opac);
+                float final_alpha = max(1.0f - T_final, 1e-5f);
+                v_refine_local = length(v_xy_local * float2((float)img_size.x, (float)img_size.y)) / final_alpha;
             }
 
             v_rgb_local = warpSum3(v_rgb_local, warp_size, wr);
             v_conic_local = warpSum3(v_conic_local, warp_size, wr);
             v_xy_local = warpSum2(v_xy_local, warp_size, wr);
             v_opacity_local = warpSum(v_opacity_local, warp_size, wr);
+            v_refine_local = warpSum(v_refine_local, warp_size, wr);
 
             if (wr == 0) {
                 // Fused clamp_min backward: zero gradient where raw_color + 0.5 < 0
@@ -1122,6 +1185,7 @@ kernel void rasterize_backward_kernel(
                 atomic_fetch_add_explicit(v_xy + 2*b_id + 1, v_xy_local.y, memory_order_relaxed);
 
                 atomic_fetch_add_explicit(v_opacity + b_id, v_opacity_local, memory_order_relaxed);
+                atomic_fetch_add_explicit(v_refine + b_id, v_refine_local, memory_order_relaxed);
             }
         }
     }
@@ -1672,11 +1736,14 @@ kernel void compute_cov2d_bounds_kernel(
 kernel void accumulate_grad_stats_kernel(
     constant int& num_points,
     constant int* radii [[buffer(1)]],
-    constant float* xys_grad [[buffer(2)]],     // (N, 2) packed float2
+    constant float* refine_weight_grad [[buffer(2)]],
     device float* vis_counts [[buffer(3)]],      // (N,) in-place
     device float* xys_grad_norm [[buffer(4)]],   // (N,) in-place
     device float* max_2d_size [[buffer(5)]],     // (N,) in-place
-    constant float& inv_max_dim [[buffer(6)]],   // 1.0 / max(H, W)
+    constant float* aabb [[buffer(6)]],          // float2 extent per Gaussian
+    constant float& inv_max_dim [[buffer(7)]],   // 1.0 / max(H, W)
+    constant float& inv_width [[buffer(8)]],
+    constant float& inv_height [[buffer(9)]],
     uint idx [[thread_position_in_grid]]
 ) {
     if (idx >= (uint)num_points) return;
@@ -1684,12 +1751,17 @@ kernel void accumulate_grad_stats_kernel(
 
     vis_counts[idx] += 1.0f;
 
-    float gx = xys_grad[idx * 2];
-    float gy = xys_grad[idx * 2 + 1];
-    xys_grad_norm[idx] = max(xys_grad_norm[idx], sqrt(gx * gx + gy * gy));
+    float refine_weight = refine_weight_grad[idx] * (2.0f * inv_max_dim);
+    if (isfinite(refine_weight)) {
+        xys_grad_norm[idx] = max(xys_grad_norm[idx], refine_weight);
+    }
 
-    float r = (float)radii[idx] * inv_max_dim;
-    max_2d_size[idx] = max(max_2d_size[idx], r);
+    float2 extent = read_packed_float2(aabb, idx);
+    float screen_size = max(extent.x * inv_width, extent.y * inv_height);
+    if (!isfinite(screen_size)) {
+        screen_size = (float)radii[idx] * inv_max_dim;
+    }
+    max_2d_size[idx] = max(max_2d_size[idx], screen_size);
 }
 
 kernel void fused_adam_kernel(
@@ -1794,6 +1866,7 @@ kernel void project_and_sh_forward_kernel(
     device float* aabb, // float2: per-axis pixel extents
     device float* opacity_comp,
     constant uint& use_mip_splatting,
+    constant float* opacities,
     uint3 gp [[thread_position_in_grid]]
 ) {
     uint idx = gp.x;
@@ -1824,7 +1897,8 @@ kernel void project_and_sh_forward_kernel(
     float3 cov2d = project_cov3d_ewa(
         local_cov3d, viewmat, fx, fy, tan_fovx, tan_fovy, p_view
     );
-    opacity_comp[idx] = use_mip_splatting ? mip_opacity_compensation(cov2d) : 1.0f;
+    float opacity_comp_value = use_mip_splatting ? mip_opacity_compensation(cov2d) : 1.0f;
+    opacity_comp[idx] = opacity_comp_value;
 
     float3 conic;
     float radius;
@@ -1836,11 +1910,26 @@ kernel void project_and_sh_forward_kernel(
 
     float2 center = project_pix(projmat, p_world, img_size, {cx, cy});
 
-    float aabb_x = ceil(3.0f * sqrt(cov2d.x));
-    float aabb_y = ceil(3.0f * sqrt(cov2d.z));
+    float opacity = (1.0f / (1.0f + exp(-opacities[idx]))) * opacity_comp_value;
+    if (!isfinite(opacity) || opacity < (1.0f / 255.0f)) {
+        return;
+    }
+    float power_threshold = log(255.0f * opacity);
+    float2 extent = compute_bbox_extent(conic, power_threshold);
+    if (!(extent.x >= 0.0f && extent.y >= 0.0f)) {
+        return;
+    }
+
     uint2 tile_min, tile_max;
-    get_tile_bbox(center, float2(aabb_x, aabb_y), (int3)tile_bounds, tile_min, tile_max);
-    int32_t tile_area = (tile_max.x - tile_min.x) * (tile_max.y - tile_min.y);
+    get_tile_bbox(center, extent, (int3)tile_bounds, tile_min, tile_max);
+    int32_t tile_area = 0;
+    for (uint i = tile_min.y; i < tile_max.y; i++) {
+        for (uint j = tile_min.x; j < tile_max.x; j++) {
+            if (will_primitive_contribute(tile_rect(uint2(j, i)), center, conic, power_threshold)) {
+                tile_area++;
+            }
+        }
+    }
 
     if (tile_area <= 0) {
         return;
@@ -1848,10 +1937,10 @@ kernel void project_and_sh_forward_kernel(
 
     num_tiles_hit[idx] = tile_area;
     depths[idx] = p_view.z;
-    radii[idx] = (int)radius;
+    radii[idx] = max(1, (int)ceil(max(extent.x, extent.y)));
     write_packed_float2(xys, idx, center);
-    aabb[idx * 2] = aabb_x;
-    aabb[idx * 2 + 1] = aabb_y;
+    aabb[idx * 2] = extent.x;
+    aabb[idx * 2 + 1] = extent.y;
 
     // SH: compute colors for non-culled gaussians (reuse p_world from registers)
     float3 viewdir = normalize(p_world - cam_pos);
@@ -2191,12 +2280,20 @@ kernel void scatter_to_prealloc_bins_kernel(
     device atomic_uint* scatter_counters    [[buffer(6)]],
     device uint64_t* prealloc_bins          [[buffer(7)]],
     device atomic_uint* overflow_flag       [[buffer(8)]],
+    constant float* conics                  [[buffer(9)]],
+    constant float* opacities               [[buffer(10)]],
+    constant float* opacity_comp            [[buffer(11)]],
     uint idx [[thread_position_in_grid]]
 ) {
     if (idx >= num_points) return;
     if (radii[idx] <= 0) return;
 
     float2 center = read_packed_float2(xys, idx);
+    float3 conic = read_packed_float3(conics, idx);
+    float opacity = (1.0f / (1.0f + exp(-opacities[idx]))) * opacity_comp[idx];
+    if (!isfinite(opacity) || opacity < (1.0f / 255.0f)) return;
+    float power_threshold = log(255.0f * opacity);
+
     uint2 tile_min, tile_max;
     get_tile_bbox(center, read_packed_float2(aabb, idx), (int3)tile_bounds, tile_min, tile_max);
 
@@ -2204,6 +2301,9 @@ kernel void scatter_to_prealloc_bins_kernel(
 
     for (uint i = tile_min.y; i < tile_max.y; i++) {
         for (uint j = tile_min.x; j < tile_max.x; j++) {
+            if (!will_primitive_contribute(tile_rect(uint2(j, i)), center, conic, power_threshold)) {
+                continue;
+            }
             uint tile_id = i * tile_bounds.x + j;
             uint pos = atomic_fetch_add_explicit(&scatter_counters[tile_id], 1u, memory_order_relaxed);
             if (pos >= MAX_TILE_ELEMS) {
@@ -3026,6 +3126,7 @@ kernel void rasterize_backward_chunked_kernel(
     device atomic_float* v_conic,
     device atomic_float* v_rgb,
     device atomic_float* v_opacity,
+    device atomic_float* v_refine,
     constant uint& chunk_size,
     constant uint& K_max,
     constant float* alpha_target,
@@ -3168,6 +3269,7 @@ kernel void rasterize_backward_chunked_kernel(
             float3 v_conic_local = {0.f, 0.f, 0.f};
             float2 v_xy_local = {0.f, 0.f};
             float v_opacity_local = 0.f;
+            float v_refine_local = 0.f;
 
             if (valid && alpha < 0.999f) {
                 float ra = 1.f / (1.f - alpha);
@@ -3189,12 +3291,15 @@ kernel void rasterize_backward_chunked_kernel(
                     fma(b_conic.x, delta.x, b_conic.y * delta.y),
                     fma(b_conic.y, delta.x, b_conic.z * delta.y));
                 v_opacity_local = -v_sigma * (1.f - opac);
+                float final_alpha = max(1.0f - T_final, 1e-5f);
+                v_refine_local = length(v_xy_local * float2((float)img_size.x, (float)img_size.y)) / final_alpha;
             }
 
             v_rgb_local = warpSum3(v_rgb_local, warp_size, wr);
             v_conic_local = warpSum3(v_conic_local, warp_size, wr);
             v_xy_local = warpSum2(v_xy_local, warp_size, wr);
             v_opacity_local = warpSum(v_opacity_local, warp_size, wr);
+            v_refine_local = warpSum(v_refine_local, warp_size, wr);
 
             if (wr == 0) {
                 if (b_rgb.x + 0.5f >= 0.f) atomic_fetch_add_explicit(v_rgb + 3*b_id + 0, v_rgb_local.x, memory_order_relaxed);
@@ -3206,6 +3311,7 @@ kernel void rasterize_backward_chunked_kernel(
                 atomic_fetch_add_explicit(v_xy + 2*b_id + 0, v_xy_local.x, memory_order_relaxed);
                 atomic_fetch_add_explicit(v_xy + 2*b_id + 1, v_xy_local.y, memory_order_relaxed);
                 atomic_fetch_add_explicit(v_opacity + b_id, v_opacity_local, memory_order_relaxed);
+                atomic_fetch_add_explicit(v_refine + b_id, v_refine_local, memory_order_relaxed);
             }
         }
     }
@@ -3719,6 +3825,7 @@ kernel void lpips_apply_grad_kernel(
 #define DENSIFY_NOTHING 0
 #define DENSIFY_SPLIT   1
 #define DENSIFY_DUP     2
+constant float MIN_QUAT_NORM_SQR = 1e-6f;
 
 // Classify each gaussian as split, dup, or nothing based on gradient and scale thresholds.
 kernel void densify_classify_kernel(
@@ -3762,9 +3869,10 @@ kernel void densify_classify_kernel(
     dup_flag[idx]   = do_dup   ? 1 : 0;
 }
 
-// Append split children into backing buffers. One thread per original gaussian.
-// Each split gaussian produces 2 children at [N + 2*(ord)], [N + 2*(ord)+1].
-// Also shrinks parent scale by 1/1.6 and zeros optimizer state for children.
+// Brush-style split. One thread per original Gaussian.
+// Each selected Gaussian is kept as the first mixture component: its mean moves
+// by -sample, its scale/opacity shrink, and one child is appended at [N + ord]
+// with mean +sample and matching shrunken scale/opacity.
 kernel void densify_append_split_kernel(
     constant int& N,
     constant int* split_flag         [[buffer(1)]],
@@ -3795,8 +3903,7 @@ kernel void densify_append_split_kernel(
     if (idx >= (uint)N || split_flag[idx] == 0) return;
 
     int ord = split_prefix[idx] - 1;  // 0-based ordinal among splits
-    int c0 = N + 2 * ord;             // child 0 position
-    int c1 = c0 + 1;                  // child 1 position
+    int child = N + ord;
 
     // Read parent quaternion and normalize
     float qw = quats_buf[idx*4], qx = quats_buf[idx*4+1];
@@ -3805,7 +3912,9 @@ kernel void densify_append_split_kernel(
     qw /= qlen; qx /= qlen; qy /= qlen; qz /= qlen;
 
     // Parent scale (exp)
-    float sx = exp(scales_buf[idx*3]), sy = exp(scales_buf[idx*3+1]), sz = exp(scales_buf[idx*3+2]);
+    float mean_x = means_buf[idx*3], mean_y = means_buf[idx*3+1], mean_z = means_buf[idx*3+2];
+    float log_sx = scales_buf[idx*3], log_sy = scales_buf[idx*3+1], log_sz = scales_buf[idx*3+2];
+    float sx = exp(log_sx), sy = exp(log_sy), sz = exp(log_sz);
 
     float raw_opacity = opacities_buf[idx];
     float parent_opacity = 1.0f / (1.0f + exp(-raw_opacity));
@@ -3813,51 +3922,57 @@ kernel void densify_append_split_kernel(
     new_opacity = clamp(new_opacity, 1.0f / 255.0f, 1.0f - 1.0f / 255.0f);
     float new_raw_opacity = log(new_opacity / (1.0f - new_opacity));
 
-    // Mirror split: two children are offset symmetrically around the parent.
-    for (int k = 0; k < 2; k++) {
-        int child = (k == 0) ? c0 : c1;
-        float sign = (k == 0) ? -1.0f : 1.0f;
+    // Scale random sample by parent scale, then rotate by parent quaternion.
+    float r0 = random_samples[ord*3]   * sx;
+    float r1 = random_samples[ord*3+1] * sy;
+    float r2 = random_samples[ord*3+2] * sz;
+    float v0 = (1-2*(qy*qy+qz*qz))*r0 + 2*(qx*qy-qw*qz)*r1 + 2*(qx*qz+qw*qy)*r2;
+    float v1 = 2*(qx*qy+qw*qz)*r0 + (1-2*(qx*qx+qz*qz))*r1 + 2*(qy*qz-qw*qx)*r2;
+    float v2 = 2*(qx*qz-qw*qy)*r0 + 2*(qy*qz+qw*qx)*r1 + (1-2*(qx*qx+qy*qy))*r2;
 
-        // Scale random sample by parent scale
-        float r0 = random_samples[ord*3]   * sx;
-        float r1 = random_samples[ord*3+1] * sy;
-        float r2 = random_samples[ord*3+2] * sz;
+    means_buf[idx*3]   = mean_x - v0;
+    means_buf[idx*3+1] = mean_y - v1;
+    means_buf[idx*3+2] = mean_z - v2;
+    scales_buf[idx*3]   = log_sx + log_scale_factor;
+    scales_buf[idx*3+1] = log_sy + log_scale_factor;
+    scales_buf[idx*3+2] = log_sz + log_scale_factor;
+    opacities_buf[idx] = new_raw_opacity;
 
-        // Rotate by parent quaternion: v' = R @ v
-        float v0 = (1-2*(qy*qy+qz*qz))*r0 + 2*(qx*qy-qw*qz)*r1 + 2*(qx*qz+qw*qy)*r2;
-        float v1 = 2*(qx*qy+qw*qz)*r0 + (1-2*(qx*qx+qz*qz))*r1 + 2*(qy*qz-qw*qx)*r2;
-        float v2 = 2*(qx*qz-qw*qy)*r0 + 2*(qy*qz+qw*qx)*r1 + (1-2*(qx*qx+qy*qy))*r2;
+    means_buf[child*3]   = mean_x + v0;
+    means_buf[child*3+1] = mean_y + v1;
+    means_buf[child*3+2] = mean_z + v2;
+    scales_buf[child*3]   = log_sx + log_scale_factor;
+    scales_buf[child*3+1] = log_sy + log_scale_factor;
+    scales_buf[child*3+2] = log_sz + log_scale_factor;
 
-        // Child position = parent +/- rotated offset
-        means_buf[child*3]   = means_buf[idx*3]   + sign * v0;
-        means_buf[child*3+1] = means_buf[idx*3+1] + sign * v1;
-        means_buf[child*3+2] = means_buf[idx*3+2] + sign * v2;
+    quats_buf[child*4] = qw;
+    quats_buf[child*4+1] = qx;
+    quats_buf[child*4+2] = qy;
+    quats_buf[child*4+3] = qz;
+    for (int j = 0; j < 3; j++) featuresDc_buf[child*3+j] = featuresDc_buf[idx*3+j];
+    for (int j = 0; j < fr_stride; j++) featuresRest_buf[child*fr_stride+j] = featuresRest_buf[idx*fr_stride+j];
+    opacities_buf[child] = new_raw_opacity;
 
-        // Child scale = shrunk parent scale
-        scales_buf[child*3]   = scales_buf[idx*3]   + log_scale_factor;
-        scales_buf[child*3+1] = scales_buf[idx*3+1] + log_scale_factor;
-        scales_buf[child*3+2] = scales_buf[idx*3+2] + log_scale_factor;
+    // Zero optimizer state for both split components. The existing parent is
+    // structurally displaced/shrunk in-place, so stale Adam moments can push it
+    // back along the pre-split trajectory.
+    for (int j = 0; j < 3; j++) { adam_ea0[idx*3+j] = 0; adam_es0[idx*3+j] = 0; }
+    for (int j = 0; j < 3; j++) { adam_ea1[idx*3+j] = 0; adam_es1[idx*3+j] = 0; }
+    for (int j = 0; j < 4; j++) { adam_ea2[idx*4+j] = 0; adam_es2[idx*4+j] = 0; }
+    for (int j = 0; j < 3; j++) { adam_ea3[idx*3+j] = 0; adam_es3[idx*3+j] = 0; }
+    for (int j = 0; j < fr_stride; j++) { adam_ea4[idx*fr_stride+j] = 0; adam_es4[idx*fr_stride+j] = 0; }
+    adam_ea5[idx] = 0; adam_es5[idx] = 0;
 
-        // Copy parent quaternion and color, then split opacity mass across children.
-        for (int j = 0; j < 4; j++) quats_buf[child*4+j] = quats_buf[idx*4+j];
-        for (int j = 0; j < 3; j++) featuresDc_buf[child*3+j] = featuresDc_buf[idx*3+j];
-        for (int j = 0; j < fr_stride; j++) featuresRest_buf[child*fr_stride+j] = featuresRest_buf[idx*fr_stride+j];
-        opacities_buf[child] = new_raw_opacity;
-
-        // Zero optimizer state for children (strides: 3,3,4,3,fr_stride,1)
-        for (int j = 0; j < 3; j++) { adam_ea0[child*3+j] = 0; adam_es0[child*3+j] = 0; }
-        for (int j = 0; j < 3; j++) { adam_ea1[child*3+j] = 0; adam_es1[child*3+j] = 0; }
-        for (int j = 0; j < 4; j++) { adam_ea2[child*4+j] = 0; adam_es2[child*4+j] = 0; }
-        for (int j = 0; j < 3; j++) { adam_ea3[child*3+j] = 0; adam_es3[child*3+j] = 0; }
-        for (int j = 0; j < fr_stride; j++) { adam_ea4[child*fr_stride+j] = 0; adam_es4[child*fr_stride+j] = 0; }
-        adam_ea5[child] = 0; adam_es5[child] = 0;
-    }
-
-    // Split parents are culled in densify_cull_classify_kernel.
+    for (int j = 0; j < 3; j++) { adam_ea0[child*3+j] = 0; adam_es0[child*3+j] = 0; }
+    for (int j = 0; j < 3; j++) { adam_ea1[child*3+j] = 0; adam_es1[child*3+j] = 0; }
+    for (int j = 0; j < 4; j++) { adam_ea2[child*4+j] = 0; adam_es2[child*4+j] = 0; }
+    for (int j = 0; j < 3; j++) { adam_ea3[child*3+j] = 0; adam_es3[child*3+j] = 0; }
+    for (int j = 0; j < fr_stride; j++) { adam_ea4[child*fr_stride+j] = 0; adam_es4[child*fr_stride+j] = 0; }
+    adam_ea5[child] = 0; adam_es5[child] = 0;
 }
 
 // Append duplicate copies into backing buffers. One thread per original gaussian.
-// Each dup produces 1 copy at [N + 2*nSplits + dup_ord].
+// Each dup produces 1 copy at [N + nSplits + dup_ord].
 kernel void densify_append_dup_kernel(
     constant int& N,
     constant int* dup_flag           [[buffer(1)]],
@@ -3888,7 +4003,7 @@ kernel void densify_append_dup_kernel(
 
     int nSplits = (N > 0) ? split_prefix[N - 1] : 0;
     int ord = dup_prefix[idx] - 1;
-    int dst = N + 2 * nSplits + ord;
+    int dst = N + nSplits + ord;
 
     // Copy all parent data
     for (int j = 0; j < 3; j++) means_buf[dst*3+j] = means_buf[idx*3+j];
@@ -3908,7 +4023,7 @@ kernel void densify_append_dup_kernel(
 }
 
 // Classify each post-growth gaussian as keep or cull.
-// N_old = pre-growth count. N_new = N_old + 2*nSplits + nDups (computed from prefix sums).
+// N_old = pre-growth count. N_new = N_old + nSplits + nDups (computed from prefix sums).
 // Dispatch with grid_size = worst_case (e.g. 3*N_old).
 kernel void densify_cull_classify_kernel(
     constant int& N_old,
@@ -3925,28 +4040,57 @@ kernel void densify_cull_classify_kernel(
     constant int& check_screen       [[buffer(11)]],
     device int* keep_flag            [[buffer(12)]],
     constant int& max_new_count      [[buffer(13)]],
+    constant float* means_buf        [[buffer(14)]],
+    constant float* quats_buf        [[buffer(15)]],
+    constant float* featuresDc_buf   [[buffer(16)]],
+    constant float* featuresRest_buf [[buffer(17)]],
+    constant int& fr_stride          [[buffer(18)]],
+    constant float4& cull_center     [[buffer(19)]],
+    constant float& cull_bounds_thresh [[buffer(20)]],
     uint idx [[thread_position_in_grid]]
 ) {
     int nSplits = (N_old > 0) ? split_prefix[N_old - 1] : 0;
     int nDups   = (N_old > 0) ? dup_prefix[N_old - 1] : 0;
-    int N_new = N_old + 2 * nSplits + nDups;
+    int N_new = N_old + nSplits + nDups;
 
     N_new = min(N_new, max_new_count);
     if (idx >= (uint)N_new) { keep_flag[idx] = 0; return; }
 
-    // Sigmoid of opacity
     float opacity_sigmoid = 1.0f / (1.0f + exp(-opacities_buf[idx]));
-    bool cull = opacity_sigmoid < cull_alpha_thresh;
+    bool cull = !isfinite(opacities_buf[idx]) || opacity_sigmoid < cull_alpha_thresh;
 
-    // Split parents are replaced by their two children.
-    if (idx < (uint)N_old && split_flag[idx] != 0) cull = true;
+    float3 log_scale = read_packed_float3(scales_buf, idx);
+    float3 scale = exp(log_scale);
+    bool scale_bad = !isfinite(log_scale.x) || !isfinite(log_scale.y) || !isfinite(log_scale.z)
+        || !isfinite(scale.x) || !isfinite(scale.y) || !isfinite(scale.z)
+        || min(min(scale.x, scale.y), scale.z) < 1e-10f
+        || max(max(scale.x, scale.y), scale.z) > cull_scale_thresh;
+    cull = cull || scale_bad;
 
-    (void)scales_buf;
+    float3 mean = read_packed_float3(means_buf, idx);
+    bool mean_bad = !isfinite(mean.x) || !isfinite(mean.y) || !isfinite(mean.z);
+    if (cull_bounds_thresh < 3.0e38f) {
+        float3 delta = abs(mean - cull_center.xyz);
+        mean_bad = mean_bad || max(max(delta.x, delta.y), delta.z) > cull_bounds_thresh;
+    }
+    cull = cull || mean_bad;
+
+    float4 quat = read_packed_float4(quats_buf, idx);
+    cull = cull || !isfinite(quat.x) || !isfinite(quat.y)
+        || !isfinite(quat.z) || !isfinite(quat.w);
+    cull = cull || dot(quat, quat) < MIN_QUAT_NORM_SQR;
+
+    float3 dc = read_packed_float3(featuresDc_buf, idx);
+    cull = cull || !isfinite(dc.x) || !isfinite(dc.y) || !isfinite(dc.z);
+    for (int j = 0; j < fr_stride; ++j) {
+        cull = cull || !isfinite(featuresRest_buf[idx * fr_stride + j]);
+    }
+
     (void)max_2d_size;
-    (void)cull_scale_thresh;
     (void)cull_screen_size;
     (void)check_huge;
     (void)check_screen;
+    (void)split_flag;
 
     keep_flag[idx] = cull ? 0 : 1;
 }

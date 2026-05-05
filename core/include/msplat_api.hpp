@@ -18,15 +18,15 @@ struct Config {
     int shDegree = 3;
     int shDegreeInterval = 1;
     float ssimWeight = 0.2f;
-    int numDownscales = 2;
+    int numDownscales = 0;
     int resolutionSchedule = 3000;
-    int refineEvery = 100;
-    int warmupLength = 500;
-    int resetAlphaEvery = 30;
-    float densifyGradThresh = 0.008f;
+    int refineEvery = 200;
+    int warmupLength = 0;
+    int resetAlphaEvery = 0;
+    float densifyGradThresh = 0.0020f;
     float densifySizeThresh = 0.01f;
-    int stopScreenSizeAt = 4000;
-    float splitScreenSize = 0.05f;
+    int stopScreenSizeAt = 15000;
+    float splitScreenSize = 0.25f;
     bool keepCrs = false;
     bool renderMip = false;
     float downscaleFactor = 1.0f;
@@ -39,14 +39,14 @@ struct Config {
     int growthStopIter = 15000;
     int maxSplats = 10000000;
     float growthSelectFraction = 0.25f;
-    float lrMean = 0.00256f;
-    float lrMeanEnd = 0.0000256f;
-    float lrScale = 0.022f;
-    float lrScaleEnd = 0.022f;
+    float lrMean = 2e-5f;
+    float lrMeanEnd = 2e-7f;
+    float lrScale = 7e-3f;
+    float lrScaleEnd = 5e-3f;
     float lrRotation = 0.002f;
-    float lrCoeffsDc = 0.012f;
+    float lrCoeffsDc = 2e-3f;
     float lrCoeffsShScale = 10.0f;
-    float lrOpacity = 0.035f;
+    float lrOpacity = 0.012f;
     float lpipsLossWeight = 0.0f;
     float randomInitSceneScale = 0.0f;  // 0 estimates from cameras when no point cloud exists
     bool reduceSecondMoment = false;
@@ -166,6 +166,9 @@ public:
 
     /// Export scene to .splat format.
     void exportSplat(const std::string& path);
+
+    /// Load a trained Gaussian PLY. Returns the saved iteration if present.
+    int loadPly(const std::string& path);
 
     /// Save full training state (params + optimizer) for resume.
     void saveCheckpoint(const std::string& path);

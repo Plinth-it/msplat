@@ -29,7 +29,7 @@ def main():
         downscale_factor: float = 1.0
         """Image downscale factor"""
 
-        num_downscales: int = 2
+        num_downscales: int = 0
         """Number of progressive downscales"""
 
         resolution_schedule: int = 3000
@@ -44,22 +44,22 @@ def main():
         ssim_weight: float = 0.2
         """SSIM loss weight"""
 
-        refine_every: int = 100
+        refine_every: int = 200
         """Densification interval"""
 
-        warmup_length: int = 500
+        warmup_length: int = 0
         """Steps before densification starts"""
 
-        reset_alpha_every: int = 30
-        """Reset opacity every N refinements"""
+        reset_alpha_every: int = 0
+        """Reset opacity every N refinements, or 0 to disable"""
 
-        densify_grad_thresh: float = 0.008
+        densify_grad_thresh: float = 0.0020
         """Gradient threshold for densification"""
 
         densify_size_thresh: float = 0.01
         """Size threshold for split vs clone"""
 
-        stop_screen_size_at: int = 4000
+        stop_screen_size_at: int = 15000
         """Stop screen-size split after this step"""
 
         growth_stop_iter: int = 15000
@@ -71,7 +71,7 @@ def main():
         growth_select_fraction: float = 0.25
         """Fraction of high-gradient splats selected for growth"""
 
-        split_screen_size: float = 0.05
+        split_screen_size: float = 0.25
         """Screen-space split threshold"""
 
         match_alpha_weight: float = 0.1
@@ -89,28 +89,28 @@ def main():
         mean_noise_weight: float = 50.0
         """Low-opacity mean noise weight during growth"""
 
-        lr_mean: float = 0.00256
+        lr_mean: float = 0.00002
         """Initial learning rate for mean parameters"""
 
-        lr_mean_end: float = 0.0000256
+        lr_mean_end: float = 0.0000002
         """Final learning rate for mean parameters"""
 
-        lr_scale: float = 0.022
+        lr_scale: float = 0.007
         """Initial learning rate for scale parameters"""
 
-        lr_scale_end: float = 0.022
+        lr_scale_end: float = 0.005
         """Final learning rate for scale parameters"""
 
         lr_rotation: float = 0.002
         """Learning rate for rotation parameters"""
 
-        lr_coeffs_dc: float = 0.012
+        lr_coeffs_dc: float = 0.002
         """Learning rate for base SH coefficients"""
 
         lr_coeffs_sh_scale: float = 10.0
         """Divisor for higher-order SH coefficient learning rate"""
 
-        lr_opac: float = 0.035
+        lr_opac: float = 0.012
         """Learning rate for opacity parameters"""
 
         random_init_scene_scale: float = 0.0

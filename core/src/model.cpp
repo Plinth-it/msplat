@@ -6,6 +6,7 @@
 #include <cmath>
 #include <limits>
 #include <stdexcept>
+#include <utility>
 #include "model.hpp"
 #include "kdtree_tensor.hpp"
 #include "msplat.hpp"
@@ -15,7 +16,9 @@ namespace fs = std::filesystem;
 
 static const double C0 = 0.28209479177387814;
 static constexpr float MIN_OPACITY = 1.0f / 255.0f;
+static constexpr float MIN_QUAT_NORM_SQR = 1e-6f;
 static constexpr int RANDOM_INIT_SPLAT_COUNT = 10000;
+static constexpr float BOUND_PERCENTILE = 0.8f;
 
 struct InitialSplats {
     std::vector<float> xyz;
@@ -87,6 +90,30 @@ static float estimateRandomInitSceneScale(const std::vector<Camera>& cameras) {
     }
 
     return std::max(3.0f * totalNearest / static_cast<float>(cameras.size()), 1.0f);
+}
+
+static float estimateMedianExtent(const float *xyz, int64_t count) {
+    if (!xyz || count <= 0) return 1.0f;
+
+    std::vector<float> extents;
+    extents.reserve(3);
+    for (int axis = 0; axis < 3; ++axis) {
+        std::vector<float> values;
+        values.reserve(count);
+        for (int64_t i = 0; i < count; ++i) {
+            float v = xyz[i * 3 + axis];
+            if (std::isfinite(v)) values.push_back(v);
+        }
+        if (values.empty()) continue;
+        std::sort(values.begin(), values.end());
+        size_t lo = static_cast<size_t>(0.1f * static_cast<float>(values.size() - 1));
+        size_t hi = static_cast<size_t>(0.9f * static_cast<float>(values.size() - 1));
+        extents.push_back(values[hi] - values[lo]);
+    }
+
+    if (extents.empty()) return 1.0f;
+    std::sort(extents.begin(), extents.end());
+    return std::max(extents[extents.size() / 2], 0.01f);
 }
 
 static InitialSplats createRandomInitialSplats(const std::vector<Camera>& cameras,
@@ -197,14 +224,17 @@ Model::Model(const InputData &inputData, int numCameras,
     }
 
     int64_t numPoints = useRandomInit ? randomInit.count : inputData.points.count;
+    const std::vector<float> &sourceXyz = useRandomInit ? randomInit.xyz : inputData.points.xyz;
+    float meanLrSceneScale = estimateMedianExtent(sourceXyz.data(), numPoints);
+    means_lr_init *= meanLrSceneScale;
+    means_lr_final *= meanLrSceneScale;
+
     scale = inputData.scale;
     memcpy(translation, inputData.translation, sizeof(translation));
 
     // Means: copy xyz directly to GPU
     means = gpu_empty({numPoints, 3}, DType::Float32);
-    memcpy(means.data_ptr(),
-           useRandomInit ? randomInit.xyz.data() : inputData.points.xyz.data(),
-           numPoints * 3 * sizeof(float));
+    memcpy(means.data_ptr(), sourceXyz.data(), numPoints * 3 * sizeof(float));
 
     // Scales: KNN for point-cloud init, Brush-style scene-scale default for random init.
     {
@@ -398,14 +428,209 @@ int Model::getDownscaleFactor(int step) {
     return 1 << std::max(remaining, 0);
 }
 
+namespace {
+
+float sigmoidf(float x) {
+    return 1.0f / (1.0f + std::exp(-x));
+}
+
+float percentileInPlace(std::vector<float>& values, float q) {
+    if (values.empty()) return 0.0f;
+    q = std::clamp(q, 0.0f, 1.0f);
+    size_t idx = static_cast<size_t>(q * static_cast<float>(values.size() - 1));
+    std::nth_element(values.begin(), values.begin() + idx, values.end());
+    return values[idx];
+}
+
+void weightedSampleWithoutReplacement(
+    const std::vector<float>& weights,
+    int count,
+    std::vector<uint8_t>& selected,
+    std::mt19937& rng
+) {
+    if (count <= 0) return;
+
+    std::vector<std::pair<float, int>> keys;
+    keys.reserve(weights.size());
+    std::uniform_real_distribution<float> uniform(1e-12f, 1.0f);
+    for (int i = 0; i < (int)weights.size(); ++i) {
+        float weight = weights[i];
+        if (selected[i] || !std::isfinite(weight) || weight <= 0.0f) continue;
+        keys.emplace_back(std::log(uniform(rng)) / weight, i);
+    }
+
+    int take = std::min(count, (int)keys.size());
+    if (take <= 0) return;
+    auto byDescendingKey = [](const auto& a, const auto& b) {
+        return a.first > b.first;
+    };
+    if (take < (int)keys.size()) {
+        std::nth_element(keys.begin(), keys.begin() + take, keys.end(), byDescendingKey);
+    }
+    for (int i = 0; i < take; ++i) {
+        selected[keys[i].second] = 1;
+    }
+}
+
+}
+
+float Model::prepareBrushRefineFlags(int step, int checkScreen, float cullCenter[3]) {
+    msplat_gpu_sync();
+
+    int N = num_active;
+    int32_t *split = densify_split_flag.data<int32_t>();
+    int32_t *dup = densify_dup_flag.data<int32_t>();
+    std::fill(split, split + N, 0);
+    std::fill(dup, dup + N, 0);
+
+    const float *meansPtr = means.data<float>();
+    const float *scalesPtr = scales.data<float>();
+    const float *quatsPtr = quats.data<float>();
+    const float *featuresDcPtr = featuresDc.data<float>();
+    const float *opacPtr = opacities.data<float>();
+    const float *visPtr = visCounts.data<float>();
+    const float *gradPtr = xysGradNorm.data<float>();
+    const float *screenPtr = max2DSize.data<float>();
+
+    std::vector<float> xs, ys, zs;
+    xs.reserve(N); ys.reserve(N); zs.reserve(N);
+    for (int i = 0; i < N; ++i) {
+        float x = meansPtr[i * 3 + 0];
+        float y = meansPtr[i * 3 + 1];
+        float z = meansPtr[i * 3 + 2];
+        if (std::isfinite(x) && std::isfinite(y) && std::isfinite(z)) {
+            xs.push_back(x); ys.push_back(y); zs.push_back(z);
+        }
+    }
+
+    float maxFiniteScale = 0.0f;
+    for (int i = 0; i < N; ++i) {
+        for (int c = 0; c < 3; ++c) {
+            float scaleValue = std::exp(scalesPtr[i * 3 + c]);
+            if (std::isfinite(scaleValue)) {
+                maxFiniteScale = std::max(maxFiniteScale, scaleValue);
+            }
+        }
+    }
+
+    float maxAllowedBounds = std::numeric_limits<float>::max();
+    if (!xs.empty()) {
+        float loQ = (1.0f - BOUND_PERCENTILE) * 0.5f;
+        float hiQ = 1.0f - loQ;
+        float loX = percentileInPlace(xs, loQ), hiX = percentileInPlace(xs, hiQ);
+        float loY = percentileInPlace(ys, loQ), hiY = percentileInPlace(ys, hiQ);
+        float loZ = percentileInPlace(zs, loQ), hiZ = percentileInPlace(zs, hiQ);
+        cullCenter[0] = 0.5f * (loX + hiX);
+        cullCenter[1] = 0.5f * (loY + hiY);
+        cullCenter[2] = 0.5f * (loZ + hiZ);
+        float extent = std::max({hiX - loX, hiY - loY, hiZ - loZ, 1e-6f});
+        maxAllowedBounds = std::max(extent, maxFiniteScale) * 100.0f;
+    } else {
+        cullCenter[0] = cullCenter[1] = cullCenter[2] = 0.0f;
+    }
+
+    std::vector<uint8_t> pruned(N, 0);
+    std::vector<uint8_t> selected(N, 0);
+    int prunedCount = 0;
+    int thresholdCount = 0;
+    float halfMaxDim = 0.5f * static_cast<float>((std::max)(lastWidth, lastHeight));
+
+    for (int i = 0; i < N; ++i) {
+        bool bad = false;
+        float opacityRaw = opacPtr[i];
+        bad = bad || !std::isfinite(opacityRaw) || sigmoidf(opacityRaw) < MIN_OPACITY;
+
+        for (int c = 0; c < 3; ++c) {
+            float logScale = scalesPtr[i * 3 + c];
+            float scaleValue = std::exp(logScale);
+            bad = bad || !std::isfinite(logScale) || !std::isfinite(scaleValue)
+                || scaleValue < 1e-10f || scaleValue > maxAllowedBounds;
+        }
+
+        for (int c = 0; c < 3; ++c) {
+            float coord = meansPtr[i * 3 + c];
+            bad = bad || !std::isfinite(coord)
+                || std::fabs(coord - cullCenter[c]) > maxAllowedBounds;
+        }
+        float quatNormSqr = 0.0f;
+        for (int c = 0; c < 4; ++c) {
+            float q = quatsPtr[i * 4 + c];
+            bad = bad || !std::isfinite(q);
+            quatNormSqr += q * q;
+        }
+        bad = bad || !std::isfinite(quatNormSqr) || quatNormSqr < MIN_QUAT_NORM_SQR;
+        for (int c = 0; c < 3; ++c) {
+            bad = bad || !std::isfinite(featuresDcPtr[i * 3 + c]);
+        }
+
+        pruned[i] = bad ? 1 : 0;
+        prunedCount += bad ? 1 : 0;
+
+        float refineWeight = gradPtr[i] * halfMaxDim;
+        if (!bad && visPtr[i] > 0.0f && std::isfinite(refineWeight) && refineWeight > densifyGradThresh) {
+            thresholdCount++;
+        }
+    }
+
+    std::mt19937 rng((uint32_t)step);
+
+    std::vector<float> weights(N, 0.0f);
+    for (int i = 0; i < N; ++i) {
+        if (pruned[i] || visPtr[i] <= 0.0f) continue;
+        float opacity = sigmoidf(opacPtr[i]);
+        weights[i] = std::isfinite(opacity) ? opacity * visPtr[i] : 0.0f;
+    }
+    weightedSampleWithoutReplacement(weights, prunedCount, selected, rng);
+
+    int selectedCount = 0;
+    for (uint8_t flag : selected) selectedCount += flag ? 1 : 0;
+    int currentAfterPrune = N - prunedCount + selectedCount;
+    int headroom = std::max(0, maxSplats - currentAfterPrune);
+
+    if (checkScreen && splitScreenSize > 0.0f && step < stopSplitAt && headroom > 0) {
+        for (int i = 0; i < N && headroom > 0; ++i) {
+            if (pruned[i] || selected[i] || visPtr[i] <= 0.0f) continue;
+            if (screenPtr[i] > splitScreenSize) {
+                selected[i] = 1;
+                headroom--;
+            }
+        }
+    }
+
+    int growCount = (int)std::round((float)thresholdCount * growthSelectFraction);
+    growCount = std::max(0, growCount - prunedCount);
+    growCount = std::min(growCount, headroom);
+    if (growCount > 0) {
+        std::fill(weights.begin(), weights.end(), 0.0f);
+        for (int i = 0; i < N; ++i) {
+            if (pruned[i] || selected[i] || visPtr[i] <= 0.0f) continue;
+            float refineWeight = gradPtr[i] * halfMaxDim;
+            if (std::isfinite(refineWeight) && refineWeight > densifyGradThresh) {
+                weights[i] = refineWeight;
+            }
+        }
+        weightedSampleWithoutReplacement(weights, growCount, selected, rng);
+    }
+
+    for (int i = 0; i < N; ++i) {
+        split[i] = selected[i] ? 1 : 0;
+        dup[i] = 0;
+    }
+
+    return maxAllowedBounds;
+}
+
 void Model::afterTrain(int step){
     if (!radii.defined()) return;
 
     if (step % refineEvery == 0 && step > warmupLength){
-        int resetInterval = resetAlphaEvery * refineEvery;
+        bool resetEnabled = resetAlphaEvery > 0;
+        int resetInterval = resetEnabled ? resetAlphaEvery * refineEvery : 0;
         bool doDensification = step < stopSplitAt
-            && num_active < maxSplats
-            && step % resetInterval > numCameras + refineEvery;
+            && num_active < maxSplats;
+        if (doDensification && resetEnabled) {
+            doDensification = step % resetInterval > numCameras + refineEvery;
+        }
 
         if (doDensification){
             int numPointsBefore = num_active;
@@ -422,14 +647,17 @@ void Model::afterTrain(int step){
 
             float half_max_dim = 0.5f * static_cast<float>((std::max)(lastWidth, lastHeight));
             int check_screen = (step < stopScreenSizeAt) ? 1 : 0;
-            bool checkHuge = step > refineEvery * resetAlphaEvery;
+            bool checkHuge = resetEnabled && step > refineEvery * resetAlphaEvery;
             int fr_stride = (int)featuresRest_buf.stride0();
+            float cullCenter[3] = {};
+            float maxAllowedBounds = prepareBrushRefineFlags(step, check_screen, cullCenter);
 
             int new_count = msplat_densify(
                 num_active, buf_capacity,
                 densifyGradThresh, densifySizeThresh, splitScreenSize, check_screen,
                 growthSelectFraction, (uint32_t)step, maxSplats,
-                MIN_OPACITY, 0.5f, 0.15f, checkHuge ? 1 : 0,
+                MIN_OPACITY, maxAllowedBounds, 0.15f, checkHuge ? 1 : 0,
+                cullCenter, maxAllowedBounds, 1,
                 xysGradNorm, visCounts, max2DSize, half_max_dim,
                 means_buf, scales_buf, quats_buf,
                 featuresDc_buf, featuresRest_buf, opacities_buf, fr_stride,
@@ -441,12 +669,15 @@ void Model::afterTrain(int step){
                 densify_random_samples
             );
 
+            if (new_count <= 0 && numPointsBefore > 0) {
+                throw std::runtime_error("Densification would cull all active Gaussians; aborting before the model becomes empty.");
+            }
             num_active = new_count;
             refreshViews();
             std::cout << "Densified: " << numPointsBefore << " -> " << num_active << " gaussians" << std::endl;
         }
 
-        if (step < stopSplitAt && step % resetInterval == refineEvery){
+        if (resetEnabled && step < stopSplitAt && step % resetInterval == refineEvery){
             msplat_gpu_sync();
             constexpr float resetLogit = -1.3862943611198906f;
             float *op = opacities.data<float>();
@@ -505,13 +736,13 @@ void Model::save(const std::string &filename, int step) {
 
 void Model::savePly(const std::string &filename, int step){
     GaussianParams p{means, scales, quats, featuresDc, featuresRest, opacities,
-                     scale, {translation[0], translation[1], translation[2]}, keepCrs};
+                     scale, {translation[0], translation[1], translation[2]}, keepCrs, renderMip};
     saveGaussianPly(filename, p, step);
 }
 
 void Model::saveLodPly(const std::string &filename, int step, int64_t targetCount){
     GaussianParams p{means, scales, quats, featuresDc, featuresRest, opacities,
-                     scale, {translation[0], translation[1], translation[2]}, keepCrs};
+                     scale, {translation[0], translation[1], translation[2]}, keepCrs, renderMip};
     GaussianLodStats stats;
     GaussianLodStats *statsPtr = nullptr;
     if (visCounts.defined() && xysGradNorm.defined() && max2DSize.defined()
@@ -529,7 +760,7 @@ void Model::saveLodPly(const std::string &filename, int step, int64_t targetCoun
 
 void Model::decimateToLod(int64_t targetCount){
     GaussianParams p{means, scales, quats, featuresDc, featuresRest, opacities,
-                     scale, {translation[0], translation[1], translation[2]}, keepCrs};
+                     scale, {translation[0], translation[1], translation[2]}, keepCrs, renderMip};
     GaussianLodStats stats;
     GaussianLodStats *statsPtr = nullptr;
     if (visCounts.defined() && xysGradNorm.defined() && max2DSize.defined()
@@ -558,7 +789,7 @@ void Model::decimateToLod(int64_t targetCount){
 
 void Model::saveSplat(const std::string &filename){
     GaussianParams p{means, scales, quats, featuresDc, featuresRest, opacities,
-                     scale, {translation[0], translation[1], translation[2]}, keepCrs};
+                     scale, {translation[0], translation[1], translation[2]}, keepCrs, renderMip};
     saveGaussianSplat(filename, p);
 }
 
@@ -570,6 +801,7 @@ int Model::loadPly(const std::string &filename){
     featuresDc = g.featuresDc;
     featuresRest = g.featuresRest;
     opacities = g.opacities;
+    if (g.hasRenderMip) renderMip = g.renderMip;
     setupOptimizers();
     return g.step;
 }
@@ -836,6 +1068,8 @@ void Model::fullIteration(Camera& cam, int step, MTensor &gt, MTensor *lossMask,
     }
 
     float invMaxDim = 1.0f / static_cast<float>((std::max)(lastHeight, lastWidth));
+    float invWidth = 1.0f / static_cast<float>((std::max)(lastWidth, 1));
+    float invHeight = 1.0f / static_cast<float>((std::max)(lastHeight, 1));
     float effectiveMaskMean = (lossMask && lossMaskMean > 1e-6f) ? lossMaskMean : 1.0f;
     float lossInvN = 1.0f / ((float)(s.height * s.width * 3) * effectiveMaskMean);
     MTensor &lossMaskTensor = lossMask ? *lossMask : gt;
@@ -860,7 +1094,7 @@ void Model::fullIteration(Camera& cam, int step, MTensor &gt, MTensor *lossMask,
         adam_ss, adam_bc2s,
         adam_beta1, adam_beta2, adam_eps,
         reduceSecondMoment ? 1 : 0,
-        visCounts, xysGradNorm, max2DSize, invMaxDim);
+        visCounts, xysGradNorm, max2DSize, invMaxDim, invWidth, invHeight);
 
     if (step < stopSplitAt && meanNoiseWeight > 0.0f) {
         constexpr float maxMeanNoise = 1.0f;

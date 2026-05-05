@@ -15,7 +15,6 @@ public class GaussianTrainer {
 
     deinit {
         msplat_trainer_destroy(handle)
-        msplat_cleanup()
     }
 
     /// Run one training step.
@@ -90,6 +89,12 @@ public class GaussianTrainer {
     /// Export scene as .splat.
     public func exportSplat(to path: String) {
         msplat_trainer_export_splat(handle, path)
+    }
+
+    /// Load scene from a trained PLY. Returns the saved iteration.
+    @discardableResult
+    public func loadPly(from path: String) -> Int {
+        Int(msplat_trainer_load_ply(handle, path))
     }
 
     /// Save full training state for resume.
