@@ -229,6 +229,12 @@ struct PlyScalarProperty {
     std::string name;
 };
 
+struct PlyElement {
+    std::string name;
+    int count = 0;
+    std::vector<PlyScalarProperty> properties;
+};
+
 static size_t plyScalarTypeSize(const std::string &type) {
     if (type == "char" || type == "int8" || type == "uchar" || type == "uint8") return 1;
     if (type == "short" || type == "int16" || type == "ushort" || type == "uint16") return 2;
@@ -287,6 +293,40 @@ static float readPlyScalarAsFloat(std::istream &in, const PlyScalarProperty &pro
     return out;
 }
 
+static uint32_t readPlyScalarAsUInt32(std::istream &in, const PlyScalarProperty &prop) {
+    uint32_t out = 0;
+    if (prop.type == "uchar" || prop.type == "uint8") {
+        uint8_t v;
+        in.read(reinterpret_cast<char*>(&v), sizeof(v));
+        out = v;
+    } else if (prop.type == "char" || prop.type == "int8") {
+        int8_t v;
+        in.read(reinterpret_cast<char*>(&v), sizeof(v));
+        out = static_cast<uint32_t>(v);
+    } else if (prop.type == "ushort" || prop.type == "uint16") {
+        uint16_t v;
+        in.read(reinterpret_cast<char*>(&v), sizeof(v));
+        out = v;
+    } else if (prop.type == "short" || prop.type == "int16") {
+        int16_t v;
+        in.read(reinterpret_cast<char*>(&v), sizeof(v));
+        out = static_cast<uint32_t>(v);
+    } else if (prop.type == "uint" || prop.type == "uint32") {
+        uint32_t v;
+        in.read(reinterpret_cast<char*>(&v), sizeof(v));
+        out = v;
+    } else if (prop.type == "int" || prop.type == "int32") {
+        int32_t v;
+        in.read(reinterpret_cast<char*>(&v), sizeof(v));
+        out = static_cast<uint32_t>(v);
+    } else {
+        out = static_cast<uint32_t>(readPlyScalarAsFloat(in, prop));
+        return out;
+    }
+    if (!in) throw std::runtime_error("Unexpected EOF while reading PLY property: " + prop.name);
+    return out;
+}
+
 static float parsePlyScalarAsFloat(const std::string &token, const PlyScalarProperty &prop) {
     if (prop.type == "char" || prop.type == "int8"
         || prop.type == "short" || prop.type == "int16"
@@ -309,6 +349,223 @@ static bool parseIndexedProperty(const std::string &name, const std::string &pre
     return true;
 }
 
+struct CompressedPlyMeta {
+    float minX = 0.0f, maxX = 0.0f;
+    float minY = 0.0f, maxY = 0.0f;
+    float minZ = 0.0f, maxZ = 0.0f;
+    float minScaleX = 0.0f, maxScaleX = 0.0f;
+    float minScaleY = 0.0f, maxScaleY = 0.0f;
+    float minScaleZ = 0.0f, maxScaleZ = 0.0f;
+    float minR = 0.0f, maxR = 0.0f;
+    float minG = 0.0f, maxG = 0.0f;
+    float minB = 0.0f, maxB = 0.0f;
+};
+
+static bool hasProperty(const PlyElement &element, const std::string &name) {
+    return std::any_of(element.properties.begin(), element.properties.end(),
+                       [&](const PlyScalarProperty &prop) { return prop.name == name; });
+}
+
+static const PlyElement* findElement(const std::vector<PlyElement> &elements,
+                                     const std::string &name) {
+    auto it = std::find_if(elements.begin(), elements.end(),
+                           [&](const PlyElement &element) { return element.name == name; });
+    return it != elements.end() ? &*it : nullptr;
+}
+
+static bool isCompressedGaussianPly(const std::vector<PlyElement> &elements) {
+    if (elements.empty() || elements.front().name != "chunk") return false;
+    const PlyElement *vertex = findElement(elements, "vertex");
+    return vertex
+        && hasProperty(*vertex, "packed_position")
+        && hasProperty(*vertex, "packed_scale")
+        && hasProperty(*vertex, "packed_rotation")
+        && hasProperty(*vertex, "packed_color");
+}
+
+static float unpackUnorm(uint32_t packed, uint32_t bits) {
+    const uint32_t maxValue = (1u << bits) - 1u;
+    return static_cast<float>(packed) / static_cast<float>(maxValue);
+}
+
+static void decodeVec11_10_11(uint32_t value, float out[3]) {
+    out[0] = unpackUnorm((value >> 21u) & 0x7ffu, 11u);
+    out[1] = unpackUnorm((value >> 11u) & 0x3ffu, 10u);
+    out[2] = unpackUnorm(value & 0x7ffu, 11u);
+}
+
+static void decodeVec8_8_8_8(uint32_t value, float out[4]) {
+    out[0] = unpackUnorm((value >> 24u) & 0xffu, 8u);
+    out[1] = unpackUnorm((value >> 16u) & 0xffu, 8u);
+    out[2] = unpackUnorm((value >> 8u) & 0xffu, 8u);
+    out[3] = unpackUnorm(value & 0xffu, 8u);
+}
+
+static void decodePackedQuat(uint32_t value, float out[4]) {
+    const uint32_t largest = (value >> 30u) & 0x3u;
+    static constexpr float norm = 0.7071067811865476f;
+    float vals[3] = {
+        (unpackUnorm((value >> 20u) & 0x3ffu, 10u) - 0.5f) / norm,
+        (unpackUnorm((value >> 10u) & 0x3ffu, 10u) - 0.5f) / norm,
+        (unpackUnorm(value & 0x3ffu, 10u) - 0.5f) / norm,
+    };
+
+    float q[4] = {};
+    const float missing = 1.0f - (vals[0] * vals[0] + vals[1] * vals[1] + vals[2] * vals[2]);
+    q[largest] = std::sqrt(std::max(0.0f, missing));
+    int src = 0;
+    for (int i = 0; i < 4; ++i) {
+        if (i != static_cast<int>(largest)) q[i] = vals[src++];
+    }
+    out[0] = q[0];
+    out[1] = q[1];
+    out[2] = q[2];
+    out[3] = q[3];
+}
+
+static void assignCompressedMetaField(CompressedPlyMeta &meta,
+                                      const std::string &name,
+                                      float value) {
+    if (name == "min_x") meta.minX = value;
+    else if (name == "max_x") meta.maxX = value;
+    else if (name == "min_y") meta.minY = value;
+    else if (name == "max_y") meta.maxY = value;
+    else if (name == "min_z") meta.minZ = value;
+    else if (name == "max_z") meta.maxZ = value;
+    else if (name == "min_scale_x") meta.minScaleX = value;
+    else if (name == "max_scale_x") meta.maxScaleX = value;
+    else if (name == "min_scale_y") meta.minScaleY = value;
+    else if (name == "max_scale_y") meta.maxScaleY = value;
+    else if (name == "min_scale_z") meta.minScaleZ = value;
+    else if (name == "max_scale_z") meta.maxScaleZ = value;
+    else if (name == "min_r") meta.minR = value;
+    else if (name == "max_r") meta.maxR = value;
+    else if (name == "min_g") meta.minG = value;
+    else if (name == "max_g") meta.maxG = value;
+    else if (name == "min_b") meta.minB = value;
+    else if (name == "max_b") meta.maxB = value;
+}
+
+static LoadedGaussians loadCompressedGaussianPly(std::istream &in,
+                                                 const std::vector<PlyElement> &elements,
+                                                 float scale,
+                                                 const float translation[3],
+                                                 bool keepCrs,
+                                                 int subsampleStep) {
+    const PlyElement *chunk = findElement(elements, "chunk");
+    const PlyElement *vertex = findElement(elements, "vertex");
+    if (!chunk || !vertex) throw std::runtime_error("Compressed PLY missing chunk or vertex element");
+
+    std::vector<CompressedPlyMeta> metas(chunk->count);
+    for (int i = 0; i < chunk->count; ++i) {
+        for (const PlyScalarProperty &prop : chunk->properties) {
+            assignCompressedMetaField(metas[i], prop.name, readPlyScalarAsFloat(in, prop));
+        }
+    }
+    if (metas.empty()) throw std::runtime_error("Compressed PLY has no chunk metadata");
+
+    const int numPoints = vertex->count;
+    const int selectedPoints = numPoints / subsampleStep;
+    if (selectedPoints == 0) throw std::runtime_error("PLY subsampling removed every Gaussian");
+
+    std::vector<float> meansRaw(selectedPoints * 3);
+    std::vector<float> scRaw(selectedPoints * 3);
+    std::vector<float> qtRaw(selectedPoints * 4);
+    std::vector<float> dcRaw(selectedPoints * 3);
+    std::vector<float> opRaw(selectedPoints);
+
+    int selected = 0;
+    for (int i = 0; i < numPoints; ++i) {
+        const bool keep = (i + 1) % subsampleStep == 0;
+        uint32_t packedPosition = 0;
+        uint32_t packedScale = 0;
+        uint32_t packedRotation = 0;
+        uint32_t packedColor = 0;
+        for (const PlyScalarProperty &prop : vertex->properties) {
+            const uint32_t value = readPlyScalarAsUInt32(in, prop);
+            if (prop.name == "packed_position") packedPosition = value;
+            else if (prop.name == "packed_scale") packedScale = value;
+            else if (prop.name == "packed_rotation") packedRotation = value;
+            else if (prop.name == "packed_color") packedColor = value;
+        }
+        if (!keep) continue;
+
+        const CompressedPlyMeta &meta = metas[std::min<size_t>(metas.size() - 1, i / 256)];
+        float decoded[4] = {};
+        decodeVec11_10_11(packedPosition, decoded);
+        meansRaw[selected*3+0] = decoded[0] * (meta.maxX - meta.minX) + meta.minX;
+        meansRaw[selected*3+1] = decoded[1] * (meta.maxY - meta.minY) + meta.minY;
+        meansRaw[selected*3+2] = decoded[2] * (meta.maxZ - meta.minZ) + meta.minZ;
+
+        decodeVec11_10_11(packedScale, decoded);
+        scRaw[selected*3+0] = decoded[0] * (meta.maxScaleX - meta.minScaleX) + meta.minScaleX;
+        scRaw[selected*3+1] = decoded[1] * (meta.maxScaleY - meta.minScaleY) + meta.minScaleY;
+        scRaw[selected*3+2] = decoded[2] * (meta.maxScaleZ - meta.minScaleZ) + meta.minScaleZ;
+
+        decodePackedQuat(packedRotation, &qtRaw[selected*4]);
+
+        decodeVec8_8_8_8(packedColor, decoded);
+        for (int c = 0; c < 3; ++c) {
+            float minColor = c == 0 ? meta.minR : (c == 1 ? meta.minG : meta.minB);
+            float maxColor = c == 0 ? meta.maxR : (c == 1 ? meta.maxG : meta.maxB);
+            const float channel = decoded[c] * (maxColor - minColor) + minColor;
+            dcRaw[selected*3+c] = (channel - 0.5f) / static_cast<float>(C0);
+        }
+        const float alpha = decoded[3];
+        opRaw[selected] = std::log(alpha / (1.0f - alpha));
+        selected++;
+    }
+
+    const PlyElement *sh = findElement(elements, "sh");
+    int numFr = sh ? static_cast<int>(sh->properties.size()) : 0;
+    int frBases = numFr / 3;
+    numFr = frBases * 3;
+    std::vector<float> frRaw(selectedPoints * numFr);
+    if (sh) {
+        int selectedSh = 0;
+        for (int i = 0; i < sh->count; ++i) {
+            const bool keep = (i + 1) % subsampleStep == 0;
+            for (int propIndex = 0; propIndex < static_cast<int>(sh->properties.size()); ++propIndex) {
+                const uint32_t value = readPlyScalarAsUInt32(in, sh->properties[propIndex]);
+                if (keep && propIndex < numFr) {
+                    frRaw[selectedSh*numFr + propIndex] =
+                        (static_cast<float>(value) / 254.0f - 0.5f) * 8.0f;
+                }
+            }
+            if (keep) selectedSh++;
+        }
+    }
+
+    if (keepCrs) {
+        for (int i = 0; i < selectedPoints; ++i) {
+            for (int j = 0; j < 3; ++j) {
+                meansRaw[i*3+j] = (meansRaw[i*3+j] - translation[j]) * scale;
+                scRaw[i*3+j] = std::log(scale * std::exp(scRaw[i*3+j]));
+            }
+        }
+    }
+
+    LoadedGaussians g;
+    g.step = 0;
+    auto upload = [](std::vector<int64_t> shape, const float *src, size_t bytes) {
+        MTensor t = gpu_empty(shape, DType::Float32);
+        if (bytes > 0) memcpy(t.data_ptr(), src, bytes);
+        return t;
+    };
+    g.means = upload({selectedPoints, 3}, meansRaw.data(), meansRaw.size() * sizeof(float));
+    g.scales = upload({selectedPoints, 3}, scRaw.data(), scRaw.size() * sizeof(float));
+    g.quats = upload({selectedPoints, 4}, qtRaw.data(), qtRaw.size() * sizeof(float));
+    g.featuresDc = upload({selectedPoints, 3}, dcRaw.data(), dcRaw.size() * sizeof(float));
+    g.opacities = upload({selectedPoints, 1}, opRaw.data(), opRaw.size() * sizeof(float));
+    g.featuresRest = gpu_empty({selectedPoints, frBases, 3}, DType::Float32);
+    float *frOut = g.featuresRest.data<float>();
+    for (int i = 0; i < selectedPoints; ++i)
+        for (int ch = 0; ch < 3; ++ch)
+            for (int b = 0; b < frBases; ++b)
+                frOut[i*frBases*3 + b*3 + ch] = frRaw[i*numFr + ch*frBases + b];
+    return g;
+}
+
 LoadedGaussians loadGaussianPly(const std::string &path, float scale, const float translation[3],
                                 bool keepCrs, int subsampleStep) {
     msplat_gpu_sync();
@@ -325,6 +582,8 @@ LoadedGaussians loadGaussianPly(const std::string &path, float scale, const floa
     bool renderMip = false;
     bool hasRgbColor = false;
     bool inVertex = false;
+    PlyElement *currentElement = nullptr;
+    std::vector<PlyElement> elements;
     std::vector<PlyScalarProperty> vertexProperties;
 
     std::getline(f, line); // "ply"
@@ -355,26 +614,31 @@ LoadedGaussians loadGaussianPly(const std::string &path, float scale, const floa
             renderMip = mode == "mip";
         }
 
-        const std::string vertexPrefix = "element vertex ";
-        if (line.rfind(vertexPrefix, 0) == 0) {
-            numPoints = std::stoi(line.substr(vertexPrefix.length()));
-            inVertex = true;
-            continue;
-        }
-
         if (line.rfind("element ", 0) == 0) {
-            inVertex = false;
+            std::istringstream iss(line);
+            std::string keyword, elementName;
+            int elementCount = 0;
+            iss >> keyword >> elementName >> elementCount;
+            elements.push_back({elementName, elementCount, {}});
+            currentElement = &elements.back();
+            inVertex = elementName == "vertex";
+            if (inVertex) numPoints = elementCount;
             continue;
         }
 
-        if (inVertex && line.rfind("property ", 0) == 0) {
+        if (line.rfind("property ", 0) == 0) {
             std::istringstream iss(line);
             std::string keyword, type, name;
             iss >> keyword >> type;
-            if (type == "list")
+            if (type == "list") {
+                if (!inVertex) continue;
                 throw std::runtime_error("List properties in PLY vertex elements are not supported: " + path);
+            }
             iss >> name;
             plyScalarTypeSize(type);
+            if (currentElement) currentElement->properties.push_back({type, name});
+            if (!inVertex) continue;
+
             vertexProperties.push_back({type, name});
 
             int index = 0;
@@ -385,6 +649,13 @@ LoadedGaussians loadGaussianPly(const std::string &path, float scale, const floa
                 hasRgbColor = true;
             }
         }
+    }
+
+    if (isCompressedGaussianPly(elements)) {
+        if (!binaryLittleEndian) {
+            throw std::runtime_error("Only binary_little_endian compressed PLY files are supported: " + path);
+        }
+        return loadCompressedGaussianPly(f, elements, scale, translation, keepCrs, subsampleStep);
     }
 
     if (numPoints == 0) throw std::runtime_error("PLY has no vertices");

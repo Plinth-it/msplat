@@ -188,6 +188,11 @@ bool isGaussianPly(const std::string &path) {
     bool hasScale = false;
     bool hasRotation = false;
     bool hasDc = false;
+    bool hasChunk = false;
+    bool hasPackedPosition = false;
+    bool hasPackedScale = false;
+    bool hasPackedRotation = false;
+    bool hasPackedColor = false;
 
     std::string line;
     while (std::getline(f, line)) {
@@ -204,6 +209,7 @@ bool isGaussianPly(const std::string &path) {
             std::string elementName;
             iss >> elementName;
             inVertex = elementName == "vertex";
+            hasChunk = hasChunk || elementName == "chunk";
         } else if (inVertex && token == "property") {
             std::string type;
             std::string name;
@@ -214,10 +220,17 @@ bool isGaussianPly(const std::string &path) {
             hasScale = hasScale || name == "scale_0";
             hasRotation = hasRotation || name == "rot_0";
             hasDc = hasDc || name == "f_dc_0";
+            hasPackedPosition = hasPackedPosition || name == "packed_position";
+            hasPackedScale = hasPackedScale || name == "packed_scale";
+            hasPackedRotation = hasPackedRotation || name == "packed_rotation";
+            hasPackedColor = hasPackedColor || name == "packed_color";
         }
     }
 
-    return supportedFormat && hasOpacity && hasScale && hasRotation && hasDc;
+    const bool regularGaussian = hasOpacity && hasScale && hasRotation && hasDc;
+    const bool compressedGaussian = hasChunk && hasPackedPosition && hasPackedScale
+        && hasPackedRotation && hasPackedColor;
+    return supportedFormat && (regularGaussian || compressedGaussian);
 }
 
 bool loadDatasetPlyOverride(const std::string &projectRoot, Points &points,
@@ -240,12 +253,13 @@ bool loadDatasetPlyOverride(const std::string &projectRoot, Points &points,
     if (selected == plyPaths.end()) selected = std::prev(plyPaths.end());
 
     const std::string selectedPath = selected->string();
-    points = readPly(selectedPath);
+    const bool gaussianPly = isGaussianPly(selectedPath);
     if (initialGaussianPlyPath) {
-        const bool gaussianPly = isGaussianPly(selectedPath);
         *initialGaussianPlyPath = gaussianPly ? selectedPath : "";
-        return !gaussianPly;
     }
+    if (gaussianPly) return false;
+
+    points = readPly(selectedPath);
     return true;
 }
 
