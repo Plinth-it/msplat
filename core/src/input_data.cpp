@@ -293,11 +293,18 @@ void autoScaleAndCenter(InputData &data) {
     data.translation[1] = mean[1];
     data.translation[2] = mean[2];
 
-    // Center camera poses
-    for (auto &cam : data.cameras) {
+    auto applyTransform = [&](Camera &cam) {
         cam.camToWorld[3]  -= mean[0];
         cam.camToWorld[7]  -= mean[1];
         cam.camToWorld[11] -= mean[2];
+    };
+
+    // Center camera poses. Eval cameras share the train coordinate transform.
+    for (auto &cam : data.cameras) {
+        applyTransform(cam);
+    }
+    for (auto &cam : data.evalCameras) {
+        applyTransform(cam);
     }
 
     // Compute scale from max absolute camera position
@@ -309,11 +316,18 @@ void autoScaleAndCenter(InputData &data) {
     }
     data.scale = (maxAbs > 0) ? (1.0f / maxAbs) : 1.0f;
 
-    // Apply scale to camera positions
-    for (auto &cam : data.cameras) {
+    auto applyScale = [&](Camera &cam) {
         cam.camToWorld[3]  *= data.scale;
         cam.camToWorld[7]  *= data.scale;
         cam.camToWorld[11] *= data.scale;
+    };
+
+    // Apply scale to camera positions.
+    for (auto &cam : data.cameras) {
+        applyScale(cam);
+    }
+    for (auto &cam : data.evalCameras) {
+        applyScale(cam);
     }
 
     // Apply to point cloud
@@ -350,6 +364,8 @@ std::tuple<std::vector<Camera>, Camera*> InputData::getCameras(bool validate, co
 }
 
 std::tuple<std::vector<Camera>, std::vector<Camera>> InputData::splitTrainTest(int testEvery) {
+    if (!evalCameras.empty()) return {cameras, evalCameras};
+
     std::vector<Camera> train, test;
     for (int i = 0; i < (int)cameras.size(); i++) {
         if (i % testEvery == 0)
@@ -400,8 +416,8 @@ void InputData::saveCameras(const std::string &filename, bool keepCrs) const {
 InputData inputDataFromX(const std::string &path, const std::string &colmapImagePath) {
     fs::path root(path);
 
-    // Nerfstudio: transforms.json
-    if (fs::exists(root / "transforms.json"))
+    // Nerfstudio: transforms.json or split transforms_train.json.
+    if (fs::exists(root / "transforms.json") || fs::exists(root / "transforms_train.json"))
         return loaders::loadNerfstudio(path);
 
     // COLMAP: binary or text model, direct or in sparse[/0].
@@ -418,5 +434,5 @@ InputData inputDataFromX(const std::string &path, const std::string &colmapImage
         return loaders::loadPolycam(path);
 
     throw std::runtime_error("Unrecognized dataset format in: " + path +
-        "\nSupported: COLMAP (cameras.bin/cameras.txt), Nerfstudio (transforms.json), Polycam (keyframes/)");
+        "\nSupported: COLMAP (cameras.bin/cameras.txt), Nerfstudio (transforms.json/transforms_train.json), Polycam (keyframes/)");
 }

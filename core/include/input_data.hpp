@@ -69,6 +69,7 @@ struct Points {
 
 struct InputData {
     std::vector<Camera> cameras;
+    std::vector<Camera> evalCameras;
     float scale = 1.0f;
     float translation[3] = {};
     Points points;

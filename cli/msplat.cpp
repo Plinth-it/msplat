@@ -60,15 +60,22 @@ static fs::path exportPathForStep(const std::string &projectRoot, const std::str
 static void filterCameras(InputData &inputData, int maxFrames, int subsampleFrames) {
     if (maxFrames <= 0 && subsampleFrames <= 1) return;
 
-    std::vector<Camera> filtered;
-    size_t step = static_cast<size_t>(std::max(subsampleFrames, 1));
-    size_t limit = maxFrames > 0 ? static_cast<size_t>(maxFrames) : inputData.cameras.size();
-    filtered.reserve(std::min(inputData.cameras.size(), limit));
-    for (size_t i = 0; i < inputData.cameras.size() && filtered.size() < limit; i += step) {
-        filtered.push_back(std::move(inputData.cameras[i]));
-    }
-    if (filtered.empty()) throw std::runtime_error("Camera filtering removed every frame");
-    inputData.cameras = std::move(filtered);
+    auto filter = [&](std::vector<Camera> &cameras) {
+        if (cameras.empty()) return;
+
+        std::vector<Camera> filtered;
+        size_t step = static_cast<size_t>(std::max(subsampleFrames, 1));
+        size_t limit = maxFrames > 0 ? static_cast<size_t>(maxFrames) : cameras.size();
+        filtered.reserve(std::min(cameras.size(), limit));
+        for (size_t i = 0; i < cameras.size() && filtered.size() < limit; i += step) {
+            filtered.push_back(std::move(cameras[i]));
+        }
+        if (filtered.empty()) throw std::runtime_error("Camera filtering removed every frame");
+        cameras = std::move(filtered);
+    };
+
+    filter(inputData.cameras);
+    filter(inputData.evalCameras);
 }
 
 static void subsamplePoints(InputData &inputData, int subsampleStep) {
@@ -325,6 +332,8 @@ int main(int argc, char *argv[]) {
         subsamplePoints(inputData, subsamplePointStep);
 
         for (auto &cam : inputData.cameras)
+            cam.loadImage(cameraDownscaleFactor(cam, downScaleFactor, maxResolution), alphaMode);
+        for (auto &cam : inputData.evalCameras)
             cam.loadImage(cameraDownscaleFactor(cam, downScaleFactor, maxResolution), alphaMode);
 
         std::vector<Camera> cams;
