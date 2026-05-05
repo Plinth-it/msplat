@@ -541,10 +541,21 @@ static bool hasSingleNerfstudioJson(const fs::path &root) {
     return !doc.is_discarded() && doc.contains("frames") && doc["frames"].is_array();
 }
 
+static bool hasChildFileNamed(const fs::path &dir, const std::string &name) {
+    if (fs::exists(dir / name)) return true;
+    if (!fs::is_directory(dir)) return false;
+    for (const auto &entry : fs::directory_iterator(dir)) {
+        if (entry.is_regular_file() && iequals(entry.path().filename().string(), name)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool hasColmapSparseModel(const fs::path &root) {
     auto hasModel = [](const fs::path &dir) {
-        return (fs::exists(dir / "cameras.bin") && fs::exists(dir / "images.bin"))
-            || (fs::exists(dir / "cameras.txt") && fs::exists(dir / "images.txt"));
+        return (hasChildFileNamed(dir, "cameras.bin") && hasChildFileNamed(dir, "images.bin"))
+            || (hasChildFileNamed(dir, "cameras.txt") && hasChildFileNamed(dir, "images.txt"));
     };
 
     for (const fs::path &dir : {root, root / "sparse" / "0", root / "sparse"}) {
@@ -555,7 +566,7 @@ static bool hasColmapSparseModel(const fs::path &root) {
         if (!entry.is_regular_file()) continue;
         fs::path dir = entry.path().parent_path();
         const fs::path name = entry.path().filename();
-        if ((name == "cameras.bin" || name == "cameras.txt") && hasModel(dir)) {
+        if ((iequals(name.string(), "cameras.bin") || iequals(name.string(), "cameras.txt")) && hasModel(dir)) {
             return true;
         }
     }

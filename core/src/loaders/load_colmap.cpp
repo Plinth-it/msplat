@@ -39,6 +39,8 @@ enum ColmapModel {
 struct ColmapSparseModel {
     fs::path dir;
     bool binary = false;
+    fs::path camerasPath;
+    fs::path imagesPath;
 };
 
 struct ColmapCamera {
@@ -56,34 +58,61 @@ struct ColmapImage {
     std::string filename;
 };
 
-static bool hasBinaryModel(const fs::path &dir) {
-    return fs::exists(dir / "cameras.bin") && fs::exists(dir / "images.bin");
+static bool pathNameEquals(const fs::path &path, const std::string &name) {
+    const std::string text = path.filename().string();
+    return text.size() == name.size() && std::equal(text.begin(), text.end(), name.begin(),
+        [](unsigned char a, unsigned char b) {
+            return std::tolower(a) == std::tolower(b);
+        });
 }
 
-static bool hasTextModel(const fs::path &dir) {
-    return fs::exists(dir / "cameras.txt") && fs::exists(dir / "images.txt");
+static std::optional<fs::path> findChildFile(const fs::path &dir, const std::string &name) {
+    fs::path direct = dir / name;
+    if (fs::exists(direct)) return direct;
+    if (!fs::is_directory(dir)) return std::nullopt;
+
+    for (const auto &entry : fs::directory_iterator(dir)) {
+        if (entry.is_regular_file() && pathNameEquals(entry.path(), name)) {
+            return entry.path();
+        }
+    }
+    return std::nullopt;
+}
+
+static std::optional<ColmapSparseModel> binaryModelInDir(const fs::path &dir) {
+    auto cameras = findChildFile(dir, "cameras.bin");
+    auto images = findChildFile(dir, "images.bin");
+    if (cameras && images) return ColmapSparseModel{dir, true, *cameras, *images};
+    return std::nullopt;
+}
+
+static std::optional<ColmapSparseModel> textModelInDir(const fs::path &dir) {
+    auto cameras = findChildFile(dir, "cameras.txt");
+    auto images = findChildFile(dir, "images.txt");
+    if (cameras && images) return ColmapSparseModel{dir, false, *cameras, *images};
+    return std::nullopt;
 }
 
 static std::optional<ColmapSparseModel> findSparseModel(const fs::path &root) {
     for (const fs::path &dir : {root, root / "sparse" / "0", root / "sparse"}) {
-        if (hasBinaryModel(dir)) return ColmapSparseModel{dir, true};
-        if (hasTextModel(dir)) return ColmapSparseModel{dir, false};
+        if (auto model = binaryModelInDir(dir)) return model;
+        if (auto model = textModelInDir(dir)) return model;
     }
 
     std::vector<fs::path> dirs;
     for (const auto &entry : fs::recursive_directory_iterator(
              root, fs::directory_options::skip_permission_denied)) {
         if (entry.is_regular_file()
-            && (entry.path().filename() == "cameras.bin"
-                || entry.path().filename() == "cameras.txt")) {
+            && (pathNameEquals(entry.path(), "cameras.bin")
+                || pathNameEquals(entry.path(), "cameras.txt"))) {
             dirs.push_back(entry.path().parent_path());
         }
     }
     std::sort(dirs.begin(), dirs.end());
     dirs.erase(std::unique(dirs.begin(), dirs.end()), dirs.end());
     for (const fs::path &dir : dirs) {
-        if (hasBinaryModel(dir)) return ColmapSparseModel{dir, true};
-        if (hasTextModel(dir)) return ColmapSparseModel{dir, false};
+        if (auto model = binaryModelInDir(dir)) return model;
+        if (auto model = textModelInDir(dir)) return model;
     }
     return std::nullopt;
 }
@@ -411,11 +440,11 @@ InputData loaders::loadColmap(const std::string &projectRoot, const std::string 
         : projectRoot;
 
     auto cameras = model->binary
-        ? readCamerasBin((model->dir / "cameras.bin").string())
-        : readCamerasTxt((model->dir / "cameras.txt").string());
+        ? readCamerasBin(model->camerasPath.string())
+        : readCamerasTxt(model->camerasPath.string());
     auto images = model->binary
-        ? readImagesBin((model->dir / "images.bin").string())
-        : readImagesTxt((model->dir / "images.txt").string());
+        ? readImagesBin(model->imagesPath.string())
+        : readImagesTxt(model->imagesPath.string());
 
     std::sort(images.begin(), images.end(),
         [](const ColmapImage &a, const ColmapImage &b) { return a.filename < b.filename; });
@@ -441,15 +470,15 @@ InputData loaders::loadColmap(const std::string &projectRoot, const std::string 
     }
 
     // Point cloud
-    fs::path pointsBin = model->dir / "points3D.bin";
-    fs::path pointsTxt = model->dir / "points3D.txt";
-    fs::path pointsPly = model->dir / "points3D.ply";
-    if (fs::exists(pointsBin))
-        data.points = readColmapPoints(pointsBin.string());
-    else if (fs::exists(pointsTxt))
-        data.points = readColmapPointsTxt(pointsTxt.string());
-    else if (fs::exists(pointsPly))
-        data.points = readPly(pointsPly.string());
+    auto pointsBin = findChildFile(model->dir, "points3D.bin");
+    auto pointsTxt = findChildFile(model->dir, "points3D.txt");
+    auto pointsPly = findChildFile(model->dir, "points3D.ply");
+    if (pointsBin)
+        data.points = readColmapPoints(pointsBin->string());
+    else if (pointsTxt)
+        data.points = readColmapPointsTxt(pointsTxt->string());
+    else if (pointsPly)
+        data.points = readPly(pointsPly->string());
     loadDatasetPlyOverride(projectRoot, data.points, &data.initialGaussianPlyPath);
 
     autoScaleAndCenter(data);
