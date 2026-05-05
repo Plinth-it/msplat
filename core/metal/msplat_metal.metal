@@ -12,6 +12,7 @@ using namespace metal;
 #define MAX_REGISTER_CHANNELS 3
 
 constant float SH_C0 = 0.28209479177387814f;
+constant float MIN_QUAT_NORM_SQR = 1e-6f;
 constant float SH_C1 = 0.4886025119029199f;
 constant float SH_C2[] = {
     1.0925484305920792f,
@@ -456,6 +457,11 @@ inline void write_packed_float4(device float* arr, int idx, float4 val) {
     arr[4*idx+3] = val.w;
 }
 
+inline bool valid_quaternion(float4 quat) {
+    return isfinite(quat.x) && isfinite(quat.y) && isfinite(quat.z) && isfinite(quat.w)
+        && dot(quat, quat) >= MIN_QUAT_NORM_SQR;
+}
+
 // Forward projection: one thread per gaussian. Computes 2D position, conic, radius.
 kernel void project_gaussians_forward_kernel(
     constant int& num_points,
@@ -495,6 +501,9 @@ kernel void project_gaussians_forward_kernel(
     // scales are in log-space; exp() here to avoid a separate MPS dispatch
     float3 scale = exp(read_packed_float3(scales, idx));
     float4 quat = read_packed_float4(quats, idx);
+    if (!valid_quaternion(quat)) {
+        return;
+    }
     device float *cur_cov3d = &(covs3d[6 * idx]);
     scale_rot_to_cov3d(scale, glob_scale, quat, cur_cov3d);
 
@@ -1913,6 +1922,9 @@ kernel void project_and_sh_forward_kernel(
 
     float3 scale = exp(read_packed_float3(scales, idx));
     float4 quat = read_packed_float4(quats, idx);
+    if (!valid_quaternion(quat)) {
+        return;
+    }
     // Compute cov3d in thread-local registers (no device memory round-trip)
     float local_cov3d[6];
     scale_rot_to_cov3d(scale, glob_scale, quat, local_cov3d);
@@ -3854,7 +3866,6 @@ kernel void lpips_apply_grad_kernel(
 #define DENSIFY_NOTHING 0
 #define DENSIFY_SPLIT   1
 #define DENSIFY_DUP     2
-constant float MIN_QUAT_NORM_SQR = 1e-6f;
 
 // Classify each gaussian as split, dup, or nothing based on gradient and scale thresholds.
 kernel void densify_classify_kernel(
