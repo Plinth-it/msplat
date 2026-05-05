@@ -5,17 +5,10 @@
 #include <filesystem>
 #include <algorithm>
 #include <cctype>
+#include <unordered_map>
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
-
-// Try adding common image extensions if file doesn't exist
-static std::string resolveImagePath(const std::string &path) {
-    if (fs::exists(path)) return path;
-    for (auto ext : {".png", ".jpg", ".jpeg", ".JPG"})
-        if (fs::exists(path + ext)) return path + ext;
-    return path;
-}
 
 static float fovToFocal(float fovRadians, int pixels) {
     return 0.5f * static_cast<float>(pixels) / std::tan(0.5f * fovRadians);
@@ -45,6 +38,67 @@ static bool iequals(const std::string &a, const std::string &b) {
         });
 }
 
+static std::string lowercasePathText(const fs::path &path) {
+    std::string text = path.generic_string();
+    std::transform(text.begin(), text.end(), text.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return text;
+}
+
+static std::vector<fs::path> filesInDataset(const fs::path &root) {
+    std::vector<fs::path> files;
+    for (const auto &entry : fs::recursive_directory_iterator(
+             root, fs::directory_options::skip_permission_denied)) {
+        if (entry.is_regular_file()) files.push_back(entry.path());
+    }
+    std::sort(files.begin(), files.end());
+    return files;
+}
+
+static std::vector<fs::path> pathWithImageExtensions(const fs::path &path) {
+    if (path.has_extension()) return {path};
+    return {path, path.string() + ".png", path.string() + ".jpg", path.string() + ".jpeg"};
+}
+
+struct DatasetPathIndex {
+    fs::path root;
+    std::unordered_map<std::string, fs::path> filesByRelativePath;
+};
+
+static DatasetPathIndex buildDatasetPathIndex(const fs::path &root,
+                                              const std::vector<fs::path> &datasetFiles) {
+    DatasetPathIndex index;
+    index.root = fs::absolute(root).lexically_normal();
+    for (const fs::path &file : datasetFiles) {
+        fs::path relative = fs::absolute(file).lexically_normal().lexically_relative(index.root);
+        index.filesByRelativePath.emplace(lowercasePathText(relative), file);
+    }
+    return index;
+}
+
+static fs::path resolveDatasetPath(const DatasetPathIndex &datasetIndex,
+                                   const fs::path &path) {
+    for (const fs::path &candidate : pathWithImageExtensions(path)) {
+        if (fs::exists(candidate)) return candidate;
+    }
+
+    for (const fs::path &candidate : pathWithImageExtensions(path)) {
+        const fs::path absoluteCandidate = fs::absolute(candidate).lexically_normal();
+        fs::path relative = absoluteCandidate.lexically_relative(datasetIndex.root);
+        auto firstComponent = relative.begin();
+        if (relative.empty()
+            || (firstComponent != relative.end() && firstComponent->string() == "..")) {
+            continue;
+        }
+
+        const std::string wanted = lowercasePathText(relative);
+        auto found = datasetIndex.filesByRelativePath.find(wanted);
+        if (found != datasetIndex.filesByRelativePath.end()) return found->second;
+    }
+
+    return path;
+}
+
 static bool pathEndsWithText(const fs::path &path, const std::string &suffix) {
     std::string text = path.generic_string();
     std::transform(text.begin(), text.end(), text.begin(),
@@ -58,13 +112,10 @@ static bool pathEndsWithText(const fs::path &path, const std::string &suffix) {
         && text.compare(text.size() - needle.size(), needle.size(), needle) == 0;
 }
 
-static std::vector<fs::path> jsonFilesInDataset(const fs::path &root) {
+static std::vector<fs::path> jsonFilesInDataset(const std::vector<fs::path> &datasetFiles) {
     std::vector<fs::path> jsonFiles;
-    for (const auto &entry : fs::recursive_directory_iterator(
-             root, fs::directory_options::skip_permission_denied)) {
-        if (entry.is_regular_file() && iequals(entry.path().extension().string(), ".json")) {
-            jsonFiles.push_back(entry.path());
-        }
+    for (const fs::path &path : datasetFiles) {
+        if (iequals(path.extension().string(), ".json")) jsonFiles.push_back(path);
     }
     std::sort(jsonFiles.begin(), jsonFiles.end());
     return jsonFiles;
@@ -100,7 +151,9 @@ static fs::path findEvalTransformsJson(const std::vector<fs::path> &jsonFiles) {
 
 InputData loaders::loadNerfstudio(const std::string &projectRoot) {
     fs::path root(projectRoot);
-    std::vector<fs::path> jsonFiles = jsonFilesInDataset(root);
+    std::vector<fs::path> datasetFiles = filesInDataset(root);
+    DatasetPathIndex datasetIndex = buildDatasetPathIndex(root, datasetFiles);
+    std::vector<fs::path> jsonFiles = jsonFilesInDataset(datasetFiles);
     fs::path transformsPath = findTransformsJson(jsonFiles);
 
     std::ifstream f(transformsPath.string());
@@ -134,16 +187,16 @@ InputData loaders::loadNerfstudio(const std::string &projectRoot) {
             std::string fp = frame["file_path"].get<std::string>();
             fs::path imagePath(fp);
             cam.filePath = imagePath.is_absolute()
-                ? resolveImagePath(imagePath.string())
-                : resolveImagePath((baseDir / imagePath).string());
+                ? resolveDatasetPath(datasetIndex, imagePath).string()
+                : resolveDatasetPath(datasetIndex, baseDir / imagePath).string();
             cam.datasetRoot = projectRoot;
             if (!fs::exists(cam.filePath)) continue;
             if (frame.contains("mask_path")) {
                 std::string mp = frame["mask_path"].get<std::string>();
                 fs::path maskPath(mp);
                 cam.maskPath = maskPath.is_absolute()
-                    ? resolveImagePath(maskPath.string())
-                    : resolveImagePath((baseDir / maskPath).string());
+                    ? resolveDatasetPath(datasetIndex, maskPath).string()
+                    : resolveDatasetPath(datasetIndex, baseDir / maskPath).string();
             }
 
             if (cam.width <= 0 || cam.height <= 0) {
