@@ -105,7 +105,15 @@ static bool pathEndsWith(const fs::path &path, const fs::path &suffix) {
         if (pathIt == path.begin()) return false;
         --pathIt;
         --suffixIt;
-        if (*pathIt != *suffixIt) return false;
+        const std::string pathText = pathIt->string();
+        const std::string suffixText = suffixIt->string();
+        if (pathText.size() != suffixText.size()) return false;
+        if (!std::equal(pathText.begin(), pathText.end(), suffixText.begin(),
+                        [](unsigned char a, unsigned char b) {
+                            return std::tolower(a) == std::tolower(b);
+                        })) {
+            return false;
+        }
     }
     return true;
 }
