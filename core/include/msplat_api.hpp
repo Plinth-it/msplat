@@ -16,7 +16,7 @@ namespace msplat {
 struct Config {
     int iterations = 30000;
     int shDegree = 3;
-    int shDegreeInterval = 1;
+    int shDegreeInterval = 0;
     float ssimWeight = 0.2f;
     int numDownscales = 0;
     int resolutionSchedule = 3000;

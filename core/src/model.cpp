@@ -1037,7 +1037,9 @@ Model::CamSetup Model::prepareCam(Camera& cam, int step, int forcedDownscale) {
         cam.cachedFovX = fovX; cam.cachedFovY = fovY;
     }
 
-    s.degreesToUse = (std::min<int>)(step / shDegreeInterval, shDegree);
+    s.degreesToUse = shDegreeInterval > 0
+        ? (std::min<int>)(step / shDegreeInterval, shDegree)
+        : shDegree;
     int b = featuresRest.size(-2) + 1;
     s.degree = (b <= 1) ? 0 : (b <= 4) ? 1 : (b <= 9) ? 2 : (b <= 16) ? 3 : 4;
     s.tileBounds = std::make_tuple(

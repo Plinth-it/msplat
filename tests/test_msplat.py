@@ -206,7 +206,7 @@ def test_training_config_defaults():
     cfg = TrainingConfig()
     assert cfg.iterations == 30000
     assert cfg.sh_degree == 3
-    assert cfg.sh_degree_interval == 1
+    assert cfg.sh_degree_interval == 0
     assert cfg.ssim_weight == pytest.approx(0.2)
     assert cfg.num_downscales == 0
     assert cfg.refine_every == 200

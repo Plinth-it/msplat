@@ -206,8 +206,9 @@ int main(int argc, char *argv[]) {
     int shDegree = 3;
     app.add_option("--sh-degree", shDegree, "Max spherical harmonics degree")
         ->check(CLI::Range(0, 4));
-    int shDegreeInterval = 1;
-    app.add_option("--sh-degree-interval", shDegreeInterval, "Increase SH degree every N steps");
+    int shDegreeInterval = 0;
+    app.add_option("--sh-degree-interval", shDegreeInterval, "Increase SH degree every N steps (0 = full degree immediately)")
+        ->check(CLI::NonNegativeNumber);
     float ssimWeight = 0.2f;
     app.add_option("--ssim-weight", ssimWeight, "SSIM loss weight (0 = L1 only)")
         ->check(CLI::Range(0.0f, 1.0f));

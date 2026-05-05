@@ -56,7 +56,7 @@ static inline MsplatConfig msplat_default_config(void) {
     MsplatConfig c;
     c.iterations = 30000;
     c.shDegree = 3;
-    c.shDegreeInterval = 1;
+    c.shDegreeInterval = 0;
     c.ssimWeight = 0.2f;
     c.numDownscales = 0;
     c.resolutionSchedule = 3000;
