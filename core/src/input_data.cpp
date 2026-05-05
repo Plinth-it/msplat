@@ -69,8 +69,11 @@ static std::string findMaskPath(const std::string &imagePath) {
 }
 
 static float maskPixelValue(const Image &mask, int index) {
+    if (mask.hasAlpha()) {
+        return std::clamp(mask.alpha[index], 0.0f, 1.0f);
+    }
     const float *p = &mask.data[index * 3];
-    return std::clamp(0.2126f * p[0] + 0.7152f * p[1] + 0.0722f * p[2], 0.0f, 1.0f);
+    return std::clamp(p[0], 0.0f, 1.0f);
 }
 
 static void copyMaskToAlpha(Image &image, const Image &mask) {
