@@ -57,6 +57,51 @@ static fs::path exportPathForStep(const std::string &projectRoot, const std::str
     return dir / name;
 }
 
+static void filterCameras(InputData &inputData, int maxFrames, int subsampleFrames) {
+    if (maxFrames <= 0 && subsampleFrames <= 1) return;
+
+    std::vector<Camera> filtered;
+    size_t step = static_cast<size_t>(std::max(subsampleFrames, 1));
+    size_t limit = maxFrames > 0 ? static_cast<size_t>(maxFrames) : inputData.cameras.size();
+    filtered.reserve(std::min(inputData.cameras.size(), limit));
+    for (size_t i = 0; i < inputData.cameras.size() && filtered.size() < limit; i += step) {
+        filtered.push_back(std::move(inputData.cameras[i]));
+    }
+    if (filtered.empty()) throw std::runtime_error("Camera filtering removed every frame");
+    inputData.cameras = std::move(filtered);
+}
+
+static void subsamplePoints(InputData &inputData, int subsampleStep) {
+    if (subsampleStep <= 1 || inputData.points.count <= 0) return;
+
+    Points filtered;
+    filtered.xyz.reserve((inputData.points.count / subsampleStep + 1) * 3);
+    filtered.rgb.reserve((inputData.points.count / subsampleStep + 1) * 3);
+    for (int64_t i = 0; i < inputData.points.count; i += subsampleStep) {
+        filtered.xyz.insert(filtered.xyz.end(),
+                            inputData.points.xyz.begin() + i * 3,
+                            inputData.points.xyz.begin() + i * 3 + 3);
+        if (!inputData.points.rgb.empty()) {
+            filtered.rgb.insert(filtered.rgb.end(),
+                                inputData.points.rgb.begin() + i * 3,
+                                inputData.points.rgb.begin() + i * 3 + 3);
+        }
+    }
+    filtered.count = static_cast<int64_t>(filtered.xyz.size() / 3);
+    inputData.points = std::move(filtered);
+}
+
+static float cameraDownscaleFactor(const Camera &camera, float downScaleFactor, int maxResolution) {
+    float factor = std::max(downScaleFactor, 1.0f);
+    if (maxResolution > 0 && camera.width > 0 && camera.height > 0) {
+        int maxDim = std::max(camera.width, camera.height);
+        if (maxDim > maxResolution) {
+            factor = std::max(factor, static_cast<float>(maxDim) / static_cast<float>(maxResolution));
+        }
+    }
+    return factor;
+}
+
 int main(int argc, char *argv[]) {
     CLI::App app{"msplat — 3D Gaussian Splatting for Apple Silicon"};
     app.set_version_flag("--version", APP_VERSION);
@@ -127,6 +172,18 @@ int main(int argc, char *argv[]) {
     float downScaleFactor = 1.0f;
     app.add_option("-d,--downscale-factor", downScaleFactor, "Image downscale factor")
         ->check(CLI::Range(1.0f, 32.0f));
+    int maxResolution = 0;
+    app.add_option("--max-resolution", maxResolution, "Brush-style max loaded image resolution (0 disables)")
+        ->check(CLI::NonNegativeNumber);
+    int maxFrames = 0;
+    app.add_option("--max-frames", maxFrames, "Brush-style maximum frames to load (0 disables)")
+        ->check(CLI::NonNegativeNumber);
+    int subsampleFrames = 1;
+    app.add_option("--subsample-frames", subsampleFrames, "Brush-style frame subsampling step")
+        ->check(CLI::PositiveNumber);
+    int subsamplePointStep = 1;
+    app.add_option("--subsample-points", subsamplePointStep, "Brush-style initial point subsampling step")
+        ->check(CLI::PositiveNumber);
     int numDownscales = 0;
     app.add_option("--num-downscales", numDownscales, "Progressive downscale levels");
     int resolutionSchedule = 3000;
@@ -246,9 +303,11 @@ int main(int argc, char *argv[]) {
 
     try {
         InputData inputData = inputDataFromX(projectRoot, colmapImagePath);
+        filterCameras(inputData, maxFrames, subsampleFrames);
+        subsamplePoints(inputData, subsamplePointStep);
 
         for (auto &cam : inputData.cameras)
-            cam.loadImage(downScaleFactor);
+            cam.loadImage(cameraDownscaleFactor(cam, downScaleFactor, maxResolution));
 
         std::vector<Camera> cams;
         std::vector<Camera> testCams;
