@@ -374,7 +374,10 @@ LoadedGaussians loadGaussianPly(const std::string &path, float scale, const floa
     if (numDc == 0 && hasRgbColor) numDc = 3;
     int frBases = numFr / 3;
 
-    const int selectedPoints = (numPoints + subsampleStep - 1) / subsampleStep;
+    const int selectedPoints = numPoints / subsampleStep;
+    if (selectedPoints == 0) {
+        throw std::runtime_error("PLY subsampling removed every Gaussian: " + path);
+    }
 
     // Read rows by property name. Brush and common INRIA Gaussian PLYs do not
     // guarantee the same property order as msplat exports.
@@ -387,7 +390,7 @@ LoadedGaussians loadGaussianPly(const std::string &path, float scale, const floa
 
     int selected = 0;
     for (int i = 0; i < numPoints; i++) {
-        const bool keep = i % subsampleStep == 0;
+        const bool keep = (i + 1) % subsampleStep == 0;
         if (keep) qtRaw[selected*4] = 1.0f;
         float rgb[3] = {};
         bool hasRgb[3] = {};
