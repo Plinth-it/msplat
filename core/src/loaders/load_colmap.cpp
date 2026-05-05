@@ -396,6 +396,7 @@ InputData loaders::loadColmap(const std::string &projectRoot, const std::string 
         cam.fx = cc.fx; cam.fy = cc.fy; cam.cx = cc.cx; cam.cy = cc.cy;
         cam.k1 = cc.k1; cam.k2 = cc.k2; cam.p1 = cc.p1; cam.p2 = cc.p2;
         cam.filePath = findColmapImagePath(root, imageDir, img.filename);
+        if (!fs::exists(cam.filePath)) continue;
         w2cToCamToWorld(img.quat, img.t, cam.camToWorld);
         data.cameras.push_back(cam);
     }

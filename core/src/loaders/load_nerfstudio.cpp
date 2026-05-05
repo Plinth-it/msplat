@@ -73,6 +73,7 @@ InputData loaders::loadNerfstudio(const std::string &projectRoot) {
             cam.filePath = imagePath.is_absolute()
                 ? resolveImagePath(imagePath.string())
                 : resolveImagePath((baseDir / imagePath).string());
+            if (!fs::exists(cam.filePath)) continue;
             if (frame.contains("mask_path")) {
                 std::string mp = frame["mask_path"].get<std::string>();
                 fs::path maskPath(mp);
