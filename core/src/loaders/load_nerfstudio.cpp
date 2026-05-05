@@ -58,11 +58,15 @@ InputData loaders::loadNerfstudio(const std::string &projectRoot) {
                     : resolveImagePath((baseDir / maskPath).string());
             }
 
-            // transform_matrix is 4x4 c2w (OpenGL convention)
+            // transform_matrix is 4x4 c2w; flip camera Y/Z into msplat's pose convention.
             auto &tm = frame["transform_matrix"];
             for (int r = 0; r < 4; r++)
                 for (int c = 0; c < 4; c++)
                     cam.camToWorld[r*4+c] = tm[r][c].get<float>();
+            for (int r = 0; r < 4; r++) {
+                cam.camToWorld[r*4+1] *= -1.0f;
+                cam.camToWorld[r*4+2] *= -1.0f;
+            }
 
             out.push_back(cam);
         }
