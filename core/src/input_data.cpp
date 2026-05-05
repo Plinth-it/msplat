@@ -327,7 +327,7 @@ MTensor& Camera::getGPUImage(int downscaleFactor) {
 
 MTensor& Camera::getGPUImage(int downscaleFactor, const float background[3]) {
     Image img = getImage(downscaleFactor);
-    if (!img.hasAlpha() || background == nullptr) return getGPUImage(downscaleFactor);
+    if (!img.hasAlpha() || background == nullptr || alphaAsMask) return getGPUImage(downscaleFactor);
 
     std::array<float, 3> bg = {background[0], background[1], background[2]};
     auto cacheIt = mtensorCompositeImageCache.find(downscaleFactor);
