@@ -590,7 +590,8 @@ int main(int argc, char *argv[]) {
 
         std::vector<size_t> camIndices(cams.size());
         std::iota(camIndices.begin(), camIndices.end(), 0);
-        InfiniteRandomIterator<size_t> camsIter(camIndices, seed);
+        constexpr unsigned brushSceneLoaderSeed = 42;
+        InfiniteRandomIterator<size_t> camsIter(camIndices, brushSceneLoaderSeed);
         std::mt19937 bgRng(seed);
         auto sampleBackground = [&]() {
             std::array<float, 3> bg = {bgColor[0], bgColor[1], bgColor[2]};
@@ -860,12 +861,15 @@ int main(int argc, char *argv[]) {
                         for (Camera &cam : lodCams) cam.applyImageScale(cumulativeScale);
                         lodTrainCams = &lodCams;
                     }
+                    std::vector<size_t> lodCamIndices(lodTrainCams->size());
+                    std::iota(lodCamIndices.begin(), lodCamIndices.end(), 0);
+                    InfiniteRandomIterator<size_t> lodCamsIter(lodCamIndices, brushSceneLoaderSeed);
                     std::cout << ", refining " << lodRefineSteps
                               << " steps at image scale " << (cumulativeScale * 100.0f) << "%";
                     std::cout << std::endl;
 
                     for (int refineStep = 1; refineStep <= lodRefineSteps; refineStep++) {
-                        Camera &cam = (*lodTrainCams)[camsIter.next()];
+                        Camera &cam = (*lodTrainCams)[lodCamsIter.next()];
                         std::array<float, 3> stepBg = sampleBackground();
                         MTensor gt = cam.getGPUImage(1, stepBg.data());
                         MTensor *lossMask = nullptr;
