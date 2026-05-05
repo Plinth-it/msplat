@@ -38,6 +38,12 @@ static bool iequals(const std::string &a, const std::string &b) {
         });
 }
 
+static bool hasPathComponent(const fs::path &path, const std::string &component) {
+    return std::any_of(path.begin(), path.end(), [&](const fs::path &part) {
+        return iequals(part.string(), component);
+    });
+}
+
 static std::string lowercasePathText(const fs::path &path) {
     std::string text = path.generic_string();
     std::transform(text.begin(), text.end(), text.begin(),
@@ -49,6 +55,7 @@ static std::vector<fs::path> filesInDataset(const fs::path &root) {
     std::vector<fs::path> files;
     for (const auto &entry : fs::recursive_directory_iterator(
              root, fs::directory_options::skip_permission_denied)) {
+        if (hasPathComponent(entry.path(), "__MACOSX")) continue;
         if (entry.is_regular_file()) files.push_back(entry.path());
     }
     std::sort(files.begin(), files.end());

@@ -22,6 +22,12 @@ static bool iequals(const std::string &a, const std::string &b) {
         });
 }
 
+static bool hasPathComponent(const fs::path &path, const std::string &component) {
+    return std::any_of(path.begin(), path.end(), [&](const fs::path &part) {
+        return iequals(part.string(), component);
+    });
+}
+
 static std::vector<fs::path> maskSearchDirsForImage(const fs::path &image) {
     fs::path dir = image.parent_path();
     fs::path parent = dir.parent_path();
@@ -530,6 +536,7 @@ static std::vector<fs::path> jsonFilesInDataset(const fs::path &root) {
     std::vector<fs::path> jsonFiles;
     for (const auto &entry : fs::recursive_directory_iterator(
              root, fs::directory_options::skip_permission_denied)) {
+        if (hasPathComponent(entry.path(), "__MACOSX")) continue;
         if (entry.is_regular_file() && iequals(entry.path().extension().string(), ".json")) {
             jsonFiles.push_back(entry.path());
         }
@@ -591,6 +598,7 @@ static bool hasColmapSparseModel(const fs::path &root) {
     for (const auto &entry : fs::recursive_directory_iterator(
              root, fs::directory_options::skip_permission_denied)) {
         if (!entry.is_regular_file()) continue;
+        if (hasPathComponent(entry.path(), "__MACOSX")) continue;
         fs::path dir = entry.path().parent_path();
         const fs::path name = entry.path().filename();
         if ((iequals(name.string(), "cameras.bin") || iequals(name.string(), "cameras.txt")) && hasModel(dir)) {

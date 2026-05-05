@@ -38,6 +38,12 @@ static bool iequals(const std::string &a, const std::string &b) {
         });
 }
 
+static bool hasPathComponent(const fs::path &path, const std::string &component) {
+    return std::any_of(path.begin(), path.end(), [&](const fs::path &part) {
+        return iequals(part.string(), component);
+    });
+}
+
 struct PlyProp {
     std::string name;
     PlyType type;
@@ -222,6 +228,7 @@ bool loadDatasetPlyOverride(const std::string &projectRoot, Points &points,
     std::vector<fs::path> plyPaths;
     for (const auto &entry : fs::recursive_directory_iterator(root)) {
         if (!entry.is_regular_file()) continue;
+        if (hasPathComponent(entry.path(), "__MACOSX")) continue;
         if (iequals(entry.path().extension().string(), ".ply")) plyPaths.push_back(entry.path());
     }
     if (plyPaths.empty()) return false;

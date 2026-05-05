@@ -58,6 +58,8 @@ struct ColmapImage {
     std::string filename;
 };
 
+static bool hasPathComponent(const fs::path &path, const std::string &component);
+
 static bool pathNameEquals(const fs::path &path, const std::string &name) {
     const std::string text = path.filename().string();
     return text.size() == name.size() && std::equal(text.begin(), text.end(), name.begin(),
@@ -103,6 +105,7 @@ static std::optional<ColmapSparseModel> findSparseModel(const fs::path &root) {
     for (const auto &entry : fs::recursive_directory_iterator(
              root, fs::directory_options::skip_permission_denied)) {
         if (entry.is_regular_file()
+            && !hasPathComponent(entry.path(), "__MACOSX")
             && (pathNameEquals(entry.path(), "cameras.bin")
                 || pathNameEquals(entry.path(), "cameras.txt"))) {
             dirs.push_back(entry.path().parent_path());
@@ -158,6 +161,7 @@ static std::string findColmapImagePath(const fs::path &root, const fs::path &ima
 
     for (const auto &entry : fs::recursive_directory_iterator(root)) {
         if (!entry.is_regular_file()) continue;
+        if (hasPathComponent(entry.path(), "__MACOSX")) continue;
         if (hasPathComponent(entry.path(), "masks")) continue;
 
         fs::path relative = fs::relative(entry.path(), root);
