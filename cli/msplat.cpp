@@ -133,13 +133,21 @@ static int optionValueCount(const std::string &key) {
     return 1;
 }
 
+static int optionValueCountAfter(const std::vector<std::string> &args, size_t index, const std::string &key) {
+    int count = optionValueCount(key);
+    if (key == "background-color" && index + 1 < args.size() && args[index + 1].find(',') != std::string::npos) {
+        return 1;
+    }
+    return count;
+}
+
 static bool isOptionToken(const std::string &token) {
     return token.size() > 1 && token[0] == '-';
 }
 
 static void skipOptionValues(const std::vector<std::string> &args, size_t &index, const std::string &key) {
     if (args[index].find('=') != std::string::npos) return;
-    int count = optionValueCount(key);
+    int count = optionValueCountAfter(args, index, key);
     while (count-- > 0 && index + 1 < args.size()) ++index;
 }
 
@@ -183,7 +191,7 @@ static std::vector<std::string> filterArgsFileOptions(const std::vector<std::str
         if (!overridden) filtered.push_back(fileArgs[i]);
         if (fileArgs[i].find('=') != std::string::npos) continue;
 
-        int count = optionValueCount(key);
+        int count = optionValueCountAfter(fileArgs, i, key);
         while (count-- > 0 && i + 1 < fileArgs.size()) {
             ++i;
             if (!overridden) filtered.push_back(fileArgs[i]);
@@ -457,6 +465,7 @@ int main(int argc, char *argv[]) {
     app.add_option("--render-mode", renderMode, "Brush render mode: default or mip");
     std::vector<float> bgColor = {0.0f, 0.0f, 0.0f};
     app.add_option("--bg-color,--background-color", bgColor, "Background RGB (0-1), default black")
+        ->delimiter(',')
         ->expected(3);
     std::string colmapImagePath;
     app.add_option("--colmap-image-path", colmapImagePath, "Override COLMAP image directory");
