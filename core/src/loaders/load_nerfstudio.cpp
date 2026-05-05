@@ -4,6 +4,7 @@
 #include <fstream>
 #include <filesystem>
 #include <algorithm>
+#include <cctype>
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -37,21 +38,70 @@ static bool isFiniteCamera(const Camera &cam) {
     return true;
 }
 
-static fs::path singleJsonFile(const fs::path &root) {
+static bool iequals(const std::string &a, const std::string &b) {
+    return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(),
+        [](unsigned char a, unsigned char b) {
+            return std::tolower(a) == std::tolower(b);
+        });
+}
+
+static bool pathEndsWithText(const fs::path &path, const std::string &suffix) {
+    std::string text = path.generic_string();
+    std::transform(text.begin(), text.end(), text.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (!text.empty() && text.front() != '/') text.insert(text.begin(), '/');
+    std::string needle = suffix;
+    std::transform(needle.begin(), needle.end(), needle.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (!needle.empty() && needle.front() != '/') needle.insert(needle.begin(), '/');
+    return text.size() >= needle.size()
+        && text.compare(text.size() - needle.size(), needle.size(), needle) == 0;
+}
+
+static std::vector<fs::path> jsonFilesInDataset(const fs::path &root) {
     std::vector<fs::path> jsonFiles;
-    for (const auto &entry : fs::directory_iterator(root)) {
-        if (entry.is_regular_file() && entry.path().extension() == ".json") {
+    for (const auto &entry : fs::recursive_directory_iterator(
+             root, fs::directory_options::skip_permission_denied)) {
+        if (entry.is_regular_file() && iequals(entry.path().extension().string(), ".json")) {
             jsonFiles.push_back(entry.path());
         }
     }
-    return jsonFiles.size() == 1 ? jsonFiles.front() : fs::path();
+    std::sort(jsonFiles.begin(), jsonFiles.end());
+    return jsonFiles;
+}
+
+static fs::path findTransformsJson(const std::vector<fs::path> &jsonFiles) {
+    if (jsonFiles.size() == 1) return jsonFiles.front();
+
+    auto transforms = std::find_if(jsonFiles.begin(), jsonFiles.end(), [](const fs::path &path) {
+        return pathEndsWithText(path, "transforms.json");
+    });
+    if (transforms != jsonFiles.end()) return *transforms;
+
+    auto train = std::find_if(jsonFiles.begin(), jsonFiles.end(), [](const fs::path &path) {
+        return pathEndsWithText(path, "transforms_train.json");
+    });
+    if (train != jsonFiles.end()) return *train;
+
+    return fs::path();
+}
+
+static fs::path findEvalTransformsJson(const std::vector<fs::path> &jsonFiles) {
+    auto val = std::find_if(jsonFiles.begin(), jsonFiles.end(), [](const fs::path &path) {
+        return pathEndsWithText(path, "transforms_val.json");
+    });
+    if (val != jsonFiles.end()) return *val;
+
+    auto test = std::find_if(jsonFiles.begin(), jsonFiles.end(), [](const fs::path &path) {
+        return pathEndsWithText(path, "transforms_test.json");
+    });
+    return test != jsonFiles.end() ? *test : fs::path();
 }
 
 InputData loaders::loadNerfstudio(const std::string &projectRoot) {
     fs::path root(projectRoot);
-    fs::path transformsPath = root / "transforms.json";
-    if (!fs::exists(transformsPath)) transformsPath = root / "transforms_train.json";
-    if (!fs::exists(transformsPath)) transformsPath = singleJsonFile(root);
+    std::vector<fs::path> jsonFiles = jsonFilesInDataset(root);
+    fs::path transformsPath = findTransformsJson(jsonFiles);
 
     std::ifstream f(transformsPath.string());
     if (!f.is_open()) {
@@ -133,8 +183,7 @@ InputData loaders::loadNerfstudio(const std::string &projectRoot) {
 
     appendFrames(j, transformsDir, data.cameras);
 
-    fs::path evalPath = root / "transforms_val.json";
-    if (!fs::exists(evalPath)) evalPath = root / "transforms_test.json";
+    fs::path evalPath = findEvalTransformsJson(jsonFiles);
     if (fs::exists(evalPath)) {
         std::ifstream evalFile(evalPath.string());
         json evalJson = json::parse(evalFile);

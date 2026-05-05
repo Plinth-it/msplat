@@ -526,13 +526,40 @@ void InputData::saveCameras(const std::string &filename, bool keepCrs) const {
 
 // ── Format dispatcher ───────────────────────────────────────────────────────
 
-static bool hasSingleNerfstudioJson(const fs::path &root) {
+static std::vector<fs::path> jsonFilesInDataset(const fs::path &root) {
     std::vector<fs::path> jsonFiles;
-    for (const auto &entry : fs::directory_iterator(root)) {
-        if (entry.is_regular_file() && entry.path().extension() == ".json") {
+    for (const auto &entry : fs::recursive_directory_iterator(
+             root, fs::directory_options::skip_permission_denied)) {
+        if (entry.is_regular_file() && iequals(entry.path().extension().string(), ".json")) {
             jsonFiles.push_back(entry.path());
         }
     }
+    std::sort(jsonFiles.begin(), jsonFiles.end());
+    return jsonFiles;
+}
+
+static bool pathEndsWithText(const fs::path &path, const std::string &suffix) {
+    std::string text = path.generic_string();
+    std::transform(text.begin(), text.end(), text.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (!text.empty() && text.front() != '/') text.insert(text.begin(), '/');
+    std::string needle = suffix;
+    std::transform(needle.begin(), needle.end(), needle.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (!needle.empty() && needle.front() != '/') needle.insert(needle.begin(), '/');
+    return text.size() >= needle.size()
+        && text.compare(text.size() - needle.size(), needle.size(), needle) == 0;
+}
+
+static bool hasNerfstudioJson(const fs::path &root) {
+    std::vector<fs::path> jsonFiles = jsonFilesInDataset(root);
+    if (std::any_of(jsonFiles.begin(), jsonFiles.end(), [](const fs::path &path) {
+            return pathEndsWithText(path, "transforms.json")
+                || pathEndsWithText(path, "transforms_train.json");
+        })) {
+        return true;
+    }
+
     if (jsonFiles.size() != 1) return false;
 
     std::ifstream f(jsonFiles.front());
@@ -580,17 +607,13 @@ InputData inputDataFromX(const std::string &path, const std::string &colmapImage
     if (hasColmapSparseModel(root))
         return loaders::loadColmap(path, colmapImagePath);
 
-    // Nerfstudio: transforms.json or split transforms_train.json.
-    if (fs::exists(root / "transforms.json") || fs::exists(root / "transforms_train.json"))
+    // Nerfstudio: transforms.json, split transforms_train.json, or a single JSON.
+    if (hasNerfstudioJson(root))
         return loaders::loadNerfstudio(path);
 
     // Polycam: keyframes/ directory or cameras.json
     if (fs::exists(root / "keyframes" / "corrected_cameras") || fs::exists(root / "cameras.json"))
         return loaders::loadPolycam(path);
-
-    // Brush also accepts a single Nerfstudio JSON file with an arbitrary name.
-    if (hasSingleNerfstudioJson(root))
-        return loaders::loadNerfstudio(path);
 
     throw std::runtime_error("Unrecognized dataset format in: " + path +
         "\nSupported: COLMAP (cameras.bin/cameras.txt), Nerfstudio (transforms.json/transforms_train.json/single json), Polycam (keyframes/)");
