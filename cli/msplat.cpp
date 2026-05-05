@@ -115,6 +115,8 @@ int main(int argc, char *argv[]) {
     // Output
     std::string outputScene = "splat.ply";
     app.add_option("-o,--output", outputScene, "Output scene path");
+    uint32_t seed = 42;
+    app.add_option("--seed", seed, "Brush-style random seed");
     int saveEvery = -1;
     app.add_option("-s,--save-every,--export-every", saveEvery, "Save/export every N steps (-1 to disable)");
     std::string exportPath;
@@ -345,6 +347,7 @@ int main(int argc, char *argv[]) {
                      lrMean, lrMeanEnd, lrScale, lrScaleEnd,
                      lrRotation, lrCoeffsDc, lrCoeffsShScale, lrOpacity,
                      randomInitSceneScale, reduceSecondMoment,
+                     seed,
                      bgColor.data(), renderMip);
 
         std::vector<size_t> camIndices(cams.size());

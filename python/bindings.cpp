@@ -165,6 +165,7 @@ public:
             cfg.lr_mean, cfg.lr_mean_end, cfg.lr_scale, cfg.lr_scale_end,
             cfg.lr_rotation, cfg.lr_coeffs_dc, cfg.lr_coeffs_sh_scale, cfg.lr_opac,
             cfg.random_init_scene_scale, cfg.reduce_second_moment,
+            42,
             cfg.bg_color.data(), cfg.render_mip
         );
 

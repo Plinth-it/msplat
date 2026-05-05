@@ -4,6 +4,7 @@
 #include "metal_tensor.hpp"
 #include "ssim.hpp"
 #include "input_data.hpp"
+#include <cstdint>
 
 int numShBases(int degree);
 float psnr(const MTensor& rendered, const MTensor& gt);
@@ -23,6 +24,7 @@ struct Model{
         float lrRotation = 0.002f, float lrCoeffsDc = 2e-3f,
         float lrCoeffsShScale = 10.0f, float lrOpacity = 0.012f,
         float randomInitSceneScale = 0.0f, bool reduceSecondMoment = false,
+        uint32_t randomSeed = 42,
         const float* bgColor = nullptr,
         bool renderMip = false);
 

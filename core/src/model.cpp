@@ -117,7 +117,8 @@ static float estimateMedianExtent(const float *xyz, int64_t count) {
 }
 
 static InitialSplats createRandomInitialSplats(const std::vector<Camera>& cameras,
-                                               float sceneScaleOverride) {
+                                               float sceneScaleOverride,
+                                               uint32_t randomSeed) {
     if (cameras.empty()) {
         throw std::runtime_error("Cannot create random splats without cameras");
     }
@@ -141,7 +142,7 @@ static InitialSplats createRandomInitialSplats(const std::vector<Camera>& camera
     init.quats.resize(numPoints * 4);
     init.opacities.resize(numPoints);
 
-    std::mt19937 rng(42);
+    std::mt19937 rng(randomSeed);
     std::uniform_int_distribution<size_t> camDist(0, cameras.size() - 1);
     std::uniform_real_distribution<float> unit(0.0f, 1.0f);
     std::uniform_real_distribution<float> quatDist(-1.0f, 1.0f);
@@ -194,6 +195,7 @@ Model::Model(const InputData &inputData, int numCameras,
     float lrMean, float lrMeanEnd, float lrScale, float lrScaleEnd,
     float lrRotation, float lrCoeffsDc, float lrCoeffsShScale, float lrOpacity,
     float randomInitSceneScale, bool reduceSecondMoment,
+    uint32_t randomSeed,
     const float* bgColor,
     bool renderMip)
     : numCameras(numCameras), numDownscales(numDownscales), resolutionSchedule(resolutionSchedule),
@@ -220,7 +222,7 @@ Model::Model(const InputData &inputData, int numCameras,
     InitialSplats randomInit;
     const bool useRandomInit = inputData.points.count == 0;
     if (useRandomInit) {
-        randomInit = createRandomInitialSplats(inputData.cameras, randomInitSceneScale);
+        randomInit = createRandomInitialSplats(inputData.cameras, randomInitSceneScale, randomSeed);
     }
 
     int64_t numPoints = useRandomInit ? randomInit.count : inputData.points.count;

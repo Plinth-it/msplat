@@ -123,6 +123,7 @@ Trainer::Trainer(Dataset& dataset, const Config& config)
         config.lrMean, config.lrMeanEnd, config.lrScale, config.lrScaleEnd,
         config.lrRotation, config.lrCoeffsDc, config.lrCoeffsShScale, config.lrOpacity,
         config.randomInitSceneScale, config.reduceSecondMoment,
+        42,
         config.bgColor, config.renderMip
     );
 
