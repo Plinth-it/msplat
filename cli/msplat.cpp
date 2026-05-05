@@ -640,7 +640,7 @@ int main(int argc, char *argv[]) {
                     evalImg.height = (int)rgb_cpu.size(0);
                     evalImg.data.resize(evalImg.width * evalImg.height * 3);
                     memcpy(evalImg.ptr(), rgb_cpu.data_ptr(), evalImg.data.size() * sizeof(float));
-                    imwriteRGB((imageDir / (fs::path(testCams[i].filePath).stem().string() + ".png")).string(), evalImg);
+                    imwriteRGB((imageDir / (fs::path(testCams[i].filePath).filename().string() + ".png")).string(), evalImg);
                 }
 
                 std::cout << "  [" << (i+1) << "/" << nTest << "] "
