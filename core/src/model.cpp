@@ -663,8 +663,11 @@ void Model::afterTrain(int step, int phaseStep, int phaseTotal){
     if (!radii.defined()) return;
 
     int refineStep = phaseStep > 0 ? phaseStep : step;
-    (void)phaseTotal;
-    if (refineStep % refineEvery == 0 && refineStep > warmupLength){
+    int totalForPhase = phaseTotal > 0 ? phaseTotal : maxSteps;
+    float phaseProgress = totalForPhase > 0
+        ? std::clamp(static_cast<float>(refineStep) / static_cast<float>(totalForPhase), 0.0f, 1.0f)
+        : 0.0f;
+    if (refineStep % refineEvery == 0 && refineStep > warmupLength && phaseProgress <= 0.95f){
         bool resetEnabled = resetAlphaEvery > 0;
         int resetInterval = resetEnabled ? resetAlphaEvery * refineEvery : 0;
         bool allowGrowth = step < stopSplitAt && num_active < maxSplats;
