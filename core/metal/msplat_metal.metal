@@ -3169,7 +3169,9 @@ kernel void compute_chunk_prefix_suffix_kernel(
     for (uint k = 0; k < K_max; ++k) {
         uint offset = k * num_pixels + pix_id;
         prefix_T[offset] = pT;
-        pT *= chunk_T[offset];
+        if (chunk_final_idx[offset] >= 0) {
+            pT *= chunk_T[offset];
+        }
     }
 
     // Backward scan: compute suffix color contribution
@@ -3180,6 +3182,9 @@ kernel void compute_chunk_prefix_suffix_kernel(
         after_C[offset * 3 + 0] = aC.x;
         after_C[offset * 3 + 1] = aC.y;
         after_C[offset * 3 + 2] = aC.z;
+        if (chunk_final_idx[offset] < 0) {
+            continue;
+        }
         float pT_k = prefix_T[offset];
         float3 cC = {chunk_C[offset * 3 + 0], chunk_C[offset * 3 + 1], chunk_C[offset * 3 + 2]};
         aC += pT_k * cC;
