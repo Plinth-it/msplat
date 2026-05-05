@@ -1080,8 +1080,8 @@ void Model::fullIteration(Camera& cam, int step, MTensor &gt, MTensor *lossMask,
     float invMaxDim = 1.0f / static_cast<float>((std::max)(lastHeight, lastWidth));
     float invWidth = 1.0f / static_cast<float>((std::max)(lastWidth, 1));
     float invHeight = 1.0f / static_cast<float>((std::max)(lastHeight, 1));
-    float effectiveMaskMean = (lossMask && lossMaskMean > 1e-6f) ? lossMaskMean : 1.0f;
-    float lossInvN = 1.0f / ((float)(s.height * s.width * 3) * effectiveMaskMean);
+    (void)lossMaskMean;
+    float lossInvN = 1.0f / (float)(s.height * s.width * 3);
     MTensor &lossMaskTensor = lossMask ? *lossMask : gt;
     bool useAlphaLoss = alphaTarget && matchAlphaWeight > 0.0f;
     MTensor &alphaTargetTensor = alphaTarget ? *alphaTarget : gt;
