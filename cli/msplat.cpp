@@ -552,6 +552,7 @@ int main(int argc, char *argv[]) {
         InputData inputData = inputDataFromX(projectRoot, colmapImagePath);
         filterCameras(inputData, maxFrames, subsampleFrames);
         subsamplePoints(inputData, subsamplePointStep);
+        if (!validate && !inputData.evalCameras.empty()) evalMode = true;
 
         for (auto &cam : inputData.cameras)
             cam.loadImage(cameraDownscaleFactor(cam, downScaleFactor, maxResolution), alphaMode);
