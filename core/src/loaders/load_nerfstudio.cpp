@@ -249,7 +249,11 @@ InputData loaders::loadNerfstudio(const std::string &projectRoot) {
         fs::path resolvedPlyPath = plyPath.is_absolute()
             ? resolveDatasetPath(datasetIndex, plyPath)
             : resolveDatasetPath(datasetIndex, transformsDir / plyPath);
-        if (fs::exists(resolvedPlyPath)) data.points = readPly(resolvedPlyPath.string());
+        if (fs::exists(resolvedPlyPath)) {
+            const std::string resolvedPlyPathText = resolvedPlyPath.string();
+            data.points = readPly(resolvedPlyPathText);
+            if (isGaussianPly(resolvedPlyPathText)) data.initialGaussianPlyPath = resolvedPlyPathText;
+        }
     }
     if (data.points.count == 0) {
         for (auto p : {"sparse/0/points3D.ply", "points3D.ply"}) {

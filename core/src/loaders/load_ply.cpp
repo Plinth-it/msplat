@@ -171,7 +171,7 @@ Points readPly(const std::string &path) {
     return pts;
 }
 
-static bool isGaussianPly(const fs::path &path) {
+bool isGaussianPly(const std::string &path) {
     std::ifstream f(path, std::ios::binary);
     if (!f.is_open()) return false;
 
@@ -234,7 +234,7 @@ bool loadDatasetPlyOverride(const std::string &projectRoot, Points &points,
     const std::string selectedPath = selected->string();
     points = readPly(selectedPath);
     if (initialGaussianPlyPath) {
-        *initialGaussianPlyPath = isGaussianPly(*selected) ? selectedPath : "";
+        *initialGaussianPlyPath = isGaussianPly(selectedPath) ? selectedPath : "";
     }
     return true;
 }

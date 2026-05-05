@@ -320,7 +320,7 @@ Model::Model(const InputData &inputData, int numCameras,
         featuresDc = g.featuresDc;
         featuresRest = g.featuresRest;
         opacities = g.opacities;
-        if (g.hasRenderMip) renderMip = g.renderMip;
+        if (g.hasRenderMip) this->renderMip = g.renderMip;
         ensureLoadedShCapacity();
         updateMeanLrSceneScaleFromActive();
     }

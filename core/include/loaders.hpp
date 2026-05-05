@@ -12,6 +12,7 @@ namespace loaders {
 
 // PLY point cloud reader
 Points readPly(const std::string &path);
+bool isGaussianPly(const std::string &path);
 bool loadDatasetPlyOverride(const std::string &projectRoot, Points &points,
                             std::string *initialGaussianPlyPath = nullptr);
 
