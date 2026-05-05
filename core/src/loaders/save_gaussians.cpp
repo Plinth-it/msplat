@@ -451,7 +451,10 @@ static LoadedGaussians loadCompressedGaussianPly(std::istream &in,
                                                  float scale,
                                                  const float translation[3],
                                                  bool keepCrs,
-                                                 int subsampleStep) {
+                                                 int subsampleStep,
+                                                 int step,
+                                                 bool hasRenderMip,
+                                                 bool renderMip) {
     const PlyElement *chunk = findElement(elements, "chunk");
     const PlyElement *vertex = findElement(elements, "vertex");
     if (!chunk || !vertex) throw std::runtime_error("Compressed PLY missing chunk or vertex element");
@@ -546,7 +549,9 @@ static LoadedGaussians loadCompressedGaussianPly(std::istream &in,
     }
 
     LoadedGaussians g;
-    g.step = 0;
+    g.step = step;
+    g.hasRenderMip = hasRenderMip;
+    g.renderMip = renderMip;
     auto upload = [](std::vector<int64_t> shape, const float *src, size_t bytes) {
         MTensor t = gpu_empty(shape, DType::Float32);
         if (bytes > 0) memcpy(t.data_ptr(), src, bytes);
@@ -655,7 +660,8 @@ LoadedGaussians loadGaussianPly(const std::string &path, float scale, const floa
         if (!binaryLittleEndian) {
             throw std::runtime_error("Only binary_little_endian compressed PLY files are supported: " + path);
         }
-        return loadCompressedGaussianPly(f, elements, scale, translation, keepCrs, subsampleStep);
+        return loadCompressedGaussianPly(f, elements, scale, translation, keepCrs, subsampleStep,
+                                         step, hasRenderMip, renderMip);
     }
 
     if (numPoints == 0) throw std::runtime_error("PLY has no vertices");
