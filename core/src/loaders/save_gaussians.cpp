@@ -88,15 +88,14 @@ static void saveGaussianPlyWithOrder(const std::string &path, GaussianParams &p,
     if (lodScoreSource) o << "comment msplat_lod_score_source " << lodScoreSource << "\n";
     o << "element vertex " << count << "\n";
     o << "property float x\nproperty float y\nproperty float z\n";
-    o << "property float nx\nproperty float ny\nproperty float nz\n";
+    o << "property float scale_0\nproperty float scale_1\nproperty float scale_2\n";
+    o << "property float opacity\n";
+    o << "property float rot_0\nproperty float rot_1\nproperty float rot_2\nproperty float rot_3\n";
     for (int i = 0; i < numDc; i++) o << "property float f_dc_" << i << "\n";
     for (int i = 0; i < numFr; i++) o << "property float f_rest_" << i << "\n";
-    o << "property float opacity\n";
-    o << "property float scale_0\nproperty float scale_1\nproperty float scale_2\n";
-    o << "property float rot_0\nproperty float rot_1\nproperty float rot_2\nproperty float rot_3\n";
     o << "end_header\n";
 
-    int floatsPerRow = 3 + 3 + numDc + numFr + 1 + 3 + 4;
+    int floatsPerRow = 3 + 3 + 1 + 4 + numDc + numFr;
     std::vector<float> row(floatsPerRow);
     const float *mp = p.means.data<float>(), *sp = p.scales.data<float>(), *qp = p.quats.data<float>();
     const float *dp = p.featuresDc.data<float>(), *op = p.opacities.data<float>();
@@ -107,16 +106,21 @@ static void saveGaussianPlyWithOrder(const std::string &path, GaussianParams &p,
         int c = 0;
         for (int j = 0; j < 3; j++)
             row[c++] = p.keepCrs ? (mp[i*3+j] / p.scale + p.translation[j]) : mp[i*3+j];
-        row[c++] = 0; row[c++] = 0; row[c++] = 0; // normals
+        for (int j = 0; j < 3; j++)
+            row[c++] = p.keepCrs ? std::log(std::exp(sp[i*3+j]) / p.scale) : sp[i*3+j];
+        row[c++] = op[i];
+        int quatStart = c;
+        for (int j = 0; j < 4; j++) row[c++] = qp[i*4+j];
+        float quatNorm = 0.0f;
+        for (int j = 0; j < 4; j++) quatNorm += row[quatStart + j] * row[quatStart + j];
+        quatNorm = std::sqrt(quatNorm);
+        quatNorm = std::max(quatNorm, 1e-12f);
+        for (int j = 0; j < 4; j++) row[quatStart + j] /= quatNorm;
         for (int j = 0; j < numDc; j++) row[c++] = dp[i*numDc+j];
-        // Transpose [frBases, 3] → [3, frBases] for PLY convention
+        // Transpose [frBases, 3] -> [3, frBases] for PLY convention.
         for (int ch = 0; ch < 3; ch++)
             for (int b = 0; b < frBases; b++)
                 row[c++] = frp[i*frBases*3 + b*3 + ch];
-        row[c++] = op[i];
-        for (int j = 0; j < 3; j++)
-            row[c++] = p.keepCrs ? std::log(std::exp(sp[i*3+j]) / p.scale) : sp[i*3+j];
-        for (int j = 0; j < 4; j++) row[c++] = qp[i*4+j];
 
         o.write(reinterpret_cast<const char*>(row.data()), floatsPerRow * sizeof(float));
     }
