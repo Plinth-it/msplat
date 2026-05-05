@@ -479,10 +479,10 @@ InputData loaders::loadColmap(const std::string &projectRoot, const std::string 
     auto pointsBin = findChildFile(model->dir, "points3D.bin");
     auto pointsTxt = findChildFile(model->dir, "points3D.txt");
     auto pointsPly = findChildFile(model->dir, "points3D.ply");
-    if (pointsBin)
-        data.points = readColmapPoints(pointsBin->string());
-    else if (pointsTxt)
+    if (pointsTxt)
         data.points = readColmapPointsTxt(pointsTxt->string());
+    else if (pointsBin)
+        data.points = readColmapPoints(pointsBin->string());
     else if (pointsPly)
         data.points = readPly(pointsPly->string());
     loadDatasetPlyOverride(projectRoot, data.points, &data.initialGaussianPlyPath);
