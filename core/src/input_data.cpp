@@ -327,9 +327,19 @@ MTensor& Camera::getGPUImage(int downscaleFactor) {
 
 MTensor& Camera::getGPUImage(int downscaleFactor, const float background[3]) {
     Image img = getImage(downscaleFactor);
-    if (!img.hasAlpha() || background == nullptr || alphaAsMask) return getGPUImage(downscaleFactor);
+    if (background == nullptr) return getGPUImage(downscaleFactor);
 
     std::array<float, 3> bg = {background[0], background[1], background[2]};
+    if (bg[0] == 0.0f && bg[1] == 0.0f && bg[2] == 0.0f) {
+        return getGPUImage(downscaleFactor);
+    }
+
+    Image mask;
+    const bool useExplicitMaskAlpha = !maskImage.empty();
+    const bool useImageAlpha = img.hasAlpha();
+    if (!useImageAlpha && !useExplicitMaskAlpha) return getGPUImage(downscaleFactor);
+    if (useExplicitMaskAlpha) mask = getMaskImage(downscaleFactor);
+
     auto cacheIt = mtensorCompositeImageCache.find(downscaleFactor);
     auto bgIt = mtensorCompositeImageCacheBackground.find(downscaleFactor);
     if (cacheIt != mtensorCompositeImageCache.end() && bgIt != mtensorCompositeImageCacheBackground.end() && bgIt->second == bg) {
@@ -340,7 +350,7 @@ MTensor& Camera::getGPUImage(int downscaleFactor, const float background[3]) {
     float *dst = mt.data<float>();
     const float *src = img.ptr();
     for (int i = 0; i < img.width * img.height; i++) {
-        float a = img.alpha[i];
+        float a = useExplicitMaskAlpha ? maskPixelValue(mask, i) : img.alpha[i];
         dst[i * 3 + 0] = src[i * 3 + 0] + background[0] * (1.0f - a);
         dst[i * 3 + 1] = src[i * 3 + 1] + background[1] * (1.0f - a);
         dst[i * 3 + 2] = src[i * 3 + 2] + background[2] * (1.0f - a);
