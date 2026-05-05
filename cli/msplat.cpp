@@ -137,9 +137,10 @@ int main(int argc, char *argv[]) {
     float lodKeepRatio = 0.5f;
     app.add_option("--lod-keep-ratio", lodKeepRatio, "Fraction of splats to keep per LOD level")
         ->check(CLI::Range(0.01f, 1.0f));
-    int lodDecimationKeep = 0;
-    app.add_option("--lod-decimation-keep", lodDecimationKeep, "Brush-style LOD keep percentage")
-        ->check(CLI::Range(1, 100));
+    int lodDecimationKeep = 50;
+    auto *lodDecimationKeepOption = app.add_option("--lod-decimation-keep", lodDecimationKeep,
+                                                   "Brush-style LOD keep percentage")
+                                       ->check(CLI::Range(1, 100));
     int lodRefineSteps = 5000;
     app.add_option("--lod-refine-steps", lodRefineSteps, "Optimize each decimated LOD for N extra steps")
         ->check(CLI::Range(0, 1000000));
@@ -303,7 +304,7 @@ int main(int argc, char *argv[]) {
 
     if (normalizeCrs) keepCrs = false;
     if (stopScreenSizeAtOption->count() == 0) stopScreenSizeAt = growthStopIter;
-    if (lodDecimationKeep > 0) lodKeepRatio = static_cast<float>(lodDecimationKeep) / 100.0f;
+    if (lodDecimationKeepOption->count() > 0) lodKeepRatio = static_cast<float>(lodDecimationKeep) / 100.0f;
     if (evalSplitEvery > 0) {
         testEvery = evalSplitEvery;
         evalMode = true;
