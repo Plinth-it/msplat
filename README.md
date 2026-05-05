@@ -116,6 +116,9 @@ Nerfstudio `mask_path` frames and sibling `masks/<image-stem>.*` files are used
 as loss masks.
 MIP splatting opacity compensation is available with `render_mip=True` in
 Python or `--render-mip` in the C++ CLI.
+The C++ CLI exports PLYs and `cameras.json` in the input dataset coordinate
+frame by default, matching Brush. Use `--normalize-crs` to write msplat's
+normalized internal coordinate frame instead.
 Training can also emit deterministic importance-ranked LOD PLYs with
 `--lod-levels`; each level keeps `--lod-keep-ratio` of the previous splat
 budget. LOD ranking uses accumulated training visibility, screen-space

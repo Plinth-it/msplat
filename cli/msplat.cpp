@@ -284,8 +284,10 @@ int main(int argc, char *argv[]) {
     float backgroundNoiseStrength = 0.1f;
     app.add_option("--background-noise-strength", backgroundNoiseStrength, "Uniform background jitter strength per training step")
         ->check(CLI::Range(0.0f, 1.0f));
-    bool keepCrs = false;
+    bool keepCrs = true;
     app.add_flag("--keep-crs", keepCrs, "Retain input coordinate reference system");
+    bool normalizeCrs = false;
+    app.add_flag("--normalize-crs", normalizeCrs, "Export msplat's normalized internal coordinate frame");
     bool renderMip = false;
     app.add_flag("--render-mip", renderMip, "Use MIP splatting opacity compensation during training and rendering");
     std::string renderMode;
@@ -298,6 +300,7 @@ int main(int argc, char *argv[]) {
 
     CLI11_PARSE(app, argc, argv);
 
+    if (normalizeCrs) keepCrs = false;
     if (lodDecimationKeep > 0) lodKeepRatio = static_cast<float>(lodDecimationKeep) / 100.0f;
     if (evalSplitEvery > 0) {
         testEvery = evalSplitEvery;
