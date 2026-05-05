@@ -71,7 +71,7 @@ struct Model{
   MTensor adam_exp_avg_sq[N_ADAM_GROUPS];
   int adam_step_count = 0;
   float adam_lr[N_ADAM_GROUPS] = {};
-  float adam_beta1 = 0.9f, adam_beta2 = 0.999f, adam_eps = 1e-8f;
+  float adam_beta1 = 0.9f, adam_beta2 = 0.999f, adam_eps = 1e-15f;
   float means_lr_init = 0, means_lr_final = 0;
   float meanNoiseMax = 1.0f;
   float scales_lr_init = 0, scales_lr_final = 0;
