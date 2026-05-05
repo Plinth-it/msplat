@@ -474,7 +474,7 @@ void weightedSampleWithoutReplacement(
 
 }
 
-float Model::prepareBrushRefineFlags(int step, int checkScreen, float cullCenter[3]) {
+float Model::prepareBrushRefineFlags(int step, int checkScreen, bool allowGrowth, float cullCenter[3]) {
     msplat_gpu_sync();
 
     int N = num_active;
@@ -587,7 +587,7 @@ float Model::prepareBrushRefineFlags(int step, int checkScreen, float cullCenter
     int currentAfterPrune = N - prunedCount + selectedCount;
     int headroom = std::max(0, maxSplats - currentAfterPrune);
 
-    if (checkScreen && splitScreenSize > 0.0f && step < stopSplitAt && headroom > 0) {
+    if (allowGrowth && checkScreen && splitScreenSize > 0.0f && headroom > 0) {
         for (int i = 0; i < N && headroom > 0; ++i) {
             if (pruned[i] || selected[i] || visPtr[i] <= 0.0f) continue;
             if (screenPtr[i] > splitScreenSize) {
@@ -597,9 +597,12 @@ float Model::prepareBrushRefineFlags(int step, int checkScreen, float cullCenter
         }
     }
 
-    int growCount = (int)std::round((float)thresholdCount * growthSelectFraction);
-    growCount = std::max(0, growCount - prunedCount);
-    growCount = std::min(growCount, headroom);
+    int growCount = 0;
+    if (allowGrowth) {
+        growCount = (int)std::round((float)thresholdCount * growthSelectFraction);
+        growCount = std::max(0, growCount - prunedCount);
+        growCount = std::min(growCount, headroom);
+    }
     if (growCount > 0) {
         std::fill(weights.begin(), weights.end(), 0.0f);
         for (int i = 0; i < N; ++i) {
@@ -626,13 +629,12 @@ void Model::afterTrain(int step){
     if (step % refineEvery == 0 && step > warmupLength){
         bool resetEnabled = resetAlphaEvery > 0;
         int resetInterval = resetEnabled ? resetAlphaEvery * refineEvery : 0;
-        bool doDensification = step < stopSplitAt
-            && num_active < maxSplats;
-        if (doDensification && resetEnabled) {
-            doDensification = step % resetInterval > numCameras + refineEvery;
+        bool allowGrowth = step < stopSplitAt && num_active < maxSplats;
+        if (allowGrowth && resetEnabled) {
+            allowGrowth = step % resetInterval > numCameras + refineEvery;
         }
 
-        if (doDensification){
+        {
             int numPointsBefore = num_active;
             ensureCapacity(3 * num_active);  // worst case: every gaussian splits
 
@@ -646,16 +648,17 @@ void Model::afterTrain(int step){
             }
 
             float half_max_dim = 0.5f * static_cast<float>((std::max)(lastWidth, lastHeight));
-            int check_screen = (step < stopScreenSizeAt) ? 1 : 0;
+            int check_screen = (allowGrowth && step < stopScreenSizeAt) ? 1 : 0;
             bool checkHuge = resetEnabled && step > refineEvery * resetAlphaEvery;
             int fr_stride = (int)featuresRest_buf.stride0();
             float cullCenter[3] = {};
-            float maxAllowedBounds = prepareBrushRefineFlags(step, check_screen, cullCenter);
+            float maxAllowedBounds = prepareBrushRefineFlags(step, check_screen, allowGrowth, cullCenter);
+            int densifyMaxCount = std::max(maxSplats, 2 * num_active);
 
             int new_count = msplat_densify(
                 num_active, buf_capacity,
                 densifyGradThresh, densifySizeThresh, splitScreenSize, check_screen,
-                growthSelectFraction, (uint32_t)step, maxSplats,
+                growthSelectFraction, (uint32_t)step, densifyMaxCount,
                 MIN_OPACITY, maxAllowedBounds, 0.15f, checkHuge ? 1 : 0,
                 cullCenter, maxAllowedBounds, 1,
                 xysGradNorm, visCounts, max2DSize, half_max_dim,

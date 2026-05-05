@@ -34,7 +34,7 @@ struct Model{
   void schedulersStep(int step);
   int getDownscaleFactor(int step);
   void afterTrain(int step);
-  float prepareBrushRefineFlags(int step, int checkScreen, float cullCenter[3]);
+  float prepareBrushRefineFlags(int step, int checkScreen, bool allowGrowth, float cullCenter[3]);
   void applyRefineDecay(int step);
   void save(const std::string &filename, int step);
   void savePly(const std::string &filename, int step);
