@@ -228,6 +228,7 @@ Model::Model(const InputData &inputData, int numCameras,
     int64_t numPoints = useRandomInit ? randomInit.count : inputData.points.count;
     const std::vector<float> &sourceXyz = useRandomInit ? randomInit.xyz : inputData.points.xyz;
     float meanLrSceneScale = estimateMedianExtent(sourceXyz.data(), numPoints);
+    meanNoiseMax = meanLrSceneScale;
     means_lr_init *= meanLrSceneScale;
     means_lr_final *= meanLrSceneScale;
 
@@ -1132,10 +1133,9 @@ void Model::fullIteration(Camera& cam, int step, MTensor &gt, MTensor *lossMask,
         visCounts, xysGradNorm, max2DSize, invMaxDim, invWidth, invHeight);
 
     if (step < stopSplitAt && meanNoiseWeight > 0.0f) {
-        constexpr float maxMeanNoise = 1.0f;
         msplat_apply_mean_noise(numPoints, means, opacities, r,
                                 adam_lr[0] * meanNoiseWeight,
-                                maxMeanNoise, (uint32_t)step);
+                                meanNoiseMax, (uint32_t)step);
     }
 
     radii = r;

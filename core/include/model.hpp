@@ -73,6 +73,7 @@ struct Model{
   float adam_lr[N_ADAM_GROUPS] = {};
   float adam_beta1 = 0.9f, adam_beta2 = 0.999f, adam_eps = 1e-8f;
   float means_lr_init = 0, means_lr_final = 0;
+  float meanNoiseMax = 1.0f;
   float scales_lr_init = 0, scales_lr_final = 0;
   float rotation_lr = 0, coeffs_dc_lr = 0, coeffs_rest_lr = 0, opacity_lr = 0;
   bool reduceSecondMoment = false;
