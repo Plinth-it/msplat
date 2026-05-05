@@ -541,16 +541,32 @@ static bool hasSingleNerfstudioJson(const fs::path &root) {
     return !doc.is_discarded() && doc.contains("frames") && doc["frames"].is_array();
 }
 
+static bool hasColmapSparseModel(const fs::path &root) {
+    auto hasModel = [](const fs::path &dir) {
+        return (fs::exists(dir / "cameras.bin") && fs::exists(dir / "images.bin"))
+            || (fs::exists(dir / "cameras.txt") && fs::exists(dir / "images.txt"));
+    };
+
+    for (const fs::path &dir : {root, root / "sparse" / "0", root / "sparse"}) {
+        if (hasModel(dir)) return true;
+    }
+    for (const auto &entry : fs::recursive_directory_iterator(
+             root, fs::directory_options::skip_permission_denied)) {
+        if (!entry.is_regular_file()) continue;
+        fs::path dir = entry.path().parent_path();
+        const fs::path name = entry.path().filename();
+        if ((name == "cameras.bin" || name == "cameras.txt") && hasModel(dir)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 InputData inputDataFromX(const std::string &path, const std::string &colmapImagePath) {
     fs::path root(path);
 
     // Brush probes COLMAP before Nerfstudio, so mixed datasets prefer the SfM model.
-    if (fs::exists(root / "cameras.bin")
-        || fs::exists(root / "cameras.txt")
-        || fs::exists(root / "sparse" / "0" / "cameras.bin")
-        || fs::exists(root / "sparse" / "0" / "cameras.txt")
-        || fs::exists(root / "sparse" / "cameras.bin")
-        || fs::exists(root / "sparse" / "cameras.txt"))
+    if (hasColmapSparseModel(root))
         return loaders::loadColmap(path, colmapImagePath);
 
     // Nerfstudio: transforms.json or split transforms_train.json.

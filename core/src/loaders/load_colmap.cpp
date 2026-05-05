@@ -69,6 +69,22 @@ static std::optional<ColmapSparseModel> findSparseModel(const fs::path &root) {
         if (hasBinaryModel(dir)) return ColmapSparseModel{dir, true};
         if (hasTextModel(dir)) return ColmapSparseModel{dir, false};
     }
+
+    std::vector<fs::path> dirs;
+    for (const auto &entry : fs::recursive_directory_iterator(
+             root, fs::directory_options::skip_permission_denied)) {
+        if (entry.is_regular_file()
+            && (entry.path().filename() == "cameras.bin"
+                || entry.path().filename() == "cameras.txt")) {
+            dirs.push_back(entry.path().parent_path());
+        }
+    }
+    std::sort(dirs.begin(), dirs.end());
+    dirs.erase(std::unique(dirs.begin(), dirs.end()), dirs.end());
+    for (const fs::path &dir : dirs) {
+        if (hasBinaryModel(dir)) return ColmapSparseModel{dir, true};
+        if (hasTextModel(dir)) return ColmapSparseModel{dir, false};
+    }
     return std::nullopt;
 }
 
