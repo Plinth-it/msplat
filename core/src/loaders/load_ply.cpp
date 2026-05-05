@@ -1,7 +1,11 @@
 #include "loaders.hpp"
+#include <algorithm>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <cstring>
+
+namespace fs = std::filesystem;
 
 // Property types in PLY files
 enum class PlyType { Float32, Float64, UInt8, UInt16, Int32, Unknown };
@@ -157,6 +161,27 @@ Points readPly(const std::string &path) {
 
     // point count available via pts.count
     return pts;
+}
+
+bool loadDatasetPlyOverride(const std::string &projectRoot, Points &points) {
+    fs::path root(projectRoot);
+    if (!fs::exists(root)) return false;
+
+    std::vector<fs::path> plyPaths;
+    for (const auto &entry : fs::recursive_directory_iterator(root)) {
+        if (!entry.is_regular_file()) continue;
+        if (entry.path().extension() == ".ply") plyPaths.push_back(entry.path());
+    }
+    if (plyPaths.empty()) return false;
+
+    std::sort(plyPaths.begin(), plyPaths.end());
+    auto selected = std::find_if(plyPaths.begin(), plyPaths.end(), [](const fs::path &path) {
+        return path.filename() == "init.ply";
+    });
+    if (selected == plyPaths.end()) selected = std::prev(plyPaths.end());
+
+    points = readPly(selected->string());
+    return true;
 }
 
 // COLMAP points3D.bin reader

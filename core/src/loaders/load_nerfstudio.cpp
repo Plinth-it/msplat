@@ -95,6 +95,7 @@ InputData loaders::loadNerfstudio(const std::string &projectRoot) {
             if (fs::exists(path)) { data.points = readPly(path); break; }
         }
     }
+    loadDatasetPlyOverride(projectRoot, data.points);
 
     autoScaleAndCenter(data);
     return data;
