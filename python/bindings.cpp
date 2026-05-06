@@ -90,9 +90,11 @@ public:
     {
         data = inputDataFromX(path);
 
-        // Load images (parallel)
         for (auto &cam : data.cameras) {
-            cam.loadImage(downscale_factor);
+            cam.configureLazyImageLoad(downscale_factor);
+        }
+        for (auto &cam : data.evalCameras) {
+            cam.configureLazyImageLoad(downscale_factor);
         }
 
         if (eval_mode) {
@@ -120,13 +122,13 @@ public:
         return nb::cast(nb::ndarray<nb::numpy, float>(buf, 2, shape, deleter));
     }
 
-    bool camera_has_alpha(int index) const {
+    bool camera_has_alpha(int index) {
         if (index < 0 || index >= (int)train_cams.size())
             throw std::runtime_error("Camera index out of range");
         return train_cams[index].imageHasAlpha();
     }
 
-    bool camera_has_mask(int index) const {
+    bool camera_has_mask(int index) {
         if (index < 0 || index >= (int)train_cams.size())
             throw std::runtime_error("Camera index out of range");
         return train_cams[index].hasExplicitMask();
@@ -263,6 +265,7 @@ public:
 
         for (int i = 0; i < n; i++) {
             Camera &cam = dataset_ptr->test_cams[i];
+            cam.ensureImageLoaded();
             MTensor rgb = model->render(cam, config.iterations);
             msplat_gpu_sync();
 
@@ -293,6 +296,7 @@ public:
         }
 
         Camera &cam = cams[cam_idx];
+        cam.ensureImageLoaded();
         MTensor rgb = model->render(cam, current_step);
         msplat_gpu_sync();
         MTensor rgb_cpu = rgb.cpu();
@@ -320,6 +324,7 @@ public:
         memcpy(cam.camToWorld, cam_to_world.data(), 16 * sizeof(float));
         cam.cachedViewMat = MTensor();
         cam.cachedProjViewMat = MTensor();
+        cam.ensureImageLoaded();
 
         MTensor rgb = model->render(cam, current_step);
         msplat_gpu_sync();

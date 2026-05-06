@@ -840,6 +840,7 @@ std::vector<float> Model::computePupLodScores(std::vector<Camera> &cams) {
     for (size_t viewIndex = 0; viewIndex < cams.size(); ++viewIndex) {
         Camera &cam = cams[viewIndex];
         std::cout << "PUP scoring: view " << (viewIndex + 1) << "/" << cams.size() << std::endl;
+        cam.ensureImageLoaded();
         auto s = prepareCam(cam, maxSteps, 1);
         lastHeight = s.height;
         lastWidth = s.width;

@@ -6,6 +6,7 @@
 #include <tuple>
 #include <unordered_map>
 #include <array>
+#include <memory>
 #include "metal_tensor.hpp"
 
 // Simple float32 RGB image — replaces cv::Mat
@@ -48,8 +49,15 @@ struct Camera {
     MTensor cachedViewMat, cachedProjViewMat;
     float cachedCamPos[3] = {};
     float cachedFovX = 0, cachedFovY = 0;
+    float lazyImageDownscaleFactor = 1.0f;
+    AlphaModeOverride lazyAlphaMode = AlphaModeOverride::Auto;
+    bool lazyImageLoadConfigured = false;
+    bool imageLoadAttempted = false;
 
     void loadImage(float downscaleFactor, AlphaModeOverride alphaMode = AlphaModeOverride::Auto);
+    void configureLazyImageLoad(float downscaleFactor, AlphaModeOverride alphaMode = AlphaModeOverride::Auto);
+    void ensureImageLoaded();
+    bool imageLoaded() const { return !image.empty(); }
     void applyImageScale(float imageScale);
     Image getImage(int downscaleFactor);
     Image getMaskImage(int downscaleFactor);
@@ -57,10 +65,25 @@ struct Camera {
     MTensor& getGPUImage(int downscaleFactor, const float background[3]);
     MTensor& getGPULossMask(int downscaleFactor);
     float getLossMaskMean(int downscaleFactor);
-    bool imageHasAlpha() const { return image.hasAlpha() && !alphaAsMask; }
-    bool hasLossMask() const { return !maskImage.empty() || alphaAsMask; }
-    bool hasExplicitMask() const { return !maskImage.empty(); }
+    bool imageHasAlpha();
+    bool hasLossMask();
+    bool hasExplicitMask();
     bool hasDistortion() const { return k1 != 0 || k2 != 0 || k3 != 0 || p1 != 0 || p2 != 0; }
+};
+
+class CameraPrefetcher {
+public:
+    CameraPrefetcher(std::vector<Camera> &cameras, unsigned seed = 42);
+    ~CameraPrefetcher();
+
+    CameraPrefetcher(const CameraPrefetcher&) = delete;
+    CameraPrefetcher& operator=(const CameraPrefetcher&) = delete;
+
+    size_t next();
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl;
 };
 
 struct Points {

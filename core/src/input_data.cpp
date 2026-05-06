@@ -6,9 +6,14 @@
 #include <fstream>
 #include <iostream>
 #include <algorithm>
+#include <numeric>
 #include <random>
 #include <cmath>
 #include <cctype>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
+#include "random_iter.hpp"
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -192,7 +197,27 @@ static void premultiplyAlpha(Image &image) {
     }
 }
 
+void Camera::configureLazyImageLoad(float downscaleFactor, AlphaModeOverride alphaMode) {
+    lazyImageDownscaleFactor = downscaleFactor;
+    lazyAlphaMode = alphaMode;
+    lazyImageLoadConfigured = true;
+}
+
+void Camera::ensureImageLoaded() {
+    if (!lazyImageLoadConfigured || imageLoadAttempted || !image.empty()) return;
+    loadImage(lazyImageDownscaleFactor, lazyAlphaMode);
+}
+
 void Camera::loadImage(float downscaleFactor, AlphaModeOverride alphaMode) {
+    imageLoadAttempted = true;
+    imagePyramids.clear();
+    maskPyramids.clear();
+    mtensorImageCache.clear();
+    mtensorCompositeImageCache.clear();
+    mtensorCompositeImageCacheBackground.clear();
+    mtensorLossMaskCache.clear();
+    lossMaskMeanCache.clear();
+
     Image raw = imreadRGB(filePath);
     if (raw.empty()) return;
     alphaAsMask = false;
@@ -259,6 +284,7 @@ void Camera::loadImage(float downscaleFactor, AlphaModeOverride alphaMode) {
 }
 
 void Camera::applyImageScale(float imageScale) {
+    ensureImageLoaded();
     imageScale = std::clamp(imageScale, 0.0f, 1.0f);
     if (imageScale >= 1.0f || image.empty()) return;
 
@@ -290,6 +316,7 @@ void Camera::applyImageScale(float imageScale) {
 }
 
 Image Camera::getImage(int downscaleFactor) {
+    ensureImageLoaded();
     if (downscaleFactor <= 1) return image;
 
     auto it = imagePyramids.find(downscaleFactor);
@@ -303,6 +330,7 @@ Image Camera::getImage(int downscaleFactor) {
 }
 
 Image Camera::getMaskImage(int downscaleFactor) {
+    ensureImageLoaded();
     if (downscaleFactor <= 1) return maskImage;
 
     auto it = maskPyramids.find(downscaleFactor);
@@ -401,6 +429,124 @@ float Camera::getLossMaskMean(int downscaleFactor) {
     if (!hasLossMask()) return 1.0f;
     getGPULossMask(downscaleFactor);
     return lossMaskMeanCache[downscaleFactor];
+}
+
+bool Camera::imageHasAlpha() {
+    ensureImageLoaded();
+    return image.hasAlpha() && !alphaAsMask;
+}
+
+bool Camera::hasLossMask() {
+    ensureImageLoaded();
+    return !maskImage.empty() || alphaAsMask;
+}
+
+bool Camera::hasExplicitMask() {
+    ensureImageLoaded();
+    return !maskImage.empty();
+}
+
+// ── Camera prefetching ──────────────────────────────────────────────────────
+
+static std::vector<size_t> cameraIndexList(size_t count) {
+    std::vector<size_t> indices(count);
+    std::iota(indices.begin(), indices.end(), 0);
+    return indices;
+}
+
+struct CameraPrefetcher::Impl {
+    std::vector<Camera> &cameras;
+    InfiniteRandomIterator<size_t> iterator;
+    std::thread worker;
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool stop = false;
+    bool requestPending = false;
+    bool ready = false;
+    size_t currentIndex = 0;
+    size_t requestedIndex = 0;
+    size_t readyIndex = 0;
+
+    Impl(std::vector<Camera> &cameras, unsigned seed)
+        : cameras(cameras), iterator(cameraIndexList(cameras.size()), seed) {
+        if (cameras.empty()) return;
+
+        worker = std::thread([this]() { run(); });
+        requestNext(iterator.next());
+    }
+
+    ~Impl() {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            stop = true;
+        }
+        cv.notify_all();
+        if (worker.joinable()) worker.join();
+    }
+
+    void requestNext(size_t index) {
+        std::lock_guard<std::mutex> lock(mutex);
+        currentIndex = index;
+        requestPending = false;
+        if (cameras[index].imageLoaded()) {
+            readyIndex = index;
+            ready = true;
+            cv.notify_all();
+            return;
+        }
+
+        ready = false;
+        requestedIndex = index;
+        requestPending = true;
+        cv.notify_all();
+    }
+
+    void run() {
+        while (true) {
+            size_t index = 0;
+            {
+                std::unique_lock<std::mutex> lock(mutex);
+                cv.wait(lock, [&]() { return stop || requestPending; });
+                if (stop) return;
+                index = requestedIndex;
+                requestPending = false;
+            }
+
+            cameras[index].ensureImageLoaded();
+
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                readyIndex = index;
+                ready = true;
+            }
+            cv.notify_all();
+        }
+    }
+
+    size_t next() {
+        if (cameras.empty()) {
+            throw std::runtime_error("Cannot sample cameras from an empty training set");
+        }
+
+        size_t index = 0;
+        {
+            std::unique_lock<std::mutex> lock(mutex);
+            cv.wait(lock, [&]() { return ready && readyIndex == currentIndex; });
+            index = readyIndex;
+        }
+
+        requestNext(iterator.next());
+        return index;
+    }
+};
+
+CameraPrefetcher::CameraPrefetcher(std::vector<Camera> &cameras, unsigned seed)
+    : impl(std::make_unique<Impl>(cameras, seed)) {}
+
+CameraPrefetcher::~CameraPrefetcher() = default;
+
+size_t CameraPrefetcher::next() {
+    return impl->next();
 }
 
 // ── Scale & center ──────────────────────────────────────────────────────────

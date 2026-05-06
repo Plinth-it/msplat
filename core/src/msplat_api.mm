@@ -33,7 +33,9 @@ Dataset::Dataset(const std::string& path, float downscaleFactor,
     impl->data = inputDataFromX(path);
 
     for (auto& cam : impl->data.cameras)
-        cam.loadImage(downscaleFactor);
+        cam.configureLazyImageLoad(downscaleFactor);
+    for (auto& cam : impl->data.evalCameras)
+        cam.configureLazyImageLoad(downscaleFactor);
 
     if (evalMode) {
         auto split = impl->data.splitTrainTest(testEvery);
@@ -74,20 +76,16 @@ struct Trainer::Impl {
     Dataset::Impl* ds = nullptr;
     int currentStep = 0;
 
-    // Camera iteration
-    std::vector<size_t> camIndices;
-    size_t camIterPos = 0;
-    std::mt19937 rng{42};
     std::mt19937 bgRng{1337};
+    std::unique_ptr<CameraPrefetcher> cameraPrefetcher;
 
-    void shuffleCameras() {
-        std::shuffle(camIndices.begin(), camIndices.end(), rng);
-        camIterPos = 0;
+    void resetCameraPrefetcher() {
+        cameraPrefetcher = std::make_unique<CameraPrefetcher>(ds->trainCams, 42);
     }
 
     size_t nextCamera() {
-        if (camIterPos >= camIndices.size()) shuffleCameras();
-        return camIndices[camIterPos++];
+        if (!cameraPrefetcher) resetCameraPrefetcher();
+        return cameraPrefetcher->next();
     }
 
     std::array<float, 3> sampleBackground() {
@@ -109,6 +107,7 @@ Trainer::Trainer(Dataset& dataset, const Config& config)
 {
     impl->config = config;
     impl->ds = static_cast<Dataset::Impl*>(dataset._handle());
+    impl->resetCameraPrefetcher();
 
     impl->model = std::make_unique<Model>(
         impl->ds->data,
@@ -128,10 +127,6 @@ Trainer::Trainer(Dataset& dataset, const Config& config)
         42,
         config.bgColor, config.renderMip
     );
-
-    impl->camIndices.resize(impl->ds->trainCams.size());
-    std::iota(impl->camIndices.begin(), impl->camIndices.end(), 0);
-    impl->shuffleCameras();
 }
 
 Trainer::~Trainer() = default;
@@ -197,6 +192,7 @@ EvalMetrics Trainer::evaluate() {
 
     for (int i = 0; i < n; i++) {
         Camera& cam = testCams[i];
+        cam.ensureImageLoaded();
         MTensor rgb = impl->model->render(cam, impl->config.iterations, evalBg);
         msplat_gpu_sync();
         MTensor rgbCpu = rgb.cpu();
@@ -224,6 +220,7 @@ PixelBuffer Trainer::render(int cameraIndex, bool useTest) {
         return {};
 
     Camera& cam = cams[cameraIndex];
+    cam.ensureImageLoaded();
     MTensor rgb = impl->model->render(cam, impl->currentStep);
     msplat_gpu_sync();
     MTensor rgbCpu = rgb.cpu();
@@ -247,6 +244,7 @@ PixelBuffer Trainer::renderFromPose(const float camToWorld[16], int refCameraInd
     // Invalidate cached matrices so prepareCam recomputes from the new pose
     cam.cachedViewMat = MTensor();
     cam.cachedProjViewMat = MTensor();
+    cam.ensureImageLoaded();
 
     MTensor rgb = impl->model->render(cam, impl->currentStep);
     msplat_gpu_sync();
@@ -270,6 +268,7 @@ void Trainer::renderFromPoseToBuffer(const float camToWorld[16], int refCameraIn
     memcpy(cam.camToWorld, camToWorld, 16 * sizeof(float));
     cam.cachedViewMat = MTensor();
     cam.cachedProjViewMat = MTensor();
+    cam.ensureImageLoaded();
 
     MTensor rgb = impl->model->render(cam, impl->currentStep);
     msplat_gpu_sync();
@@ -308,7 +307,7 @@ void Trainer::exportSplat(const std::string& path) {
 
 int Trainer::loadPly(const std::string& path) {
     impl->currentStep = impl->model->loadPly(path);
-    impl->shuffleCameras();
+    impl->resetCameraPrefetcher();
     return impl->currentStep;
 }
 
@@ -318,8 +317,7 @@ void Trainer::saveCheckpoint(const std::string& path) {
 
 int Trainer::loadCheckpoint(const std::string& path) {
     impl->currentStep = impl->model->loadCheckpoint(path);
-    // Re-shuffle cameras for resumed training
-    impl->shuffleCameras();
+    impl->resetCameraPrefetcher();
     return impl->currentStep;
 }
 

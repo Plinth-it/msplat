@@ -10,10 +10,10 @@
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
+#include <random>
 #include <CLI/CLI.hpp>
 #include "model.hpp"
 #include "input_data.hpp"
-#include "random_iter.hpp"
 #include "loaders.hpp"
 #include "msplat.hpp"
 #include "bindings.h"
@@ -585,9 +585,9 @@ int main(int argc, char *argv[]) {
         if (!validate && !inputData.evalCameras.empty()) evalMode = true;
 
         for (auto &cam : inputData.cameras)
-            cam.loadImage(cameraDownscaleFactor(cam, downScaleFactor, maxResolution), alphaMode);
+            cam.configureLazyImageLoad(cameraDownscaleFactor(cam, downScaleFactor, maxResolution), alphaMode);
         for (auto &cam : inputData.evalCameras)
-            cam.loadImage(cameraDownscaleFactor(cam, downScaleFactor, maxResolution), alphaMode);
+            cam.configureLazyImageLoad(cameraDownscaleFactor(cam, downScaleFactor, maxResolution), alphaMode);
 
         std::vector<Camera> cams;
         std::vector<Camera> testCams;
@@ -602,6 +602,9 @@ int main(int argc, char *argv[]) {
             cams = train; valCam = val;
         }
 
+        constexpr unsigned brushSceneLoaderSeed = 42;
+        CameraPrefetcher camsPrefetcher(cams, brushSceneLoaderSeed);
+
         Model model(inputData, cams.size(),
                      numDownscales, resolutionSchedule, shDegree, shDegreeInterval,
                      refineEvery, warmupLength, resetAlphaEvery, densifyGradThresh,
@@ -615,10 +618,6 @@ int main(int argc, char *argv[]) {
                      seed,
                      bgColor.data(), renderMip);
 
-        std::vector<size_t> camIndices(cams.size());
-        std::iota(camIndices.begin(), camIndices.end(), 0);
-        constexpr unsigned brushSceneLoaderSeed = 42;
-        InfiniteRandomIterator<size_t> camsIter(camIndices, brushSceneLoaderSeed);
         std::mt19937 bgRng(seed);
         auto sampleBackground = [&]() {
             std::array<float, 3> bg = {bgColor[0], bgColor[1], bgColor[2]};
@@ -655,6 +654,7 @@ int main(int argc, char *argv[]) {
             std::cout << ") ===" << std::endl;
 
             for (int i = 0; i < nTest; i++) {
+                testCams[i].ensureImageLoaded();
                 MTensor rgb = model.render(testCams[i], evalStep, evalBg);
                 msplat_gpu_sync();
                 MTensor rgb_cpu = rgb.cpu();
@@ -705,7 +705,7 @@ int main(int argc, char *argv[]) {
 
         auto bench_start = cpu_now();
         for (; step <= (size_t)numIters; step++) {
-            Camera &cam = cams[camsIter.next()];
+            Camera &cam = cams[camsPrefetcher.next()];
 
             auto iter_start = cpu_now();
             int downscale = model.getDownscaleFactor(step);
@@ -767,6 +767,7 @@ int main(int argc, char *argv[]) {
             }
 
             if (!valRender.empty() && step % 10 == 0) {
+                valCam->ensureImageLoaded();
                 MTensor rgb = model.render(*valCam, step);
                 msplat_gpu_sync();
                 MTensor rgb_cpu = rgb.cpu();
@@ -905,15 +906,13 @@ int main(int argc, char *argv[]) {
                         for (Camera &cam : lodCams) cam.applyImageScale(cumulativeScale);
                         lodTrainCams = &lodCams;
                     }
-                    std::vector<size_t> lodCamIndices(lodTrainCams->size());
-                    std::iota(lodCamIndices.begin(), lodCamIndices.end(), 0);
-                    InfiniteRandomIterator<size_t> lodCamsIter(lodCamIndices, brushSceneLoaderSeed);
+                    CameraPrefetcher lodCamsPrefetcher(*lodTrainCams, brushSceneLoaderSeed);
                     std::cout << ", refining " << lodRefineSteps
                               << " steps at image scale " << (cumulativeScale * 100.0f) << "%";
                     std::cout << std::endl;
 
                     for (int refineStep = 1; refineStep <= lodRefineSteps; refineStep++) {
-                        Camera &cam = (*lodTrainCams)[lodCamsIter.next()];
+                        Camera &cam = (*lodTrainCams)[lodCamsPrefetcher.next()];
                         std::array<float, 3> stepBg = sampleBackground();
                         MTensor gt = cam.getGPUImage(1, stepBg.data());
                         MTensor *lossMask = nullptr;
@@ -947,6 +946,7 @@ int main(int argc, char *argv[]) {
         // Validation
         if (valCam) {
             const float evalBg[3] = {0.0f, 0.0f, 0.0f};
+            valCam->ensureImageLoaded();
             MTensor rgb = model.render(*valCam, numIters, evalBg);
             msplat_gpu_sync();
             MTensor rgb_cpu = rgb.cpu();
