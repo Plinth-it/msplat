@@ -3488,6 +3488,60 @@ kernel void ssim_h_fwd_kernel(
     }
 }
 
+kernel void l1_loss_fwd_bwd_kernel(
+    constant float* rendered,
+    constant float* gt,
+    constant uint2& img_size,
+    constant float& inv_n,
+    device float* v_rendered,
+    device atomic_float* loss_sum,
+    constant float* loss_mask,
+    constant uint& use_loss_mask,
+    constant float* final_Ts,
+    constant float* alpha_target,
+    constant uint& use_alpha_loss,
+    constant float& alpha_loss_weight,
+    uint2 gid [[thread_position_in_grid]],
+    uint tr [[thread_index_in_threadgroup]],
+    uint2 tg_size [[threads_per_threadgroup]]
+) {
+    const uint W = img_size.x;
+    const uint H = img_size.y;
+    const uint px = gid.x;
+    const uint py = gid.y;
+    float pixel_loss = 0.0f;
+
+    if (px < W && py < H) {
+        const uint pixel = py * W + px;
+        const float mask_weight = use_loss_mask != 0 ? loss_mask[pixel] : 1.0f;
+        float l1_sum = 0.0f;
+        for (uint c = 0; c < 3; c++) {
+            const uint idx = pixel * 3 + c;
+            const float gt_val = gt[idx];
+            const float rend_val = rendered[idx];
+            l1_sum += fabs(gt_val - rend_val);
+            const float v_l1 = (gt_val > rend_val) ? -1.0f : ((gt_val < rend_val) ? 1.0f : 0.0f);
+            v_rendered[idx] = mask_weight * inv_n * v_l1;
+        }
+        pixel_loss = mask_weight * l1_sum / 3.0f;
+        if (use_alpha_loss != 0) {
+            pixel_loss += alpha_loss_weight * fabs(alpha_target[pixel] - (1.0f - final_Ts[pixel]));
+        }
+    }
+
+    threadgroup float tg_sum[256];
+    tg_sum[tr] = pixel_loss;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    uint tg_total = tg_size.x * tg_size.y;
+    for (uint s = tg_total / 2; s > 0; s >>= 1) {
+        if (tr < s) tg_sum[tr] += tg_sum[tr + s];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tr == 0) {
+        atomic_fetch_add_explicit(loss_sum, tg_sum[0], memory_order_relaxed);
+    }
+}
+
 // Forward pass 2: vertical convolution + SSIM/L1 computation + loss reduction.
 // Reads ssim_h_buf, processes 1 channel at a time for occupancy.
 // Output: intermediates (H, W, 15) — same format as fused_loss_forward_kernel

@@ -155,6 +155,7 @@ struct MetalContext {
     // Separable SSIM loss kernels
     id<MTLComputePipelineState> ssim_h_fwd_kernel_cpso;
     id<MTLComputePipelineState> ssim_v_fwd_kernel_cpso;
+    id<MTLComputePipelineState> l1_loss_fwd_bwd_kernel_cpso;
     id<MTLComputePipelineState> ssim_fused_v_fwd_h_bwd_kernel_cpso;
     id<MTLComputePipelineState> ssim_v_bwd_kernel_cpso;
     id<MTLComputePipelineState> lpips_prepare_nchw_kernel_cpso;
@@ -287,6 +288,7 @@ MetalContext* init_msplat_metal_context() {
     // Separable SSIM loss
     ctx->ssim_h_fwd_kernel_cpso                   = load(@"ssim_h_fwd_kernel");
     ctx->ssim_v_fwd_kernel_cpso                   = load(@"ssim_v_fwd_kernel");
+    ctx->l1_loss_fwd_bwd_kernel_cpso              = load(@"l1_loss_fwd_bwd_kernel");
     ctx->ssim_fused_v_fwd_h_bwd_kernel_cpso       = load(@"ssim_fused_v_fwd_h_bwd_kernel");
     ctx->ssim_v_bwd_kernel_cpso                   = load(@"ssim_v_bwd_kernel");
     ctx->lpips_prepare_nchw_kernel_cpso           = load(@"lpips_prepare_nchw_kernel");
@@ -1375,6 +1377,18 @@ std::tuple<MTensor, float> msplat_train_step(
     auto encode_loss_fwd_bwd = [&](id<MTLComputeCommandEncoder> enc) {
         MTLSize grid = MTLSizeMake(img_width, img_height, 1);
         MTLSize tg = MTLSizeMake(16, 16, 1);
+        if (ssim_weight <= 0.0f) {
+            [enc setComputePipelineState:ctx->l1_loss_fwd_bwd_kernel_cpso];
+            ENC_BUF(enc, out_img, 0); ENC_BUF(enc, gt, 1);
+            [enc setBytes:loss_img_size->data() length:sizeof(*loss_img_size) atIndex:2];
+            ENC_SCALAR(enc, loss_inv_n, 3);
+            ENC_BUF(enc, v_rendered, 4); ENC_BUF(enc, loss_sum, 5);
+            ENC_BUF(enc, loss_mask, 6); ENC_SCALAR(enc, use_loss_mask_u32, 7);
+            ENC_BUF(enc, final_Ts, 8); ENC_BUF(enc, alpha_target, 9);
+            ENC_SCALAR(enc, use_alpha_loss_u32, 10); ENC_SCALAR(enc, alpha_loss_weight, 11);
+            [enc dispatchThreads:grid threadsPerThreadgroup:tg];
+            return;
+        }
         // Pass 1: H conv on images → ssim_h_buf
         [enc setComputePipelineState:ctx->ssim_h_fwd_kernel_cpso];
         ENC_BUF(enc, out_img, 0); ENC_BUF(enc, gt, 1);

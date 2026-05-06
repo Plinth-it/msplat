@@ -1231,8 +1231,8 @@ void Model::fullIteration(Camera& cam, int step, MTensor &gt, MTensor *lossMask,
     lastHeight = s.height; lastWidth = s.width;
     int numPoints = means.size(0);
 
-    // Initialize SSIM window (once)
-    if (!window2d.defined()) {
+    // Initialize SSIM window only when SSIM contributes to the loss.
+    if (ssimWeight > 0.0f && !window2d.defined()) {
         auto w = createSSIMWindow(11, 1.5f);
         window2d = gpu_empty({11, 11}, DType::Float32);
         memcpy(window2d.data_ptr(), w.data(), w.size() * sizeof(float));
