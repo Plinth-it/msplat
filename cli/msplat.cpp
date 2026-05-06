@@ -19,6 +19,25 @@
 #include "bindings.h"
 
 namespace fs = std::filesystem;
+using CliClock = std::chrono::steady_clock;
+
+static double secondsBetween(CliClock::time_point start, CliClock::time_point end) {
+    return std::chrono::duration_cast<std::chrono::duration<double>>(end - start).count();
+}
+
+static std::string formatDuration(double seconds) {
+    seconds = std::max(seconds, 0.0);
+    std::ostringstream out;
+    if (seconds < 60.0) {
+        out << std::fixed << std::setprecision(2) << seconds << " s";
+        return out.str();
+    }
+
+    const int minutes = static_cast<int>(seconds / 60.0);
+    const double remainingSeconds = seconds - static_cast<double>(minutes * 60);
+    out << minutes << "m " << std::fixed << std::setprecision(1) << remainingSeconds << "s";
+    return out.str();
+}
 
 static std::string replaceAll(std::string text, const std::string &from, const std::string &to) {
     size_t pos = 0;
@@ -579,6 +598,8 @@ int main(int argc, char *argv[]) {
     downScaleFactor = std::max(downScaleFactor, 1.0f);
 
     try {
+        const auto totalStart = CliClock::now();
+        const auto datasetStart = CliClock::now();
         InputData inputData = inputDataFromX(projectRoot, colmapImagePath);
         filterCameras(inputData, maxFrames, subsampleFrames);
         subsamplePoints(inputData, subsamplePointStep);
@@ -601,10 +622,12 @@ int main(int argc, char *argv[]) {
             auto [train, val] = inputData.getCameras(validate, valImage);
             cams = train; valCam = val;
         }
+        const auto datasetEnd = CliClock::now();
 
         constexpr unsigned brushSceneLoaderSeed = 42;
         CameraPrefetcher camsPrefetcher(cams, brushSceneLoaderSeed);
 
+        const auto modelStart = CliClock::now();
         Model model(inputData, cams.size(),
                      numDownscales, resolutionSchedule, shDegree, shDegreeInterval,
                      refineEvery, warmupLength, resetAlphaEvery, densifyGradThresh,
@@ -617,6 +640,7 @@ int main(int argc, char *argv[]) {
                      randomInitSceneScale, reduceSecondMoment,
                      seed,
                      bgColor.data(), renderMip);
+        const auto modelEnd = CliClock::now();
 
         std::mt19937 bgRng(seed);
         auto sampleBackground = [&]() {
@@ -689,6 +713,9 @@ int main(int argc, char *argv[]) {
         if (!resume.empty()) step = model.loadPly(resume) + 1;
         if (startIter > 0) step = static_cast<size_t>(startIter) + 1;
         const size_t firstTrainingStep = step;
+        const size_t plannedTrainingSteps = numIters >= static_cast<int>(firstTrainingStep)
+            ? static_cast<size_t>(numIters) - firstTrainingStep + 1
+            : 0;
         const size_t progressInterval = progressEvery > 0
             ? static_cast<size_t>(progressEvery)
             : static_cast<size_t>(std::max(1, numIters / 100));
@@ -704,6 +731,7 @@ int main(int argc, char *argv[]) {
         auto cpu_now = []() { return std::chrono::high_resolution_clock::now(); };
 
         auto bench_start = cpu_now();
+        const auto trainingStart = CliClock::now();
         for (; step <= (size_t)numIters; step++) {
             Camera &cam = cams[camsPrefetcher.next()];
 
@@ -779,6 +807,8 @@ int main(int argc, char *argv[]) {
                 imwriteRGB((fs::path(valRender) / (std::to_string(step) + ".png")).string(), valImg);
             }
         }
+        const auto trainingEnd = CliClock::now();
+        const auto finalizationStart = CliClock::now();
 
         if (benchmarking && !bench_iter_ms.empty()) {
             auto bench_end = cpu_now();
@@ -959,6 +989,26 @@ int main(int argc, char *argv[]) {
                       << "  L1:  " << l1_loss(rgb_cpu, gt_cpu)
                       << "  Gaussians: " << model.means.size(0) << std::endl;
         }
+
+        const auto finalizationEnd = CliClock::now();
+        const double datasetSeconds = secondsBetween(datasetStart, datasetEnd);
+        const double modelSeconds = secondsBetween(modelStart, modelEnd);
+        const double trainingSeconds = secondsBetween(trainingStart, trainingEnd);
+        const double finalizationSeconds = secondsBetween(finalizationStart, finalizationEnd);
+        const double totalSeconds = secondsBetween(totalStart, finalizationEnd);
+
+        std::cout << "\n=== Timings ===" << std::endl;
+        std::cout << "  dataset/setup:   " << formatDuration(datasetSeconds) << std::endl;
+        std::cout << "  model/init:      " << formatDuration(modelSeconds) << std::endl;
+        std::cout << "  training loop:   " << formatDuration(trainingSeconds);
+        if (plannedTrainingSteps > 0 && trainingSeconds > 0.0) {
+            std::cout << "  (" << plannedTrainingSteps << " steps, " << std::fixed << std::setprecision(2)
+                      << (static_cast<double>(plannedTrainingSteps) / trainingSeconds)
+                      << " it/s)";
+        }
+        std::cout << std::endl;
+        std::cout << "  finalize/export: " << formatDuration(finalizationSeconds) << std::endl;
+        std::cout << "  total runtime:   " << formatDuration(totalSeconds) << std::endl;
 
         cleanup_msplat_metal();
         msplat_gpu_sync();
