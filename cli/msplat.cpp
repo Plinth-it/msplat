@@ -11,6 +11,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <random>
+#include <vector>
 #include <CLI/CLI.hpp>
 #include "model.hpp"
 #include "input_data.hpp"
@@ -89,6 +90,33 @@ static std::string formatProgressLine(size_t step, int totalSteps, size_t comple
         out << "  " << std::setprecision(2) << stepsPerSecond << " it/s";
     }
     return out.str();
+}
+
+struct FinalPsnrResult {
+    double psnr = 0.0;
+    size_t views = 0;
+};
+
+static FinalPsnrResult computeTrainPsnr(Model &model, std::vector<Camera> &cams,
+                                        int step, const float *evalBg) {
+    FinalPsnrResult result;
+    if (cams.empty()) return result;
+
+    const int downscale = model.getDownscaleFactor(step);
+    for (Camera &cam : cams) {
+        cam.ensureImageLoaded();
+        MTensor rgb = model.render(cam, step, evalBg);
+        msplat_gpu_sync();
+        MTensor rgbCpu = rgb.cpu();
+        MTensor gtCpu = cam.getGPUImage(downscale, evalBg).cpu();
+        quantizeRenderedForEval(rgbCpu);
+        result.psnr += psnr(rgbCpu, gtCpu);
+        result.views++;
+    }
+    if (result.views > 0) {
+        result.psnr /= static_cast<double>(result.views);
+    }
+    return result;
 }
 
 static fs::path brushExportPathForName(const std::string &projectRoot, const std::string &exportPath,
@@ -1009,6 +1037,19 @@ int main(int argc, char *argv[]) {
         std::cout << std::endl;
         std::cout << "  finalize/export: " << formatDuration(finalizationSeconds) << std::endl;
         std::cout << "  total runtime:   " << formatDuration(totalSeconds) << std::endl;
+
+        const auto finalPsnrStart = CliClock::now();
+        const float finalEvalBg[3] = {0.0f, 0.0f, 0.0f};
+        FinalPsnrResult trainPsnr = computeTrainPsnr(model, cams, numIters, finalEvalBg);
+        const double finalPsnrSeconds = secondsBetween(finalPsnrStart, CliClock::now());
+        if (trainPsnr.views > 0) {
+            std::cout << "\n=== Final Quality ===" << std::endl;
+            std::cout << "  train PSNR:      " << std::fixed << std::setprecision(2)
+                      << trainPsnr.psnr << " dB"
+                      << "  (" << trainPsnr.views << " views, "
+                      << formatDuration(finalPsnrSeconds)
+                      << ", not included in runtime)" << std::endl;
+        }
 
         cleanup_msplat_metal();
         msplat_gpu_sync();
