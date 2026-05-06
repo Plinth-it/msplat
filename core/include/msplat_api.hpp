@@ -109,6 +109,7 @@ public:
 
     int numTrain() const;
     int numTest() const;
+    int initialPointCount() const;
     void cameraPose(int index, float camToWorld[16]) const;
     bool cameraHasAlpha(int index) const;
     bool cameraHasMask(int index) const;

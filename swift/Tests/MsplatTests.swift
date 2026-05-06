@@ -4,6 +4,12 @@ import Msplat
 final class MsplatTests: XCTestCase {
 
     static let gardenPath = "../datasets/mipnerf360/garden"
+    private static let onePixelPNG: Data = {
+        guard let data = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/l+kC6wAAAABJRU5ErkJggg==") else {
+            fatalError("Invalid embedded PNG fixture")
+        }
+        return data
+    }()
 
     func testConfigDefaults() {
         let config = TrainingConfig()
@@ -41,6 +47,57 @@ final class MsplatTests: XCTestCase {
         )
         XCTAssertGreaterThan(dataset.numTrain, 0)
         XCTAssertGreaterThan(dataset.numTest, 0)
+    }
+
+    func testDatasetFiltersNonFinitePointCloudRows() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("msplat-swift-loader-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        try Self.onePixelPNG.write(to: root.appendingPathComponent("image.png"))
+        try """
+        ply
+        format ascii 1.0
+        element vertex 4
+        property float x
+        property float y
+        property float z
+        property uchar red
+        property uchar green
+        property uchar blue
+        end_header
+        0 0 0 255 255 255
+        nan 0 0 255 0 0
+        1 2 3 0 255 0
+        0 inf 0 0 0 255
+        """.write(to: root.appendingPathComponent("points3D.ply"), atomically: true, encoding: .utf8)
+        try """
+        {
+          "w": 1,
+          "h": 1,
+          "fl_x": 1.0,
+          "fl_y": 1.0,
+          "cx": 0.5,
+          "cy": 0.5,
+          "frames": [
+            {
+              "file_path": "image.png",
+              "transform_matrix": [
+                [1, 0, 0, 0],
+                [0, 1, 0, 0],
+                [0, 0, 1, 0],
+                [0, 0, 0, 1]
+              ]
+            }
+          ]
+        }
+        """.write(to: root.appendingPathComponent("transforms.json"), atomically: true, encoding: .utf8)
+
+        let dataset = GaussianDataset(path: root.path)
+
+        XCTAssertEqual(dataset.numTrain, 1)
+        XCTAssertEqual(dataset.initialPointCount, 2)
     }
 
     func testTrainShort() throws {

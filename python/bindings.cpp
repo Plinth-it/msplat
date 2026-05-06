@@ -107,6 +107,7 @@ public:
 
     size_t num_train() const { return train_cams.size(); }
     size_t num_test() const { return test_cams.size(); }
+    size_t initial_point_count() const { return static_cast<size_t>(data.points.count); }
 
     // Get camera-to-world pose (4x4 row-major) as numpy array
     nb::object camera_pose(int index) {
@@ -538,6 +539,8 @@ NB_MODULE(_core, m) {
             "eval_mode"_a = false, "test_every"_a = 8)
         .def_prop_ro("num_train", &Dataset::num_train, "Number of training cameras.")
         .def_prop_ro("num_test", &Dataset::num_test, "Number of test cameras (0 unless eval_mode=True).")
+        .def_prop_ro("initial_point_count", &Dataset::initial_point_count,
+            "Number of finite point-cloud points loaded for initialization.")
         .def("camera_pose", &Dataset::camera_pose, "index"_a,
             "Get camera-to-world pose (4x4 row-major, OpenGL convention) as numpy array.")
         .def("camera_has_alpha", &Dataset::camera_has_alpha, "index"_a,

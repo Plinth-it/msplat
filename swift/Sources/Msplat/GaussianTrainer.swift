@@ -10,7 +10,10 @@ public class GaussianTrainer {
     ///   - dataset: The loaded dataset. Must outlive the trainer.
     ///   - config: Training configuration.
     public init(dataset: GaussianDataset, config: TrainingConfig = TrainingConfig()) {
-        handle = msplat_trainer_create(dataset.handle, config.toC())
+        guard let created = msplat_trainer_create(dataset.handle, config.toC()) else {
+            preconditionFailure(msplatLastError())
+        }
+        handle = created
     }
 
     deinit {

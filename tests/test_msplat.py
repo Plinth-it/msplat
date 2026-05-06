@@ -40,7 +40,7 @@ def _write_rgba_png(path, width, height, pixels):
         f.write(png)
 
 
-def _write_minimal_nerfstudio_dataset(root, alpha, mask=False, points=True):
+def _write_minimal_nerfstudio_dataset(root, alpha, mask=False, points=True, point_rows=None):
     image_path = os.path.join(root, "image.png")
     pixels = bytes([
         255, 0, 0, 255,
@@ -55,11 +55,13 @@ def _write_minimal_nerfstudio_dataset(root, alpha, mask=False, points=True):
         ]))
 
     if points:
+        if point_rows is None:
+            point_rows = [("0", "0", "0", "255", "255", "255")]
         with open(os.path.join(root, "points3D.ply"), "w", encoding="utf-8") as f:
             f.write(
                 "ply\n"
                 "format ascii 1.0\n"
-                "element vertex 1\n"
+                f"element vertex {len(point_rows)}\n"
                 "property float x\n"
                 "property float y\n"
                 "property float z\n"
@@ -67,8 +69,9 @@ def _write_minimal_nerfstudio_dataset(root, alpha, mask=False, points=True):
                 "property uchar green\n"
                 "property uchar blue\n"
                 "end_header\n"
-                "0 0 0 255 255 255\n"
             )
+            for row in point_rows:
+                f.write("{} {} {} {} {} {}\n".format(*row))
 
     transforms = {
         "w": 2,
@@ -92,7 +95,27 @@ def _write_minimal_nerfstudio_dataset(root, alpha, mask=False, points=True):
         json.dump(transforms, f)
 
 
-def _write_minimal_colmap_text_dataset(root, mask_filename=None):
+def _write_binary_float64_point_ply(path, rows):
+    with open(path, "wb") as f:
+        f.write(
+            (
+                "ply\n"
+                "format binary_little_endian 1.0\n"
+                f"element vertex {len(rows)}\n"
+                "property double x\n"
+                "property double y\n"
+                "property double z\n"
+                "property double red\n"
+                "property double green\n"
+                "property double blue\n"
+                "end_header\n"
+            ).encode("ascii")
+        )
+        for row in rows:
+            f.write(struct.pack("<6d", *row))
+
+
+def _write_minimal_colmap_text_dataset(root, mask_filename=None, point_rows=None):
     os.makedirs(os.path.join(root, "images"))
     os.makedirs(os.path.join(root, "sparse"))
 
@@ -119,7 +142,10 @@ def _write_minimal_colmap_text_dataset(root, mask_filename=None):
 
     with open(os.path.join(root, "sparse", "points3D.txt"), "w", encoding="utf-8") as f:
         f.write("# POINT3D_ID, X, Y, Z, R, G, B, ERROR, TRACK[]\n")
-        f.write("1 0 0 0 255 255 255 0 1 0\n")
+        if point_rows is None:
+            point_rows = [("1", "0", "0", "0", "255", "255", "255")]
+        for row in point_rows:
+            f.write("{} {} {} {} {} {} {} 0 1 0\n".format(*row))
 
 
 def _ply_vertex_count(path):
@@ -318,6 +344,116 @@ def test_dataset_detects_colmap_text_with_image_extension_mask_suffix():
         assert ds.num_train == 1
         assert ds.camera_has_alpha(0) is False
         assert ds.camera_has_mask(0) is True
+
+
+def test_dataset_filters_nonfinite_point_cloud_rows():
+    from msplat import Dataset
+
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_minimal_nerfstudio_dataset(
+            tmp,
+            alpha=False,
+            point_rows=[
+                ("0", "0", "0", "255", "255", "255"),
+                ("nan", "0", "0", "255", "0", "0"),
+                ("1", "2", "3", "0", "255", "0"),
+                ("0", "inf", "0", "0", "0", "255"),
+            ],
+        )
+        ds = Dataset(tmp)
+
+        assert ds.num_train == 1
+        assert ds.initial_point_count == 2
+
+
+def test_dataset_keeps_point_rows_with_nonfinite_colors():
+    from msplat import Dataset
+
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_minimal_nerfstudio_dataset(
+            tmp,
+            alpha=False,
+            point_rows=[
+                ("0", "0", "0", "nan", "255", "255"),
+                ("1", "2", "3", "0", "inf", "0"),
+            ],
+        )
+        ds = Dataset(tmp)
+
+        assert ds.num_train == 1
+        assert ds.initial_point_count == 2
+
+
+def test_dataset_binary_float64_ply_filters_points_and_clamps_colors():
+    from msplat import Dataset
+
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_minimal_nerfstudio_dataset(tmp, alpha=False, points=False)
+        _write_binary_float64_point_ply(
+            os.path.join(tmp, "points3D.ply"),
+            [
+                (0.0, 0.0, 0.0, float("nan"), 2.0, -1.0),
+                (float("nan"), 1.0, 1.0, 0.0, 1.0, 0.0),
+                (1.0, 2.0, 3.0, 0.25, float("inf"), 0.75),
+            ],
+        )
+        ds = Dataset(tmp)
+
+        assert ds.num_train == 1
+        assert ds.initial_point_count == 2
+
+
+def test_dataset_all_nonfinite_points_falls_back_to_random_init():
+    from msplat import Dataset
+
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_minimal_nerfstudio_dataset(
+            tmp,
+            alpha=False,
+            point_rows=[
+                ("nan", "0", "0", "255", "0", "0"),
+                ("0", "-inf", "0", "0", "255", "0"),
+            ],
+        )
+        ds = Dataset(tmp)
+
+        assert ds.num_train == 1
+        assert ds.initial_point_count == 0
+
+
+def test_colmap_text_filters_nonfinite_point_rows():
+    from msplat import Dataset
+
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_minimal_colmap_text_dataset(
+            tmp,
+            point_rows=[
+                ("1", "0", "0", "0", "255", "255", "255"),
+                ("2", "nan", "0", "0", "255", "0", "0"),
+                ("3", "2", "3", "4", "0", "255", "0"),
+            ],
+        )
+        ds = Dataset(tmp)
+
+        assert ds.num_train == 1
+        assert ds.initial_point_count == 2
+
+
+def test_colmap_text_keeps_point_rows_with_nonfinite_colors():
+    from msplat import Dataset
+
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_minimal_colmap_text_dataset(
+            tmp,
+            point_rows=[
+                ("1", "0", "0", "0", "nan", "255", "-10"),
+                ("2", "1", "2", "3", "300", "inf", "0"),
+            ],
+        )
+        ds = Dataset(tmp)
+
+        assert ds.num_train == 1
+        assert ds.initial_point_count == 2
 
 
 def test_train_one_step_with_explicit_mask():

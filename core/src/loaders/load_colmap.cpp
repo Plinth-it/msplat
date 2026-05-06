@@ -11,6 +11,12 @@
 
 namespace fs = std::filesystem;
 
+static uint8_t colorByteFromText(const std::string &text) {
+    const double value = std::stod(text);
+    if (!std::isfinite(value)) return 128;
+    return static_cast<uint8_t>(std::round(std::clamp(value, 0.0, 255.0)));
+}
+
 // Quaternion [w,x,y,z] → row-major 3x3 rotation matrix
 static void quatToRotMat(const double q[4], float R[9]) {
     double w = q[0], x = q[1], y = q[2], z = q[3];
@@ -395,12 +401,17 @@ static Points readColmapPointsTxt(const std::string &path) {
             throw std::runtime_error("Invalid COLMAP points3D line: " + line);
         }
 
-        pts.xyz.push_back((float)std::stod(parts[1]));
-        pts.xyz.push_back((float)std::stod(parts[2]));
-        pts.xyz.push_back((float)std::stod(parts[3]));
-        pts.rgb.push_back((uint8_t)std::stoul(parts[4]));
-        pts.rgb.push_back((uint8_t)std::stoul(parts[5]));
-        pts.rgb.push_back((uint8_t)std::stoul(parts[6]));
+        const float x = (float)std::stod(parts[1]);
+        const float y = (float)std::stod(parts[2]);
+        const float z = (float)std::stod(parts[3]);
+        if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) continue;
+
+        pts.xyz.push_back(x);
+        pts.xyz.push_back(y);
+        pts.xyz.push_back(z);
+        pts.rgb.push_back(colorByteFromText(parts[4]));
+        pts.rgb.push_back(colorByteFromText(parts[5]));
+        pts.rgb.push_back(colorByteFromText(parts[6]));
     }
     pts.count = (int64_t)(pts.xyz.size() / 3);
     return pts;

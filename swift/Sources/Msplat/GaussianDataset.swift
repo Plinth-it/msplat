@@ -27,7 +27,10 @@ public class GaussianDataset {
     public init(path: String, downscaleFactor: Float = 1.0,
                 evalMode: Bool = false, testEvery: Int32 = 8) {
         ensureMetallibConfigured()
-        handle = msplat_dataset_create(path, downscaleFactor, evalMode, testEvery)
+        guard let created = msplat_dataset_create(path, downscaleFactor, evalMode, testEvery) else {
+            preconditionFailure(msplatLastError())
+        }
+        handle = created
     }
 
     deinit {
@@ -40,6 +43,9 @@ public class GaussianDataset {
     /// Number of test cameras (0 if evalMode was false).
     public var numTest: Int { Int(msplat_dataset_num_test(handle)) }
 
+    /// Number of finite point-cloud points loaded for initialization.
+    public var initialPointCount: Int { Int(msplat_dataset_initial_point_count(handle)) }
+
     /// Get the camera-to-world pose (4x4 row-major, OpenGL convention) for a training camera.
     public func cameraPose(at index: Int) -> [Float] {
         var pose = [Float](repeating: 0, count: 16)
@@ -48,4 +54,11 @@ public class GaussianDataset {
         }
         return pose
     }
+}
+
+func msplatLastError() -> String {
+    guard let error = msplat_last_error(), error.pointee != 0 else {
+        return "msplat operation failed"
+    }
+    return String(cString: error)
 }

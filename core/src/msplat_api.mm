@@ -14,6 +14,7 @@
 #include <random>
 #include <array>
 #include <stdexcept>
+#include <string>
 
 namespace msplat {
 
@@ -50,6 +51,7 @@ Dataset& Dataset::operator=(Dataset&&) noexcept = default;
 
 int Dataset::numTrain() const { return (int)impl->trainCams.size(); }
 int Dataset::numTest() const { return (int)impl->testCams.size(); }
+int Dataset::initialPointCount() const { return (int)impl->data.points.count; }
 void Dataset::cameraPose(int index, float camToWorld[16]) const {
     if (index >= 0 && index < (int)impl->trainCams.size())
         memcpy(camToWorld, impl->trainCams[index].camToWorld, 16 * sizeof(float));
@@ -340,6 +342,20 @@ void cleanup() { cleanup_msplat_metal(); }
 
 #include "msplat_c_api.h"
 
+static thread_local std::string g_last_error;
+
+static void clearLastError() {
+    g_last_error.clear();
+}
+
+static void setLastError(const std::exception& error) {
+    g_last_error = error.what();
+}
+
+static void setLastError(const char* error) {
+    g_last_error = error;
+}
+
 static msplat::Config configFromC(MsplatConfig c) {
     msplat::Config cfg;
     cfg.iterations = c.iterations;
@@ -383,8 +399,17 @@ static msplat::Config configFromC(MsplatConfig c) {
 
 MsplatDataset msplat_dataset_create(const char* path, float downscaleFactor,
                                      bool evalMode, int testEvery) {
-    auto* ds = new msplat::Dataset(std::string(path), downscaleFactor, evalMode, testEvery);
-    return static_cast<MsplatDataset>(ds);
+    try {
+        clearLastError();
+        auto* ds = new msplat::Dataset(std::string(path), downscaleFactor, evalMode, testEvery);
+        return static_cast<MsplatDataset>(ds);
+    } catch (const std::exception& error) {
+        setLastError(error);
+        return nullptr;
+    } catch (...) {
+        setLastError("unknown msplat dataset creation error");
+        return nullptr;
+    }
 }
 
 void msplat_dataset_destroy(MsplatDataset ds) {
@@ -397,6 +422,10 @@ int msplat_dataset_num_train(MsplatDataset ds) {
 
 int msplat_dataset_num_test(MsplatDataset ds) {
     return static_cast<msplat::Dataset*>(ds)->numTest();
+}
+
+int msplat_dataset_initial_point_count(MsplatDataset ds) {
+    return ds ? static_cast<msplat::Dataset*>(ds)->initialPointCount() : 0;
 }
 
 bool msplat_dataset_camera_has_alpha(MsplatDataset ds, int cameraIndex) {
@@ -412,10 +441,22 @@ void msplat_dataset_camera_pose(MsplatDataset ds, int cameraIndex, float camToWo
 }
 
 MsplatTrainer msplat_trainer_create(MsplatDataset ds, MsplatConfig config) {
-    auto* dataset = static_cast<msplat::Dataset*>(ds);
-    auto cfg = configFromC(config);
-    auto* trainer = new msplat::Trainer(*dataset, cfg);
-    return static_cast<MsplatTrainer>(trainer);
+    try {
+        clearLastError();
+        if (!ds) {
+            throw std::runtime_error("msplat trainer creation requires a valid dataset");
+        }
+        auto* dataset = static_cast<msplat::Dataset*>(ds);
+        auto cfg = configFromC(config);
+        auto* trainer = new msplat::Trainer(*dataset, cfg);
+        return static_cast<MsplatTrainer>(trainer);
+    } catch (const std::exception& error) {
+        setLastError(error);
+        return nullptr;
+    } catch (...) {
+        setLastError("unknown msplat trainer creation error");
+        return nullptr;
+    }
 }
 
 void msplat_trainer_destroy(MsplatTrainer t) {
@@ -493,5 +534,15 @@ int msplat_trainer_iteration(MsplatTrainer t) {
     return static_cast<msplat::Trainer*>(t)->iteration();
 }
 
-void msplat_sync(void) { msplat::sync(); }
+const char* msplat_last_error(void) { return g_last_error.c_str(); }
+void msplat_sync(void) {
+    try {
+        clearLastError();
+        msplat::sync();
+    } catch (const std::exception& error) {
+        setLastError(error);
+    } catch (...) {
+        setLastError("unknown msplat sync error");
+    }
+}
 void msplat_cleanup(void) { msplat::cleanup(); }

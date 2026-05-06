@@ -125,6 +125,11 @@ class Dataset:
         """Number of test cameras (0 unless eval_mode=True)."""
         ...
 
+    @property
+    def initial_point_count(self) -> int:
+        """Number of finite point-cloud points loaded for initialization."""
+        ...
+
     def camera_pose(self, index: int) -> NDArray[np.float32]:
         """Get camera-to-world pose (4x4 row-major, OpenGL convention) as numpy array."""
         ...

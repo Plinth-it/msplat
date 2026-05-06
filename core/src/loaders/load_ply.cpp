@@ -5,6 +5,7 @@
 #include <sstream>
 #include <cstring>
 #include <cctype>
+#include <cmath>
 
 namespace fs = std::filesystem;
 
@@ -44,11 +45,59 @@ static bool hasPathComponent(const fs::path &path, const std::string &component)
     });
 }
 
+static uint8_t colorByteFromUnitFloat(float value) {
+    if (!std::isfinite(value)) return 128;
+    return static_cast<uint8_t>(std::round(std::clamp(value, 0.0f, 1.0f) * 255.0f));
+}
+
+static uint8_t colorByteFromByteFloat(float value) {
+    if (!std::isfinite(value)) return 128;
+    return static_cast<uint8_t>(std::round(std::clamp(value, 0.0f, 255.0f)));
+}
+
 struct PlyProp {
     std::string name;
     PlyType type;
     int offset;     // byte offset within a vertex record
 };
+
+static void dropNonFinitePoints(Points &pts) {
+    const int64_t count = std::min<int64_t>(
+        pts.count, static_cast<int64_t>(pts.xyz.size() / 3));
+    if (count <= 0) {
+        pts.xyz.clear();
+        pts.rgb.clear();
+        pts.count = 0;
+        return;
+    }
+
+    std::vector<float> xyz;
+    std::vector<uint8_t> rgb;
+    xyz.reserve(pts.xyz.size());
+    rgb.reserve(pts.rgb.empty() ? static_cast<size_t>(count * 3) : pts.rgb.size());
+
+    for (int64_t i = 0; i < count; ++i) {
+        const float x = pts.xyz[i * 3 + 0];
+        const float y = pts.xyz[i * 3 + 1];
+        const float z = pts.xyz[i * 3 + 2];
+        if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) continue;
+
+        xyz.push_back(x);
+        xyz.push_back(y);
+        xyz.push_back(z);
+        if (pts.rgb.size() >= static_cast<size_t>((i + 1) * 3)) {
+            rgb.push_back(pts.rgb[i * 3 + 0]);
+            rgb.push_back(pts.rgb[i * 3 + 1]);
+            rgb.push_back(pts.rgb[i * 3 + 2]);
+        } else {
+            rgb.insert(rgb.end(), {128, 128, 128});
+        }
+    }
+
+    pts.count = static_cast<int64_t>(xyz.size() / 3);
+    pts.xyz = std::move(xyz);
+    pts.rgb = std::move(rgb);
+}
 
 Points readPly(const std::string &path) {
     std::ifstream f(path, std::ios::binary);
@@ -129,7 +178,8 @@ Points readPly(const std::string &path) {
                 const auto &p = props[pi];
                 if (p.type == PlyType::UInt8) return (uint8_t)buf[p.offset];
                 if (p.type == PlyType::UInt16) { uint16_t v; memcpy(&v, &buf[p.offset], 2); return (uint8_t)(v >> 8); }
-                if (p.type == PlyType::Float32) { float v; memcpy(&v, &buf[p.offset], 4); return (uint8_t)(v * 255.0f); }
+                if (p.type == PlyType::Float32) { float v; memcpy(&v, &buf[p.offset], 4); return colorByteFromUnitFloat(v); }
+                if (p.type == PlyType::Float64) { double v; memcpy(&v, &buf[p.offset], 8); return colorByteFromUnitFloat((float)v); }
                 return 128;
             };
 
@@ -162,19 +212,19 @@ Points readPly(const std::string &path) {
                 float bv = std::stof(tokens[ib]);
                 // Detect if values are 0-1 float or 0-255 int
                 if (props[ir].type == PlyType::Float32 || props[ir].type == PlyType::Float64) {
-                    pts.rgb[i*3+0] = (uint8_t)(rv * 255.0f);
-                    pts.rgb[i*3+1] = (uint8_t)(gv * 255.0f);
-                    pts.rgb[i*3+2] = (uint8_t)(bv * 255.0f);
+                    pts.rgb[i*3+0] = colorByteFromUnitFloat(rv);
+                    pts.rgb[i*3+1] = colorByteFromUnitFloat(gv);
+                    pts.rgb[i*3+2] = colorByteFromUnitFloat(bv);
                 } else {
-                    pts.rgb[i*3+0] = (uint8_t)rv;
-                    pts.rgb[i*3+1] = (uint8_t)gv;
-                    pts.rgb[i*3+2] = (uint8_t)bv;
+                    pts.rgb[i*3+0] = colorByteFromByteFloat(rv);
+                    pts.rgb[i*3+1] = colorByteFromByteFloat(gv);
+                    pts.rgb[i*3+2] = colorByteFromByteFloat(bv);
                 }
             }
         }
     }
 
-    // point count available via pts.count
+    dropNonFinitePoints(pts);
     return pts;
 }
 
@@ -304,6 +354,6 @@ Points readColmapPoints(const std::string &path) {
         f.seekg(trackLen * 8, std::ios::cur); // skip track entries (imageId u32 + point2dIdx u32 each)
     }
 
-    // point count available via pts.count
+    dropNonFinitePoints(pts);
     return pts;
 }

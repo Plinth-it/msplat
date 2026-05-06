@@ -126,6 +126,7 @@ MsplatDataset msplat_dataset_create(const char* path, float downscaleFactor,
 void msplat_dataset_destroy(MsplatDataset ds);
 int msplat_dataset_num_train(MsplatDataset ds);
 int msplat_dataset_num_test(MsplatDataset ds);
+int msplat_dataset_initial_point_count(MsplatDataset ds);
 bool msplat_dataset_camera_has_alpha(MsplatDataset ds, int cameraIndex);
 bool msplat_dataset_camera_has_mask(MsplatDataset ds, int cameraIndex);
 
@@ -163,6 +164,7 @@ void msplat_dataset_camera_pose(MsplatDataset ds, int cameraIndex, float camToWo
 
 void msplat_set_metallib_path(const char* path);
 void msplat_set_lpips_weights_path(const char* path);
+const char* msplat_last_error(void);
 void msplat_sync(void);
 void msplat_cleanup(void);
 

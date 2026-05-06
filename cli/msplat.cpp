@@ -55,6 +55,23 @@ static std::string formatBrushIteration(int step, int totalSteps) {
     return out.str();
 }
 
+static std::string formatProgressLine(size_t step, int totalSteps, size_t completedSteps,
+                                      int64_t splatCount, double elapsedSeconds) {
+    const double percent = totalSteps > 0
+        ? 100.0 * static_cast<double>(std::min<size_t>(step, static_cast<size_t>(totalSteps))) /
+              static_cast<double>(totalSteps)
+        : 100.0;
+    std::ostringstream out;
+    out << "Progress: " << std::fixed << std::setprecision(1) << percent
+        << "% (" << step << "/" << totalSteps << ")  "
+        << splatCount << " gaussians";
+    if (elapsedSeconds > 0.0 && completedSteps > 0) {
+        const double stepsPerSecond = static_cast<double>(completedSteps) / elapsedSeconds;
+        out << "  " << std::setprecision(2) << stepsPerSecond << " it/s";
+    }
+    return out.str();
+}
+
 static fs::path brushExportPathForName(const std::string &projectRoot, const std::string &exportPath,
                                        const std::string &exportName, int step, int totalSteps) {
     fs::path dir = resolveBrushExportPath(projectRoot, exportPath);
@@ -317,6 +334,9 @@ int main(int argc, char *argv[]) {
     app.add_option("--seed", seed, "Brush-style random seed");
     int saveEvery = 5000;
     app.add_option("-s,--save-every,--export-every", saveEvery, "Save/export every N steps (-1 to disable)");
+    int progressEvery = 0;
+    app.add_option("--progress-every", progressEvery, "Print training progress every N steps (0 = every 1%)")
+        ->check(CLI::NonNegativeNumber);
     std::string exportPath = "./{dataset}_exports/";
     app.add_option("--export-path", exportPath, "Brush-style export directory, supports {dataset}");
     std::string exportName = "export_{iter}.ply";
@@ -668,6 +688,10 @@ int main(int argc, char *argv[]) {
         size_t step = 1;
         if (!resume.empty()) step = model.loadPly(resume) + 1;
         if (startIter > 0) step = static_cast<size_t>(startIter) + 1;
+        const size_t firstTrainingStep = step;
+        const size_t progressInterval = progressEvery > 0
+            ? static_cast<size_t>(progressEvery)
+            : static_cast<size_t>(std::max(1, numIters / 100));
 
         bool benchmarking = std::getenv("BENCHMARK") != nullptr;
         int bench_warmup = 50;
@@ -717,6 +741,19 @@ int main(int argc, char *argv[]) {
                 bench_iter_ms.push_back(iter_ms);
                 bench_cpu_ms.push_back(cpu_ms);
                 bench_drain_ms.push_back(drain_ms);
+            }
+
+            if (step == firstTrainingStep || step == static_cast<size_t>(numIters) ||
+                step % progressInterval == 0) {
+                const auto progressNow = cpu_now();
+                const double elapsedSeconds =
+                    std::chrono::duration_cast<std::chrono::duration<double>>(progressNow - bench_start).count();
+                const size_t completedSteps = step >= firstTrainingStep
+                    ? step - firstTrainingStep + 1
+                    : 0;
+                std::cout << formatProgressLine(step, numIters, completedSteps,
+                                                model.means.size(0), elapsedSeconds)
+                          << std::endl;
             }
 
             if (saveEvery > 0 && step % saveEvery == 0) {

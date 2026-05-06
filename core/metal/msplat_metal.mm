@@ -19,6 +19,7 @@
 #import <string>
 #import <fstream>
 #import <cstdlib>
+#import <stdexcept>
 #import <mach/mach_time.h>
 
 // GPU profiling infrastructure.
@@ -190,9 +191,19 @@ extern "C" void msplat_set_lpips_weights_path(const char* path) {
 MetalContext* init_msplat_metal_context() {
     MetalContext* ctx = (MetalContext*)malloc(sizeof(MetalContext));
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    if (!device) {
+        fprintf(stderr, "msplat: Metal device not available\n");
+        free(ctx);
+        return NULL;
+    }
 
     ctx->device = device;
     ctx->queue  = [ctx->device newCommandQueue];
+    if (!ctx->queue) {
+        fprintf(stderr, "msplat: failed to create Metal command queue\n");
+        free(ctx);
+        return NULL;
+    }
     ctx->d_queue = dispatch_queue_create("com.msplat.metal", DISPATCH_QUEUE_SERIAL);
 
     // Find precompiled metallib: explicit path (XCFramework/Python) or auto-discover
@@ -235,8 +246,9 @@ MetalContext* init_msplat_metal_context() {
     }
 
     if (!metal_library) {
-        fprintf(stderr, "msplat: failed to load metallib: %s\n",
-                error ? [[error description] UTF8String] : "default.metallib not found");
+        const char* detail = error ? [[error description] UTF8String] :
+            (g_metallib_path ? g_metallib_path : "default.metallib not found");
+        fprintf(stderr, "msplat: failed to load metallib: %s\n", detail);
         free(ctx);
         return NULL;
     }
@@ -312,6 +324,9 @@ MetalContext* get_global_context() {
     static MetalContext* ctx = NULL;
     if (ctx == NULL) {
         ctx = init_msplat_metal_context();
+    }
+    if (ctx == NULL) {
+        throw std::runtime_error("msplat: failed to initialize Metal context");
     }
     return ctx;
 }
