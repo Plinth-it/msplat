@@ -46,12 +46,12 @@ training path C++/Metal-first:
   SH degree warmup, growth stop defaults, growth selection, phase-end refine
   gates, point subsampling, and late refinement scheduling.
 - The C++ CLI accepts Brush-oriented process and export flags, including
-  `args.txt`, `--max-resolution`, `--max-frames`, `--subsample-frames`,
-  `--subsample-points`, `--alpha-mode`, `--growth-grad-threshold`,
-  `--growth-select-fraction`, `--render-mode`, `--render-mip`,
-  `--colmap-image-path`, `--export-path`, `--export-name`, `--start-iter`,
-  `--save-every`, and viewer/rerun compatibility flags that are accepted for
-  script compatibility.
+  `args.txt`, `--quality`, `--max-resolution`, `--max-frames`,
+  `--subsample-frames`, `--subsample-points`, `--alpha-mode`,
+  `--growth-grad-threshold`, `--growth-select-fraction`, `--render-mode`,
+  `--render-mip`, `--colmap-image-path`, `--export-path`, `--export-name`,
+  `--start-iter`, `--save-every`, and viewer/rerun compatibility flags that
+  are accepted for script compatibility.
 - Export behavior now defaults to Brush-style dataset coordinates, iteration
   padding, export directories, `cameras.json`, periodic saves, final eval order,
   Gaussian PLY property order, Brush metadata, and render-mode persistence.
@@ -244,20 +244,26 @@ cmake --build build -j
 ./build/msplat path/to/dataset -n 7000 --eval
 ```
 
+The native CLI defaults to the `default` quality preset:
+`--max-resolution 2560`, `--growth-grad-threshold 0.001`, and
+`--growth-select-fraction 0.25`. Use `--quality brush` to name the same
+Brush-like growth behavior explicitly, or `--quality fast` to restore the older
+1920 / 0.0025 growth defaults. Any explicit `--max-resolution`,
+`--growth-grad-threshold`, or `--growth-select-fraction` flag overrides the
+selected preset.
+
 Brush-style all-view transparent training can be run directly through the C++
 CLI:
 
 ```bash
 ./build/msplat /path/to/dataset \
+  --quality brush \
   --alpha-mode transparent \
-  --max-resolution 2048 \
   --max-frames 0 \
   --total-train-iters 5000 \
   --num-downscales 0 \
   --ssim-weight 0.0 \
   --background-noise-strength 0 \
-  --growth-grad-threshold 0.001 \
-  --growth-select-fraction 0.25 \
   --output /tmp/msplat_scene.ply
 ```
 

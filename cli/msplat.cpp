@@ -97,6 +97,22 @@ struct FinalPsnrResult {
     size_t views = 0;
 };
 
+struct QualityPresetDefaults {
+    int maxResolution;
+    float growthGradThreshold;
+    float growthSelectFraction;
+};
+
+static QualityPresetDefaults qualityPresetDefaults(const std::string &name) {
+    if (name == "fast") {
+        return {1920, 0.0025f, 0.25f};
+    }
+    if (name == "brush") {
+        return {2560, 0.001f, 0.25f};
+    }
+    return {2560, 0.001f, 0.25f};
+}
+
 static FinalPsnrResult computeTrainPsnr(Model &model, std::vector<Camera> &cams,
                                         int step, const float *evalBg) {
     FinalPsnrResult result;
@@ -165,6 +181,7 @@ static const std::unordered_map<std::string, std::string>& optionCanonicalNames(
         {"--eval-every", "eval-every"}, {"--eval-save-to-disk", "eval-save-to-disk"},
         {"-n", "total-train-iters"}, {"--num-iters", "total-train-iters"}, {"--total-train-iters", "total-train-iters"},
         {"-d", "downscale-factor"}, {"--downscale-factor", "downscale-factor"},
+        {"--quality", "quality"},
         {"--max-resolution", "max-resolution"}, {"--max-frames", "max-frames"},
         {"--subsample-frames", "subsample-frames"}, {"--subsample-points", "subsample-points"},
         {"--alpha-mode", "alpha-mode"}, {"--num-downscales", "num-downscales"},
@@ -215,6 +232,12 @@ static int optionValueCount(const std::string &key) {
     if (key.empty() || flags.count(key) > 0) return 0;
     if (key == "background-color") return 3;
     return 1;
+}
+
+static bool qualityPresetControlsKey(const std::string &key) {
+    return key == "max-resolution"
+        || key == "growth-grad-threshold"
+        || key == "growth-select-fraction";
 }
 
 static int optionValueCountAfter(const std::vector<std::string> &args, size_t index, const std::string &key) {
@@ -271,7 +294,9 @@ static std::vector<std::string> filterArgsFileOptions(const std::vector<std::str
         }
 
         std::string key = canonicalOptionKey(fileArgs[i]);
-        bool overridden = !key.empty() && explicitKeys.count(key) > 0;
+        bool overridden = !key.empty()
+            && (explicitKeys.count(key) > 0
+                || (explicitKeys.count("quality") > 0 && qualityPresetControlsKey(key)));
         if (!overridden) filtered.push_back(fileArgs[i]);
         if (fileArgs[i].find('=') != std::string::npos) continue;
 
@@ -443,8 +468,12 @@ int main(int argc, char *argv[]) {
     float downScaleFactor = 1.0f;
     app.add_option("-d,--downscale-factor", downScaleFactor, "Image downscale factor")
         ->check(CLI::Range(1.0f, 32.0f));
-    int maxResolution = 1920;
-    app.add_option("--max-resolution", maxResolution, "Brush-style max loaded image resolution (0 disables)")
+    std::string qualityPreset = "default";
+    app.add_option("--quality", qualityPreset, "Quality preset: fast, default, brush")
+        ->check(CLI::IsMember({"fast", "default", "brush"}));
+    QualityPresetDefaults defaultQuality = qualityPresetDefaults(qualityPreset);
+    int maxResolution = defaultQuality.maxResolution;
+    auto *maxResolutionOption = app.add_option("--max-resolution", maxResolution, "Max loaded image resolution (0 disables)")
         ->check(CLI::NonNegativeNumber);
     int maxFrames = 0;
     app.add_option("--max-frames", maxFrames, "Brush-style maximum frames to load (0 disables)")
@@ -479,8 +508,8 @@ int main(int argc, char *argv[]) {
     app.add_option("--warmup-length", warmupLength, "Steps before first densification");
     int resetAlphaEvery = 0;
     app.add_option("--reset-alpha-every", resetAlphaEvery, "Reset opacity every N refinements, or 0 to disable");
-    float densifyGradThresh = 0.0025f;
-    app.add_option("--densify-grad-thresh,--growth-grad-threshold", densifyGradThresh, "Gradient threshold for split/dup");
+    float densifyGradThresh = defaultQuality.growthGradThreshold;
+    auto *densifyGradThreshOption = app.add_option("--densify-grad-thresh,--growth-grad-threshold", densifyGradThresh, "Gradient threshold for split/dup");
     float densifySizeThresh = 0.01f;
     app.add_option("--densify-size-thresh", densifySizeThresh, "Size threshold (dup vs split)");
     int stopScreenSizeAt = 15000;
@@ -492,8 +521,8 @@ int main(int argc, char *argv[]) {
     int maxSplats = 10000000;
     app.add_option("--max-splats", maxSplats, "Maximum splat count allowed during growth")
         ->check(CLI::Range(1, 100000000));
-    float growthSelectFraction = 0.25f;
-    app.add_option("--growth-select-fraction", growthSelectFraction, "Fraction of high-gradient splats selected for growth")
+    float growthSelectFraction = defaultQuality.growthSelectFraction;
+    auto *growthSelectFractionOption = app.add_option("--growth-select-fraction", growthSelectFraction, "Fraction of high-gradient splats selected for growth")
         ->check(CLI::Range(0.0f, 1.0f));
     float splitScreenSize = 0.25f;
     app.add_option("--split-screen-size,--split-at-screen-size", splitScreenSize, "Screen-space split threshold");
@@ -589,6 +618,11 @@ int main(int argc, char *argv[]) {
     } catch (const CLI::ParseError &e) {
         return app.exit(e);
     }
+
+    QualityPresetDefaults selectedQuality = qualityPresetDefaults(qualityPreset);
+    if (maxResolutionOption->count() == 0) maxResolution = selectedQuality.maxResolution;
+    if (densifyGradThreshOption->count() == 0) densifyGradThresh = selectedQuality.growthGradThreshold;
+    if (growthSelectFractionOption->count() == 0) growthSelectFraction = selectedQuality.growthSelectFraction;
 
     if (normalizeCrs) keepCrs = false;
     if (stopScreenSizeAtOption->count() == 0) stopScreenSizeAt = growthStopIter;

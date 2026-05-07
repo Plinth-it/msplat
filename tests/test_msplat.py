@@ -8,9 +8,12 @@ import json
 import struct
 import zlib
 import binascii
+import subprocess
+from pathlib import Path
 
 GARDEN = os.path.join(os.path.dirname(__file__), "..", "datasets", "mipnerf360", "garden")
 HAS_GARDEN = os.path.isdir(GARDEN)
+NATIVE_CLI = Path(__file__).resolve().parents[1] / "build" / "msplat"
 
 
 def _png_chunk(kind, data):
@@ -224,6 +227,22 @@ def test_import():
     assert hasattr(msplat, "TrainingConfig")
     assert hasattr(msplat, "Dataset")
     assert hasattr(msplat, "load_dataset")
+
+
+def test_native_cli_exposes_quality_presets():
+    if not NATIVE_CLI.exists():
+        pytest.skip("native CLI is not built")
+
+    result = subprocess.run(
+        [str(NATIVE_CLI), "--help"],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    assert "--quality" in result.stdout
+    assert "fast, default, brush" in result.stdout
 
 
 def test_training_config_defaults():
