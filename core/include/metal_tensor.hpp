@@ -5,6 +5,11 @@
 #include <cstdint>
 #include <cassert>
 #include <cstring>
+#include <utility>
+
+#if defined(__APPLE__)
+#include <CoreFoundation/CoreFoundation.h>
+#endif
 
 // Forward-declare the Metal buffer type for C++ compatibility.
 // Full Metal/Metal.h is only needed in .mm files.
@@ -62,6 +67,62 @@ public:
         _cpu_data.resize(bytes);
     }
 
+    ~MTensor() {
+        reset();
+    }
+
+    MTensor(const MTensor &other)
+        : _buffer(other._buffer),
+          _data(other._data),
+          _cpu_data(other._cpu_data),
+          _shape(other._shape),
+          _dtype(other._dtype),
+          _numel(other._numel) {
+        retainBuffer(_buffer);
+        if (!_buffer) _data = nullptr;
+    }
+
+    MTensor& operator=(const MTensor &other) {
+        if (this == &other) return *this;
+        reset();
+        _buffer = other._buffer;
+        _data = other._data;
+        _cpu_data = other._cpu_data;
+        _shape = other._shape;
+        _dtype = other._dtype;
+        _numel = other._numel;
+        retainBuffer(_buffer);
+        if (!_buffer) _data = nullptr;
+        return *this;
+    }
+
+    MTensor(MTensor &&other) noexcept
+        : _buffer(other._buffer),
+          _data(other._data),
+          _cpu_data(std::move(other._cpu_data)),
+          _shape(std::move(other._shape)),
+          _dtype(other._dtype),
+          _numel(other._numel) {
+        other._buffer = nullptr;
+        other._data = nullptr;
+        other._numel = 0;
+    }
+
+    MTensor& operator=(MTensor &&other) noexcept {
+        if (this == &other) return *this;
+        reset();
+        _buffer = other._buffer;
+        _data = other._data;
+        _cpu_data = std::move(other._cpu_data);
+        _shape = std::move(other._shape);
+        _dtype = other._dtype;
+        _numel = other._numel;
+        other._buffer = nullptr;
+        other._data = nullptr;
+        other._numel = 0;
+        return *this;
+    }
+
     bool defined() const { return _buffer != nullptr || !_cpu_data.empty(); }
     bool isGpu() const { return _buffer != nullptr; }
 
@@ -100,9 +161,7 @@ public:
     }
 
     void reset() {
-#ifdef __OBJC__
-        if (_buffer) { CFRelease(_buffer); }
-#endif
+        releaseBuffer(_buffer);
         _buffer = nullptr;
         _data = nullptr;
         _cpu_data.clear();
@@ -119,21 +178,39 @@ public:
     }
 
     // Create a view of the first `n` elements along dim 0.
-    // WARNING: Non-owning — shares the underlying MTLBuffer without retaining it.
-    // The caller MUST ensure the parent MTensor outlives all views.
-    // Use-after-free if the parent is destroyed while a view exists.
+    // GPU views retain the shared MTLBuffer, so the parent may be reset safely.
     MTensor view(int64_t n) const {
+        assert(!_shape.empty());
         MTensor v;
-        v._buffer = _buffer;  // shares the buffer (non-owning)
+        v._buffer = _buffer;  // shares the retained buffer
         v._data = _data;      // shares the CPU-accessible pointer
+        v._cpu_data = _cpu_data;
         v._shape = _shape;
         v._shape[0] = n;
         v._dtype = _dtype;
         v._numel = n * stride0();
+        retainBuffer(v._buffer);
+        if (!v._buffer) v._data = nullptr;
         return v;
     }
 
 private:
+    static void retainBuffer(void* buffer) {
+#if defined(__APPLE__)
+        if (buffer) CFRetain(static_cast<CFTypeRef>(buffer));
+#else
+        (void)buffer;
+#endif
+    }
+
+    static void releaseBuffer(void* buffer) {
+#if defined(__APPLE__)
+        if (buffer) CFRelease(static_cast<CFTypeRef>(buffer));
+#else
+        (void)buffer;
+#endif
+    }
+
     void* _buffer = nullptr;  // retained id<MTLBuffer> as void*
     void* _data = nullptr;    // cached CPU-accessible pointer (shared memory on Apple Silicon)
     std::vector<uint8_t> _cpu_data;

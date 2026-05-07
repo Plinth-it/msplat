@@ -38,7 +38,7 @@ def main():
         sh_degree: int = 3
         """Max spherical harmonics degree"""
 
-        sh_degree_interval: int = 1
+        sh_degree_interval: int = 0
         """Steps between SH degree increases"""
 
         ssim_weight: float = 0.2
@@ -53,7 +53,7 @@ def main():
         reset_alpha_every: int = 0
         """Reset opacity every N refinements, or 0 to disable"""
 
-        densify_grad_thresh: float = 0.0020
+        densify_grad_thresh: float = 0.0025
         """Gradient threshold for densification"""
 
         densify_size_thresh: float = 0.01

@@ -30,14 +30,14 @@ extern "C" void msplat_set_lpips_weights_path(const char* path);
 struct TrainingConfig {
     int iterations = 30000;
     int sh_degree = 3;
-    int sh_degree_interval = 1;
+    int sh_degree_interval = 0;
     float ssim_weight = 0.2f;
     int num_downscales = 0;
     int resolution_schedule = 3000;
     int refine_every = 200;
     int warmup_length = 0;
     int reset_alpha_every = 0;
-    float densify_grad_thresh = 0.0020f;
+    float densify_grad_thresh = 0.0025f;
     float densify_size_thresh = 0.01f;
     int stop_screen_size_at = 15000;
     int growth_stop_iter = 15000;
@@ -446,14 +446,14 @@ NB_MODULE(_core, m) {
         },
             "iterations"_a = 30000,
             "sh_degree"_a = 3,
-            "sh_degree_interval"_a = 1,
+            "sh_degree_interval"_a = 0,
             "ssim_weight"_a = 0.2f,
             "num_downscales"_a = 0,
             "resolution_schedule"_a = 3000,
             "refine_every"_a = 200,
             "warmup_length"_a = 0,
             "reset_alpha_every"_a = 0,
-            "densify_grad_thresh"_a = 0.0020f,
+            "densify_grad_thresh"_a = 0.0025f,
             "densify_size_thresh"_a = 0.01f,
             "stop_screen_size_at"_a = 15000,
             "split_screen_size"_a = 0.25f,

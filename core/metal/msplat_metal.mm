@@ -190,11 +190,11 @@ extern "C" void msplat_set_lpips_weights_path(const char* path) {
 }
 
 MetalContext* init_msplat_metal_context() {
-    MetalContext* ctx = (MetalContext*)malloc(sizeof(MetalContext));
+    MetalContext* ctx = new MetalContext{};
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();
     if (!device) {
         fprintf(stderr, "msplat: Metal device not available\n");
-        free(ctx);
+        delete ctx;
         return NULL;
     }
 
@@ -202,7 +202,7 @@ MetalContext* init_msplat_metal_context() {
     ctx->queue  = [ctx->device newCommandQueue];
     if (!ctx->queue) {
         fprintf(stderr, "msplat: failed to create Metal command queue\n");
-        free(ctx);
+        delete ctx;
         return NULL;
     }
     ctx->d_queue = dispatch_queue_create("com.msplat.metal", DISPATCH_QUEUE_SERIAL);
@@ -250,21 +250,26 @@ MetalContext* init_msplat_metal_context() {
         const char* detail = error ? [[error description] UTF8String] :
             (g_metallib_path ? g_metallib_path : "default.metallib not found");
         fprintf(stderr, "msplat: failed to load metallib: %s\n", detail);
-        free(ctx);
+        delete ctx;
         return NULL;
     }
 
+    bool pipeline_load_failed = false;
     auto load = [&](NSString* name) -> id<MTLComputePipelineState> {
         id<MTLFunction> fn = [metal_library newFunctionWithName:name];
         if (!fn) {
             fprintf(stderr, "msplat: kernel not found: %s\n", [name UTF8String]);
+            pipeline_load_failed = true;
             return nil;
         }
-        id<MTLComputePipelineState> pso = [ctx->device newComputePipelineStateWithFunction:fn error:&error];
+        NSError *pipelineError = nil;
+        id<MTLComputePipelineState> pso = [ctx->device newComputePipelineStateWithFunction:fn error:&pipelineError];
         [fn release];
-        if (error) {
+        if (!pso || pipelineError) {
             fprintf(stderr, "msplat: failed to create pipeline for %s: %s\n",
-                    [name UTF8String], [[error description] UTF8String]);
+                    [name UTF8String],
+                    pipelineError ? [[pipelineError description] UTF8String] : "unknown error");
+            pipeline_load_failed = true;
         }
         return pso;
     };
@@ -308,6 +313,10 @@ MetalContext* init_msplat_metal_context() {
     ctx->compact_copy_back_kernel_cpso            = load(@"compact_copy_back_kernel");
 
     [metal_library release];
+    if (pipeline_load_failed) {
+        delete ctx;
+        return NULL;
+    }
 
     // Initialize counter sampling if PROFILE_STAGES is set
     ctx->counterSampleBuffer = nil;
@@ -322,15 +331,16 @@ MetalContext* init_msplat_metal_context() {
     return ctx;
 }
 
+static MetalContext* g_context = NULL;
+
 MetalContext* get_global_context() {
-    static MetalContext* ctx = NULL;
-    if (ctx == NULL) {
-        ctx = init_msplat_metal_context();
+    if (g_context == NULL) {
+        g_context = init_msplat_metal_context();
     }
-    if (ctx == NULL) {
+    if (g_context == NULL) {
         throw std::runtime_error("msplat: failed to initialize Metal context");
     }
-    return ctx;
+    return g_context;
 }
 
 
@@ -555,6 +565,9 @@ struct FusedTensorCache {
 static FusedTensorCache g_tcache;
 
 void cleanup_msplat_metal() {
+    if (g_context) {
+        g_context->syncCB();
+    }
     g_tcache = FusedTensorCache{};
 }
 
@@ -856,8 +869,8 @@ static void forward_pipeline(
         ctx->syncCB();
         int32_t flag_val = *g_tcache.overflow_flag.data<int32_t>();
         if (flag_val > 0) {
-            fprintf(stderr, "WARNING: per-tile overflow (>%d gaussians in a tile). "
-                    "Some gaussians were dropped from overfull tiles.\n", kMaxTileElems);
+            fprintf(stderr, "WARNING: tile intersection overflow. "
+                    "Some gaussians were dropped from overfull tiles or packed tile output.\n");
             overflow_warned = true;
         }
     }
@@ -897,10 +910,9 @@ static void forward_pipeline(
         (uint32_t)tile_bounds_x, (uint32_t)tile_bounds_y,
         (uint32_t)std::get<2>(tile_bounds), 0xDEAD
     });
-    auto cam_pos_arr = std::make_shared<std::array<float, 3>>(std::array<float, 3>{cam_pos[0], cam_pos[1], cam_pos[2]});
+    auto cam_pos_arr = std::make_shared<std::array<float, 4>>(std::array<float, 4>{cam_pos[0], cam_pos[1], cam_pos[2], 0.0f});
     uint32_t num_points_u32 = (uint32_t)num_points;
     uint32_t capacity_u32 = (uint32_t)capacity;
-    uint32_t prefix_N = (uint32_t)num_points;
     auto img_size_dim3 = std::make_shared<std::array<uint32_t, 4>>(std::array<uint32_t, 4>{img_width, img_height, 1, 0xDEAD});
     auto block_size_dim2 = std::make_shared<std::array<int32_t, 2>>(std::array<int32_t, 2>{RAST_BLOCK_X, RAST_BLOCK_Y});
 
@@ -984,6 +996,7 @@ static void forward_pipeline(
             ENC_BUF(enc, colors, 7); ENC_BUF(enc, opacities, 8); ENC_BUF(enc, opacity_comp, 9);
             ENC_BUF(enc, packed_xy_opac, 10); ENC_BUF(enc, packed_conic, 11); ENC_BUF(enc, packed_rgb, 12);
             ENC_BUF(enc, packed_opacity_comp, 13); ENC_BUF(enc, tile_bins, 14);
+            ENC_SCALAR(enc, capacity_u32, 15); ENC_BUF(enc, g_tcache.overflow_flag, 16);
             [enc dispatchThreadgroups:MTLSizeMake(num_tiles, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
         }
     };
@@ -1088,6 +1101,8 @@ static void forward_pipeline(
         if (K_max < 2) K_max = 2;
         uint32_t abs_max = (uint32_t)((capacity + CHUNK_SIZE - 1) / CHUNK_SIZE);
         if (K_max > abs_max) K_max = abs_max;
+        uint32_t tile_cap_chunks = (uint32_t)((kMaxTileElems + CHUNK_SIZE - 1) / CHUNK_SIZE);
+        if (K_max > tile_cap_chunks) K_max = tile_cap_chunks;
     }
     g_tcache.current_K_max = K_max;
     if (K_max > 1) {
@@ -1187,8 +1202,8 @@ std::tuple<MTensor, float> msplat_train_step(
         ctx->syncCB();
         int32_t flag_val = *g_tcache.overflow_flag.data<int32_t>();
         if (flag_val > 0) {
-            fprintf(stderr, "WARNING: per-tile overflow (>%d gaussians in a tile). "
-                    "Some gaussians were dropped from overfull tiles.\n", kMaxTileElems);
+            fprintf(stderr, "WARNING: tile intersection overflow. "
+                    "Some gaussians were dropped from overfull tiles or packed tile output.\n");
             overflow_warned = true;
         }
     }
@@ -1251,10 +1266,9 @@ std::tuple<MTensor, float> msplat_train_step(
         (uint32_t)tile_bounds_x, (uint32_t)tile_bounds_y,
         (uint32_t)std::get<2>(tile_bounds), 0xDEAD
     });
-    auto cam_pos_arr = std::make_shared<std::array<float, 3>>(std::array<float, 3>{cam_pos[0], cam_pos[1], cam_pos[2]});
+    auto cam_pos_arr = std::make_shared<std::array<float, 4>>(std::array<float, 4>{cam_pos[0], cam_pos[1], cam_pos[2], 0.0f});
     uint32_t num_points_u32 = (uint32_t)num_points;
     uint32_t capacity_u32 = (uint32_t)capacity;
-    uint32_t prefix_N = (uint32_t)num_points;
     auto img_size_dim3 = std::make_shared<std::array<uint32_t, 4>>(std::array<uint32_t, 4>{img_width, img_height, 1, 0xDEAD});
     auto block_size_dim2 = std::make_shared<std::array<int32_t, 2>>(std::array<int32_t, 2>{RAST_BLOCK_X, RAST_BLOCK_Y});
     // tile_bounds for rasterize kernels must be 16x16 tile counts (tile_bins granularity)
@@ -1277,6 +1291,8 @@ std::tuple<MTensor, float> msplat_train_step(
         if (K_max < 2) K_max = 2;
         uint32_t abs_max = (uint32_t)((capacity + CHUNK_SIZE - 1) / CHUNK_SIZE);
         if (K_max > abs_max) K_max = abs_max;
+        uint32_t tile_cap_chunks = (uint32_t)((kMaxTileElems + CHUNK_SIZE - 1) / CHUNK_SIZE);
+        if (K_max > tile_cap_chunks) K_max = tile_cap_chunks;
     }
     g_tcache.current_K_max = K_max;
     if (K_max > 1) {
@@ -1349,6 +1365,7 @@ std::tuple<MTensor, float> msplat_train_step(
             ENC_BUF(enc, colors, 7); ENC_BUF(enc, opacities, 8); ENC_BUF(enc, opacity_comp, 9);
             ENC_BUF(enc, packed_xy_opac, 10); ENC_BUF(enc, packed_conic, 11); ENC_BUF(enc, packed_rgb, 12);
             ENC_BUF(enc, packed_opacity_comp, 13); ENC_BUF(enc, tile_bins, 14);
+            ENC_SCALAR(enc, capacity_u32, 15); ENC_BUF(enc, g_tcache.overflow_flag, 16);
             [enc dispatchThreadgroups:MTLSizeMake(num_tiles, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
         }
     };

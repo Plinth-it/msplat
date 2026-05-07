@@ -865,7 +865,7 @@ kernel void compute_sh_forward_kernel(
     constant uint& degree,
     constant uint& degrees_to_use,
     constant float* means3d, // float3
-    constant float3& cam_pos,
+    constant float4& cam_pos,
     constant float* coeffs,
     device float* colors,
     uint idx [[thread_position_in_grid]]
@@ -874,7 +874,7 @@ kernel void compute_sh_forward_kernel(
         return;
     }
     // Compute view direction from means and camera position (fused, avoids 3 MPS ops)
-    float3 viewdir = normalize(read_packed_float3(means3d, idx) - cam_pos);
+    float3 viewdir = normalize(read_packed_float3(means3d, idx) - cam_pos.xyz);
 
     const uint num_channels = 3;
     uint num_bases = num_sh_bases(degree);
@@ -891,7 +891,7 @@ kernel void compute_sh_backward_kernel(
     constant uint& degree,
     constant uint& degrees_to_use,
     constant float* means3d, // float3
-    constant float3& cam_pos,
+    constant float4& cam_pos,
     constant float* v_colors,
     device float* v_coeffs,
     uint idx [[thread_position_in_grid]]
@@ -900,7 +900,7 @@ kernel void compute_sh_backward_kernel(
         return;
     }
     // Recompute view direction (same as forward)
-    float3 viewdir = normalize(read_packed_float3(means3d, idx) - cam_pos);
+    float3 viewdir = normalize(read_packed_float3(means3d, idx) - cam_pos.xyz);
 
     const uint num_channels = 3;
     uint num_bases = num_sh_bases(degree);
@@ -1935,7 +1935,7 @@ kernel void project_and_sh_forward_kernel(
     // SH args
     constant uint& degree,
     constant uint& degrees_to_use,
-    constant float3& cam_pos,
+    constant float4& cam_pos,
     constant float* features_dc,
     constant float* features_rest,
     device float* colors,
@@ -2025,7 +2025,7 @@ kernel void project_and_sh_forward_kernel(
     aabb[idx * 2 + 1] = extent.y;
 
     // SH: compute colors for non-culled gaussians (reuse p_world from registers)
-    float3 viewdir = normalize(p_world - cam_pos);
+    float3 viewdir = normalize(p_world - cam_pos.xyz);
     const uint num_channels = 3;
     uint num_bases = num_sh_bases(degree);
     uint dc_idx = num_channels * idx;
@@ -2091,7 +2091,7 @@ kernel void project_and_sh_backward_kernel(
     // SH backward + fused Adam args
     constant uint& degree,
     constant uint& degrees_to_use,
-    constant float3& cam_pos,
+    constant float4& cam_pos,
     constant float* v_colors,
     device float* features_dc,         // params (read-write for Adam)
     device float* features_rest,       // params (read-write for Adam)
@@ -2171,7 +2171,7 @@ kernel void project_and_sh_backward_kernel(
     // ---- Fused SH backward + Adam ----
     // Compute SH gradients in registers and apply Adam inline.
     // Eliminates v_features_dc/v_features_rest write+read round-trip (~600 MB/iter at 1.6M gaussians).
-    float3 viewdir = normalize(p_world - cam_pos);
+    float3 viewdir = normalize(p_world - cam_pos.xyz);
     const uint num_channels = 3;
     uint num_bases = num_sh_bases(degree);
     uint dc_idx = num_channels * idx;
@@ -2419,6 +2419,8 @@ kernel void bitonic_sort_per_tile_kernel(
     device float* packed_rgb            [[buffer(12)]],
     device float* packed_opacity_comp   [[buffer(13)]],
     device int* tile_bins               [[buffer(14)]],
+    constant uint& pack_capacity        [[buffer(15)]],
+    device atomic_uint* overflow_flag   [[buffer(16)]],
     uint tg_id [[threadgroup_position_in_grid]],
     uint tid [[thread_position_in_threadgroup]]
 ) {
@@ -2428,13 +2430,19 @@ kernel void bitonic_sort_per_tile_kernel(
     int count = min(count_raw, MAX_TILE_ELEMS);
     int end = tile_offsets[tg_id];
     int start = end - count;
+    int capacity = (int)pack_capacity;
+    int clamped_start = min(max(start, 0), capacity);
+    int clamped_end = min(max(end, 0), capacity);
 
     // Write tile_bins for rasterizer
     if (tid == 0) {
-        write_packed_int2(tile_bins, tg_id, int2(start, end));
+        if (end > capacity) {
+            atomic_store_explicit(overflow_flag, 1u, memory_order_relaxed);
+        }
+        write_packed_int2(tile_bins, tg_id, int2(clamped_start, clamped_end));
     }
 
-    if (count == 0) return;
+    if (count == 0 || start >= capacity || end <= 0) return;
 
     // Round up to next power of 2
     int n = 1;
@@ -2471,6 +2479,7 @@ kernel void bitonic_sort_per_tile_kernel(
     for (int i = (int)tid; i < count; i += SORT_TG_SIZE) {
         int32_t g_id = (int32_t)(data[i] & 0xFFFFFFFF);
         int global_idx = start + i;
+        if (global_idx < 0 || global_idx >= capacity) continue;
         gaussian_ids_out[global_idx] = g_id;
         float2 xy = read_packed_float2(xys, g_id);
         float opac = 1.f / (1.f + exp(-opacities[g_id]));
