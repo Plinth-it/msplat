@@ -138,26 +138,21 @@ Stats Trainer::step() {
 
     int ds = impl->model->getDownscaleFactor(impl->currentStep);
     std::array<float, 3> stepBg = impl->sampleBackground();
-    MTensor& gt = cam.getGPUImage(ds, stepBg.data());
-    MTensor *lossMask = nullptr;
-    MTensor mask;
+    MTensor& gtPacked = cam.getGPUPackedImage(ds);
+    bool useLossMask = cam.hasLossMask();
     float lossMaskMean = 1.0f;
-    MTensor *alphaTarget = nullptr;
-    MTensor alpha;
-    if (cam.hasLossMask()) {
-        mask = cam.getGPULossMask(ds);
-        lossMask = &mask;
+    if (useLossMask) {
         lossMaskMean = cam.getLossMaskMean(ds);
-    } else if (cam.imageHasAlpha()) {
-        alpha = cam.getGPULossMask(ds);
-        alphaTarget = &alpha;
     }
+    bool useAlphaLoss = !useLossMask && cam.imageHasAlpha();
+    bool compositeGt = cam.hasCompositeAlpha()
+        && (stepBg[0] != 0.0f || stepBg[1] != 0.0f || stepBg[2] != 0.0f);
 
     auto t0 = std::chrono::high_resolution_clock::now();
 
-    impl->model->fullIteration(cam, impl->currentStep, gt, lossMask, lossMaskMean,
-                               alphaTarget, impl->config.matchAlphaWeight,
-                               stepBg.data(), impl->config.ssimWeight,
+    impl->model->fullIteration(cam, impl->currentStep, gtPacked, useLossMask, lossMaskMean,
+                               useAlphaLoss, impl->config.matchAlphaWeight,
+                               stepBg.data(), compositeGt, impl->config.ssimWeight,
                                impl->config.lpipsLossWeight);
     impl->model->schedulersStep(impl->currentStep);
     impl->model->afterTrain(impl->currentStep);

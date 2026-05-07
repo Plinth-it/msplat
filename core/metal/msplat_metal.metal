@@ -15,6 +15,7 @@ constant float SH_C0 = 0.28209479177387814f;
 constant float MIN_QUAT_NORM_SQR = 1e-6f;
 constant float MAX_PROJECT_Z = 1e10f;
 constant float MAX_COV2D_ENTRY = 1e18f;
+constant float INV_255 = 1.0f / 255.0f;
 constant float SH_C1 = 0.4886025119029199f;
 constant float SH_C2[] = {
     1.0925484305920792f,
@@ -40,6 +41,28 @@ constant float SH_C4[] = {
     0.47308734787878004f,
     -1.7701307697799304f,
     0.6258357354491761f};
+
+inline float packed_gt_alpha(constant uint *gt_packed, const uint pixel) {
+    return float((gt_packed[pixel] >> 24u) & 0xffu) * INV_255;
+}
+
+inline float packed_gt_channel(constant uint *gt_packed, const uint pixel, const uint channel) {
+    return float((gt_packed[pixel] >> (channel * 8u)) & 0xffu) * INV_255;
+}
+
+inline float packed_gt_effective(
+    constant uint *gt_packed,
+    const uint pixel,
+    const uint channel,
+    constant float *background,
+    const uint composite_gt
+) {
+    float gt = packed_gt_channel(gt_packed, pixel, channel);
+    if (composite_gt != 0) {
+        gt += (1.0f - packed_gt_alpha(gt_packed, pixel)) * background[channel];
+    }
+    return gt;
+}
 
 inline uint num_sh_bases(const uint degree) {
     if (degree == 0)
@@ -1031,7 +1054,7 @@ kernel void rasterize_backward_kernel(
     device atomic_float* v_rgb, // float3
     device atomic_float* v_opacity,
     device atomic_float* v_refine,
-    constant float* alpha_target,
+    constant uint* gt_packed,
     constant uint& use_alpha_loss,
     constant float& alpha_loss_grad_scale,
     uint3 gp [[thread_position_in_grid]],
@@ -1075,9 +1098,10 @@ kernel void rasterize_backward_kernel(
 
     // df/d_out for this pixel
     const float3 v_out = read_packed_float3(v_output, pix_id);
+    const float target_alpha = inside ? packed_gt_alpha(gt_packed, (uint)pix_id) : 0.0f;
     const float alpha_loss_grad = (use_alpha_loss != 0 && inside)
-        ? alpha_loss_grad_scale * (((1.0f - T_final) > alpha_target[pix_id]) ? 1.0f
-            : (((1.0f - T_final) < alpha_target[pix_id]) ? -1.0f : 0.0f))
+        ? alpha_loss_grad_scale * (((1.0f - T_final) > target_alpha) ? 1.0f
+            : (((1.0f - T_final) < target_alpha) ? -1.0f : 0.0f))
         : 0.0f;
     // Hoist loop-invariant background load and T_final * bg product
     const float3 bg = {background[0], background[1], background[2]};
@@ -3268,7 +3292,7 @@ kernel void rasterize_backward_chunked_kernel(
     device atomic_float* v_refine,
     constant uint& chunk_size,
     constant uint& K_max,
-    constant float* alpha_target,
+    constant uint* gt_packed,
     constant uint& use_alpha_loss,
     constant float& alpha_loss_grad_scale,
     uint3 gp [[thread_position_in_grid]],
@@ -3306,9 +3330,10 @@ kernel void rasterize_backward_chunked_kernel(
     const float3 bg = {background[0], background[1], background[2]};
     const float3 T_final_bg = T_final * bg;
     const float3 v_out = read_packed_float3(v_output, pix_id);
+    const float target_alpha = inside ? packed_gt_alpha(gt_packed, (uint)pix_id) : 0.0f;
     const float alpha_loss_grad = (use_alpha_loss != 0 && inside)
-        ? alpha_loss_grad_scale * (((1.0f - T_final) > alpha_target[pix_id]) ? 1.0f
-            : (((1.0f - T_final) < alpha_target[pix_id]) ? -1.0f : 0.0f))
+        ? alpha_loss_grad_scale * (((1.0f - T_final) > target_alpha) ? 1.0f
+            : (((1.0f - T_final) < target_alpha) ? -1.0f : 0.0f))
         : 0.0f;
 
     const int bin_final = inside ? chunk_final_idx[chunk_offset] : -1;
@@ -3478,9 +3503,11 @@ constant float GAUSS_1D[11] = {
 // Output: ssim_h_buf (H, W, 15) — 5 values × 3 channels
 kernel void ssim_h_fwd_kernel(
     constant float* rendered,       // (H, W, 3) HWC
-    constant float* gt,             // (H, W, 3) HWC
+    constant uint* gt_packed,       // (H, W) packed RGBA8
     constant uint2& img_size,       // (W, H)
     device float* ssim_h_buf,       // (H, W, 15)
+    constant float* background,
+    constant uint& composite_gt,
     uint2 gid [[thread_position_in_grid]],
     uint2 lid [[thread_position_in_threadgroup]],
     uint tr [[thread_index_in_threadgroup]],
@@ -3507,8 +3534,9 @@ kernel void ssim_h_fwd_kernel(
             int gx = base_gx + (int)sx;
             float gv = 0.0f, rv = 0.0f;
             if (gx >= 0 && gx < (int)W && gy >= 0 && gy < (int)H) {
-                uint idx = (gy * W + gx) * 3 + c;
-                gv = gt[idx];
+                uint pixel = gy * W + gx;
+                uint idx = pixel * 3 + c;
+                gv = packed_gt_effective(gt_packed, pixel, c, background, composite_gt);
                 rv = rendered[idx];
             }
             tg_gt[c][sy][sx] = gv;
@@ -3542,15 +3570,15 @@ kernel void ssim_h_fwd_kernel(
 
 kernel void l1_loss_fwd_bwd_kernel(
     constant float* rendered,
-    constant float* gt,
+    constant uint* gt_packed,
     constant uint2& img_size,
     constant float& inv_n,
     device float* v_rendered,
     device atomic_float* loss_sum,
-    constant float* loss_mask,
+    constant float* background,
+    constant uint& composite_gt,
     constant uint& use_loss_mask,
     constant float* final_Ts,
-    constant float* alpha_target,
     constant uint& use_alpha_loss,
     constant float& alpha_loss_weight,
     uint2 gid [[thread_position_in_grid]],
@@ -3568,11 +3596,12 @@ kernel void l1_loss_fwd_bwd_kernel(
 
     if (px < W && py < H) {
         const uint pixel = py * W + px;
-        const float mask_weight = use_loss_mask != 0 ? loss_mask[pixel] : 1.0f;
+        const float gt_alpha = packed_gt_alpha(gt_packed, pixel);
+        const float mask_weight = use_loss_mask != 0 ? gt_alpha : 1.0f;
         float l1_sum = 0.0f;
         for (uint c = 0; c < 3; c++) {
             const uint idx = pixel * 3 + c;
-            const float gt_val = gt[idx];
+            const float gt_val = packed_gt_effective(gt_packed, pixel, c, background, composite_gt);
             const float rend_val = rendered[idx];
             l1_sum += fabs(gt_val - rend_val);
             const float v_l1 = (gt_val > rend_val) ? -1.0f : ((gt_val < rend_val) ? 1.0f : 0.0f);
@@ -3580,7 +3609,7 @@ kernel void l1_loss_fwd_bwd_kernel(
         }
         pixel_loss = mask_weight * l1_sum / 3.0f;
         if (use_alpha_loss != 0) {
-            pixel_loss += alpha_loss_weight * fabs(alpha_target[pixel] - (1.0f - final_Ts[pixel]));
+            pixel_loss += alpha_loss_weight * fabs(gt_alpha - (1.0f - final_Ts[pixel]));
         }
     }
 
@@ -3607,12 +3636,14 @@ kernel void l1_loss_fwd_bwd_kernel(
 // Output: intermediates (H, W, 15) — same format as fused_loss_forward_kernel
 kernel void ssim_v_fwd_kernel(
     constant float* rendered,       // (H, W, 3) for L1
-    constant float* gt,             // (H, W, 3) for L1
+    constant uint* gt_packed,       // (H, W) packed RGBA8
     constant float* ssim_h_buf,     // (H, W, 15)
     constant uint2& img_size,       // (W, H)
     constant float& ssim_weight,
     device float* intermediates,    // (H, W, 15)
     device atomic_float* loss_sum,
+    constant float* background,
+    constant uint& composite_gt,
     uint2 gid [[thread_position_in_grid]],
     uint2 lid [[thread_position_in_threadgroup]],
     uint tr [[thread_index_in_threadgroup]],
@@ -3686,7 +3717,7 @@ kernel void ssim_v_fwd_kernel(
             ssim_sum += clamp(raw_ssim, -1.0f, 1.0f);
 
             // L1 for this channel
-            float gt_v  = gt[(py * W + px) * 3 + c];
+            float gt_v  = packed_gt_effective(gt_packed, py * W + px, c, background, composite_gt);
             float rd_v  = rendered[(py * W + px) * 3 + c];
             l1_sum += fabs(gt_v - rd_v);
         }
@@ -3721,12 +3752,13 @@ kernel void ssim_v_fwd_kernel(
 // computes loss + derivative fields, then H convs derivatives to output buffer.
 // Eliminates loss_intermediates round-trip (130 MB/iter bandwidth saved).
 kernel void ssim_fused_v_fwd_h_bwd_kernel(
-    constant float* rendered, constant float* gt,
+    constant float* rendered, constant uint* gt_packed,
     constant float* ssim_h_buf, constant uint2& img_size,
     constant float& ssim_weight, constant float& inv_n,
     device float* deriv_h_buf, device atomic_float* loss_sum,
-    constant float* loss_mask, constant uint& use_loss_mask,
-    constant float* final_Ts, constant float* alpha_target,
+    constant float* background, constant uint& composite_gt,
+    constant uint& use_loss_mask,
+    constant float* final_Ts,
     constant uint& use_alpha_loss, constant float& alpha_loss_weight,
     uint2 gid [[thread_position_in_grid]], uint2 lid [[thread_position_in_threadgroup]],
     uint tr [[thread_index_in_threadgroup]], uint2 tgid [[threadgroup_position_in_grid]],
@@ -3784,8 +3816,9 @@ kernel void ssim_fused_v_fwd_h_bwd_kernel(
             int gpx = base_gx + (int)dx;
             int gpy = base_gy + (int)(dy + SSIM_HALF_WIN);
             bool center_valid = gpx >= 0 && gpx < (int)W && gpy >= 0 && gpy < (int)H;
+            uint center_pixel = (uint)gpy * W + (uint)gpx;
             float center_mask = center_valid
-                ? ((use_loss_mask != 0) ? loss_mask[gpy * W + gpx] : 1.0f)
+                ? ((use_loss_mask != 0) ? packed_gt_alpha(gt_packed, center_pixel) : 1.0f)
                 : 0.0f;
             float deriv_scale = ssim_clamped ? 0.0f : center_mask;
             tg_f1[dy][dx] = deriv_scale * (dmu - 2.0f*mu_y*dsyq - mu_x*dsxy);
@@ -3793,7 +3826,9 @@ kernel void ssim_fused_v_fwd_h_bwd_kernel(
             tg_f3[dy][dx] = deriv_scale * dsxy;
             if (dx >= SSIM_HALF_WIN && dx < SSIM_HALF_WIN + SSIM_TG) {
                 if (center_valid) {
-                    float l1 = fabs(gt[(gpy*W+gpx)*3+c] - rendered[(gpy*W+gpx)*3+c]);
+                    float gt_val = packed_gt_effective(
+                        gt_packed, center_pixel, c, background, composite_gt);
+                    float l1 = fabs(gt_val - rendered[(gpy*W+gpx)*3+c]);
                     loss_accum += center_mask * (
                         (c == 0 ? ssim_weight : 0.0f)
                         + ((1.0f - ssim_weight) * l1 - ssim_weight * clamp(raw_ssim, -1.0f, 1.0f)) / 3.0f
@@ -3816,7 +3851,8 @@ kernel void ssim_fused_v_fwd_h_bwd_kernel(
     }
 
     if (use_alpha_loss != 0 && px < W && py < H) {
-        loss_accum += alpha_loss_weight * fabs(alpha_target[py * W + px] - (1.0f - final_Ts[py * W + px]));
+        uint pixel = py * W + px;
+        loss_accum += alpha_loss_weight * fabs(packed_gt_alpha(gt_packed, pixel) - (1.0f - final_Ts[pixel]));
     }
 
     threadgroup float sg_sums[32];
@@ -3924,13 +3960,14 @@ kernel void ssim_h_bwd_kernel(
 // Output: v_rendered (H, W, 3)
 kernel void ssim_v_bwd_kernel(
     constant float* rendered,       // (H, W, 3)
-    constant float* gt,             // (H, W, 3)
+    constant uint* gt_packed,       // (H, W) packed RGBA8
     constant float* ssim_h_buf,     // (H, W, 15)
     constant uint2& img_size,       // (W, H)
     constant float& ssim_weight,
     constant float& inv_n,          // 1.0 / (H * W * 3)
     device float* v_rendered,       // (H, W, 3)
-    constant float* loss_mask,
+    constant float* background,
+    constant uint& composite_gt,
     constant uint& use_loss_mask,
     uint2 gid [[thread_position_in_grid]],
     uint2 lid [[thread_position_in_threadgroup]],
@@ -3972,7 +4009,8 @@ kernel void ssim_v_bwd_kernel(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     if (px < W && py < H) {
-        float l1_mask_weight = use_loss_mask != 0 ? loss_mask[py * W + px] : 1.0f;
+        uint pixel = py * W + px;
+        float l1_mask_weight = use_loss_mask != 0 ? packed_gt_alpha(gt_packed, pixel) : 1.0f;
         for (uint c = 0; c < 3; c++) {
             float conv_f1 = 0, conv_f2 = 0, conv_f3 = 0;
             for (uint dy = 0; dy < SSIM_WIN; dy++) {
@@ -3983,7 +4021,7 @@ kernel void ssim_v_bwd_kernel(
             }
 
             float rend_val = rendered[(py * W + px) * 3 + c];
-            float gt_val = gt[(py * W + px) * 3 + c];
+            float gt_val = packed_gt_effective(gt_packed, pixel, c, background, composite_gt);
 
             float v_ssim = conv_f1 + rend_val * conv_f2 + gt_val * conv_f3;
             float v_l1 = (gt_val > rend_val) ? -1.0f : ((gt_val < rend_val) ? 1.0f : 0.0f);
@@ -3997,10 +4035,12 @@ kernel void ssim_v_bwd_kernel(
 
 kernel void lpips_prepare_nchw_kernel(
     constant float* rendered [[buffer(0)]],
-    constant float* gt [[buffer(1)]],
+    constant uint* gt_packed [[buffer(1)]],
     constant uint2& img_size [[buffer(2)]],
     device float* rendered_nchw [[buffer(3)]],
     device float* gt_nchw [[buffer(4)]],
+    constant float* background [[buffer(5)]],
+    constant uint& composite_gt [[buffer(6)]],
     uint idx [[thread_position_in_grid]]
 ) {
     const uint W = img_size.x;
@@ -4014,7 +4054,7 @@ kernel void lpips_prepare_nchw_kernel(
     const uint x = p - y * W;
     const uint hwc = (y * W + x) * 3 + c;
     rendered_nchw[idx] = rendered[hwc];
-    gt_nchw[idx] = gt[hwc];
+    gt_nchw[idx] = packed_gt_effective(gt_packed, p, c, background, composite_gt);
 }
 
 kernel void lpips_apply_grad_kernel(

@@ -56,9 +56,11 @@ struct Model{
     float cam_pos[3];
   };
   CamSetup prepareCam(Camera& cam, int step, int forcedDownscale = 0);
-  void fullIteration(Camera& cam, int step, MTensor &gt, MTensor *lossMask, float lossMaskMean,
-                     MTensor *alphaTarget, float matchAlphaWeight,
-                     const float *stepBgColor, float ssimWeight, float lpipsLossWeight,
+  void fullIteration(Camera& cam, int step, MTensor &gtPacked,
+                     bool useLossMask, float lossMaskMean,
+                     bool useAlphaLoss, float matchAlphaWeight,
+                     const float *stepBgColor, bool compositeGt,
+                     float ssimWeight, float lpipsLossWeight,
                      int forcedDownscale = 0);
   MTensor render(Camera& cam, int step, const float *bgColorOverride = nullptr);
 

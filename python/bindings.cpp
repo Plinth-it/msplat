@@ -207,26 +207,21 @@ public:
 
         int ds = forced_downscale > 0 ? forced_downscale : model->getDownscaleFactor(current_step);
         std::array<float, 3> step_bg = sample_background();
-        MTensor &gt = cam.getGPUImage(ds, step_bg.data());
-        MTensor *loss_mask = nullptr;
-        MTensor mask;
+        MTensor &gt_packed = cam.getGPUPackedImage(ds);
+        bool use_loss_mask = cam.hasLossMask();
         float loss_mask_mean = 1.0f;
-        MTensor *alpha_target = nullptr;
-        MTensor alpha;
-        if (cam.hasLossMask()) {
-            mask = cam.getGPULossMask(ds);
-            loss_mask = &mask;
+        if (use_loss_mask) {
             loss_mask_mean = cam.getLossMaskMean(ds);
-        } else if (cam.imageHasAlpha()) {
-            alpha = cam.getGPULossMask(ds);
-            alpha_target = &alpha;
         }
+        bool use_alpha_loss = !use_loss_mask && cam.imageHasAlpha();
+        bool composite_gt = cam.hasCompositeAlpha()
+            && (step_bg[0] != 0.0f || step_bg[1] != 0.0f || step_bg[2] != 0.0f);
 
         auto t0 = std::chrono::high_resolution_clock::now();
 
-        model->fullIteration(cam, current_step, gt, loss_mask, loss_mask_mean,
-                             alpha_target, config.match_alpha_weight,
-                             step_bg.data(), config.ssim_weight, config.lpips_loss_weight,
+        model->fullIteration(cam, current_step, gt_packed, use_loss_mask, loss_mask_mean,
+                             use_alpha_loss, config.match_alpha_weight,
+                             step_bg.data(), composite_gt, config.ssim_weight, config.lpips_loss_weight,
                              forced_downscale);
         model->schedulersStep(current_step);
         if (apply_refine) {

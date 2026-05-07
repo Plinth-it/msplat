@@ -845,19 +845,14 @@ std::vector<float> Model::computePupLodScores(std::vector<Camera> &cams) {
         lastHeight = s.height;
         lastWidth = s.width;
 
-        MTensor gt = cam.getGPUImage(1, bg);
-        MTensor alpha;
-        MTensor *alphaTarget = nullptr;
+        MTensor gtPacked = cam.getGPUPackedImage(1);
         float alphaLossWeight = 0.0f;
         int pupChannels = 3;
         if (cam.hasLossMask() || cam.imageHasAlpha()) {
-            alpha = cam.getGPULossMask(1);
-            alphaTarget = &alpha;
             alphaLossWeight = 0.25f;
             pupChannels = 4;
         }
-        MTensor &unusedMask = gt;
-        MTensor &alphaTargetTensor = alphaTarget ? *alphaTarget : gt;
+        const bool useAlphaLoss = alphaLossWeight > 0.0f;
         const float lossInvN = 1.0f / static_cast<float>(s.height * s.width * pupChannels);
         const float invMaxDim = 1.0f / static_cast<float>((std::max)(lastHeight, lastWidth));
         const float invWidth = 1.0f / static_cast<float>((std::max)(lastWidth, 1));
@@ -869,8 +864,8 @@ std::vector<float> Model::computePupLodScores(std::vector<Camera> &cams) {
             s.height, s.width, s.tileBounds, 0.01f,
             s.degree, s.degreesToUse, s.cam_pos, featuresDc, featuresRest,
             opacities, trainingBackgroundColor, renderMip ? 1 : 0,
-            gt, unusedMask, 0,
-            alphaTargetTensor, alphaTarget ? 1 : 0, alphaLossWeight,
+            gtPacked, 0,
+            useAlphaLoss ? 1 : 0, alphaLossWeight, 0,
             window2d, 0.0f, 0.0f,
             lossInvN, (int)featuresRest.size(-2),
             N_ADAM_GROUPS,
@@ -1223,9 +1218,11 @@ MTensor Model::render(Camera& cam, int step, const float *bgColorOverride){
         opacities, renderBackground, renderMip ? 1 : 0);
 }
 
-void Model::fullIteration(Camera& cam, int step, MTensor &gt, MTensor *lossMask, float lossMaskMean,
-                          MTensor *alphaTarget, float matchAlphaWeight,
-                          const float *stepBgColor, float ssimWeight, float lpipsLossWeight,
+void Model::fullIteration(Camera& cam, int step, MTensor &gtPacked,
+                          bool useLossMask, float lossMaskMean,
+                          bool useAlphaLoss, float matchAlphaWeight,
+                          const float *stepBgColor, bool compositeGt,
+                          float ssimWeight, float lpipsLossWeight,
                           int forcedDownscale){
     auto s = prepareCam(cam, step, forcedDownscale);
     lastHeight = s.height; lastWidth = s.width;
@@ -1264,13 +1261,11 @@ void Model::fullIteration(Camera& cam, int step, MTensor &gt, MTensor *lossMask,
     float invWidth = 1.0f / static_cast<float>((std::max)(lastWidth, 1));
     float invHeight = 1.0f / static_cast<float>((std::max)(lastHeight, 1));
     const float pixelCount = (std::max)(1.0f, static_cast<float>(s.height) * static_cast<float>(s.width));
-    const float effectiveMaskMean = lossMask
+    const float effectiveMaskMean = useLossMask
         ? std::clamp(lossMaskMean, 1.0f / pixelCount, 1.0f)
         : 1.0f;
     float lossInvN = 1.0f / (pixelCount * 3.0f * effectiveMaskMean);
-    MTensor &lossMaskTensor = lossMask ? *lossMask : gt;
-    bool useAlphaLoss = alphaTarget && matchAlphaWeight > 0.0f;
-    MTensor &alphaTargetTensor = alphaTarget ? *alphaTarget : gt;
+    bool applyAlphaLoss = useAlphaLoss && matchAlphaWeight > 0.0f;
     if (stepBgColor) {
         memcpy(trainingBackgroundColor.data_ptr(), stepBgColor, 3 * sizeof(float));
     }
@@ -1281,8 +1276,8 @@ void Model::fullIteration(Camera& cam, int step, MTensor &gt, MTensor *lossMask,
         s.height, s.width, s.tileBounds, 0.01f,
         s.degree, s.degreesToUse, s.cam_pos, featuresDc, featuresRest,
         opacities, trainingBackgroundColor, renderMip ? 1 : 0,
-        gt, lossMaskTensor, lossMask ? 1 : 0,
-        alphaTargetTensor, useAlphaLoss ? 1 : 0, matchAlphaWeight,
+        gtPacked, useLossMask ? 1 : 0,
+        applyAlphaLoss ? 1 : 0, matchAlphaWeight, compositeGt ? 1 : 0,
         window2d, ssimWeight, lpipsLossWeight,
         lossInvN, (int)featuresRest.size(-2),
         N_ADAM_GROUPS,

@@ -918,6 +918,7 @@ static void forward_pipeline(
     MTensor &loss_intermediates = g_tcache.loss_intermediates;
 
     auto loss_img_size = std::make_shared<std::array<uint32_t, 2>>(std::array<uint32_t, 2>{img_width, img_height});
+    uint32_t composite_gt_u32 = 0;
 
     // --- Constants (heap-allocated for Obj-C block) ---
     auto proj_intrins = std::make_shared<std::array<float, 4>>(std::array<float, 4>{fx, fy, cx, cy});
@@ -1085,6 +1086,7 @@ static void forward_pipeline(
         ENC_BUF(enc, out_img, 0); ENC_BUF(enc, gt, 1);
         [enc setBytes:loss_img_size->data() length:sizeof(*loss_img_size) atIndex:2];
         ENC_BUF(enc, g_tcache.ssim_h_buf, 3);
+        ENC_BUF(enc, background, 4); ENC_SCALAR(enc, composite_gt_u32, 5);
         [enc dispatchThreadgroups:loss_tg_count threadsPerThreadgroup:tg];
 
         [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
@@ -1096,6 +1098,7 @@ static void forward_pipeline(
         [enc setBytes:loss_img_size->data() length:sizeof(*loss_img_size) atIndex:3];
         ENC_SCALAR(enc, ssim_weight, 4);
         ENC_BUF(enc, loss_intermediates, 5); ENC_BUF(enc, loss_sum, 6);
+        ENC_BUF(enc, background, 7); ENC_SCALAR(enc, composite_gt_u32, 8);
         [enc dispatchThreadgroups:loss_tg_count threadsPerThreadgroup:tg];
     };
 
@@ -1189,8 +1192,8 @@ std::tuple<MTensor, float> msplat_train_step(
     MTensor &features_dc, MTensor &features_rest,
     MTensor &opacities, MTensor &background,
     int use_mip_splatting,
-    MTensor &gt, MTensor &loss_mask, int use_loss_mask,
-    MTensor &alpha_target, int use_alpha_loss, float alpha_loss_weight,
+    MTensor &gt_packed, int use_loss_mask,
+    int use_alpha_loss, float alpha_loss_weight, int composite_gt,
     MTensor &window2d, float ssim_weight, float lpips_loss_weight,
     float loss_inv_n, int features_rest_bases,
     int num_adam_groups,
@@ -1275,6 +1278,7 @@ std::tuple<MTensor, float> msplat_train_step(
     uint32_t lpips_numel = img_width * img_height * 3;
     uint32_t use_loss_mask_u32 = use_loss_mask ? 1u : 0u;
     uint32_t use_alpha_loss_u32 = use_alpha_loss ? 1u : 0u;
+    uint32_t composite_gt_u32 = composite_gt ? 1u : 0u;
     float alpha_loss_grad_scale = use_alpha_loss ? (alpha_loss_weight / (float)(img_height * img_width)) : 0.0f;
     auto proj_intrins = std::make_shared<std::array<float, 4>>(std::array<float, 4>{fx, fy, cx, cy});
     auto proj_img_size = std::make_shared<std::array<uint32_t, 2>>(std::array<uint32_t, 2>{img_width, img_height});
@@ -1435,43 +1439,47 @@ std::tuple<MTensor, float> msplat_train_step(
         MTLSize tg = MTLSizeMake(16, 16, 1);
         if (ssim_weight <= 0.0f) {
             [enc setComputePipelineState:ctx->l1_loss_fwd_bwd_kernel_cpso];
-            ENC_BUF(enc, out_img, 0); ENC_BUF(enc, gt, 1);
+            ENC_BUF(enc, out_img, 0); ENC_BUF(enc, gt_packed, 1);
             [enc setBytes:loss_img_size->data() length:sizeof(*loss_img_size) atIndex:2];
             ENC_SCALAR(enc, loss_inv_n, 3);
             ENC_BUF(enc, v_rendered, 4); ENC_BUF(enc, loss_sum, 5);
-            ENC_BUF(enc, loss_mask, 6); ENC_SCALAR(enc, use_loss_mask_u32, 7);
-            ENC_BUF(enc, final_Ts, 8); ENC_BUF(enc, alpha_target, 9);
+            ENC_BUF(enc, background, 6); ENC_SCALAR(enc, composite_gt_u32, 7);
+            ENC_SCALAR(enc, use_loss_mask_u32, 8);
+            ENC_BUF(enc, final_Ts, 9);
             ENC_SCALAR(enc, use_alpha_loss_u32, 10); ENC_SCALAR(enc, alpha_loss_weight, 11);
             [enc dispatchThreadgroups:loss_tg_count threadsPerThreadgroup:tg];
             return;
         }
         // Pass 1: H conv on images → ssim_h_buf
         [enc setComputePipelineState:ctx->ssim_h_fwd_kernel_cpso];
-        ENC_BUF(enc, out_img, 0); ENC_BUF(enc, gt, 1);
+        ENC_BUF(enc, out_img, 0); ENC_BUF(enc, gt_packed, 1);
         [enc setBytes:loss_img_size->data() length:sizeof(*loss_img_size) atIndex:2];
         ENC_BUF(enc, g_tcache.ssim_h_buf, 3);
+        ENC_BUF(enc, background, 4); ENC_SCALAR(enc, composite_gt_u32, 5);
         [enc dispatchThreadgroups:loss_tg_count threadsPerThreadgroup:tg];
         [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
         // Pass 2: Fused V fwd + H bwd
         [enc setComputePipelineState:ctx->ssim_fused_v_fwd_h_bwd_kernel_cpso];
-        ENC_BUF(enc, out_img, 0); ENC_BUF(enc, gt, 1);
+        ENC_BUF(enc, out_img, 0); ENC_BUF(enc, gt_packed, 1);
         ENC_BUF(enc, g_tcache.ssim_h_buf, 2);
         [enc setBytes:loss_img_size->data() length:sizeof(*loss_img_size) atIndex:3];
         ENC_SCALAR(enc, ssim_weight, 4); ENC_SCALAR(enc, loss_inv_n, 5);
         ENC_BUF(enc, loss_intermediates, 6); ENC_BUF(enc, loss_sum, 7);
-        ENC_BUF(enc, loss_mask, 8); ENC_SCALAR(enc, use_loss_mask_u32, 9);
-        ENC_BUF(enc, final_Ts, 10); ENC_BUF(enc, alpha_target, 11);
+        ENC_BUF(enc, background, 8); ENC_SCALAR(enc, composite_gt_u32, 9);
+        ENC_SCALAR(enc, use_loss_mask_u32, 10);
+        ENC_BUF(enc, final_Ts, 11);
         ENC_SCALAR(enc, use_alpha_loss_u32, 12); ENC_SCALAR(enc, alpha_loss_weight, 13);
         [enc dispatchThreadgroups:loss_tg_count threadsPerThreadgroup:tg];
         [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
         // Pass 3: V bwd
         [enc setComputePipelineState:ctx->ssim_v_bwd_kernel_cpso];
-        ENC_BUF(enc, out_img, 0); ENC_BUF(enc, gt, 1);
+        ENC_BUF(enc, out_img, 0); ENC_BUF(enc, gt_packed, 1);
         ENC_BUF(enc, loss_intermediates, 2);
         [enc setBytes:loss_img_size->data() length:sizeof(*loss_img_size) atIndex:3];
         ENC_SCALAR(enc, ssim_weight, 4); ENC_SCALAR(enc, loss_inv_n, 5);
         ENC_BUF(enc, v_rendered, 6);
-        ENC_BUF(enc, loss_mask, 7); ENC_SCALAR(enc, use_loss_mask_u32, 8);
+        ENC_BUF(enc, background, 7); ENC_SCALAR(enc, composite_gt_u32, 8);
+        ENC_SCALAR(enc, use_loss_mask_u32, 9);
         [enc dispatchThreadgroups:loss_tg_count threadsPerThreadgroup:tg];
     };
 
@@ -1483,10 +1491,11 @@ std::tuple<MTensor, float> msplat_train_step(
         {
             id<MTLComputeCommandEncoder> enc = [command_buffer computeCommandEncoder];
             [enc setComputePipelineState:ctx->lpips_prepare_nchw_kernel_cpso];
-            ENC_BUF(enc, out_img, 0); ENC_BUF(enc, gt, 1);
+            ENC_BUF(enc, out_img, 0); ENC_BUF(enc, gt_packed, 1);
             [enc setBytes:loss_img_size->data() length:sizeof(*loss_img_size) atIndex:2];
             ENC_BUF(enc, g_tcache.lpips_rendered_nchw, 3);
             ENC_BUF(enc, g_tcache.lpips_gt_nchw, 4);
+            ENC_BUF(enc, background, 5); ENC_SCALAR(enc, composite_gt_u32, 6);
             [enc dispatchThreads:MTLSizeMake(lpips_numel, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(MIN(ctx->lpips_prepare_nchw_kernel_cpso.maxTotalThreadsPerThreadgroup,
                                                   (NSUInteger)lpips_numel), 1, 1)];
@@ -1549,7 +1558,7 @@ std::tuple<MTensor, float> msplat_train_step(
             ENC_BUF(enc, v_xy, 12); ENC_BUF(enc, v_conic, 13);
             ENC_BUF(enc, v_colors_rast, 14); ENC_BUF(enc, v_opacity, 15);
             ENC_BUF(enc, v_refine, 16);
-            ENC_BUF(enc, alpha_target, 17); ENC_SCALAR(enc, use_alpha_loss_u32, 18);
+            ENC_BUF(enc, gt_packed, 17); ENC_SCALAR(enc, use_alpha_loss_u32, 18);
             ENC_SCALAR(enc, alpha_loss_grad_scale, 19);
             [enc dispatchThreadgroups:num_tg threadsPerThreadgroup:MTLSizeMake(RAST_BLOCK_X, RAST_BLOCK_Y, 1)];
         } else {
@@ -1584,7 +1593,7 @@ std::tuple<MTensor, float> msplat_train_step(
             ENC_BUF(enc, v_colors_rast, 17); ENC_BUF(enc, v_opacity, 18);
             ENC_BUF(enc, v_refine, 19);
             ENC_SCALAR(enc, BWD_CHUNK_SIZE, 20); ENC_SCALAR(enc, bwd_K_max, 21);
-            ENC_BUF(enc, alpha_target, 22); ENC_SCALAR(enc, use_alpha_loss_u32, 23);
+            ENC_BUF(enc, gt_packed, 22); ENC_SCALAR(enc, use_alpha_loss_u32, 23);
             ENC_SCALAR(enc, alpha_loss_grad_scale, 24);
             [enc dispatchThreadgroups:MTLSizeMake(tile_x, tile_y, bwd_K_max) threadsPerThreadgroup:MTLSizeMake(RAST_BLOCK_X, RAST_BLOCK_Y, 1)];
         }

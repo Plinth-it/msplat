@@ -13,6 +13,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <thread>
+#include <cstdint>
 #include "random_iter.hpp"
 
 namespace fs = std::filesystem;
@@ -166,6 +167,11 @@ static float maskPixelValue(const Image &mask, int index) {
     return std::clamp(p[0], 0.0f, 1.0f);
 }
 
+static uint8_t floatToByte(float value) {
+    float scaled = std::clamp(value, 0.0f, 1.0f) * 255.0f;
+    return static_cast<uint8_t>(scaled + 0.5f);
+}
+
 static void copyMaskToAlpha(Image &image, const Image &mask) {
     if (image.empty() || mask.empty()) return;
     image.alpha.resize((size_t)image.width * (size_t)image.height);
@@ -213,6 +219,7 @@ void Camera::loadImage(float downscaleFactor, AlphaModeOverride alphaMode) {
     imagePyramids.clear();
     maskPyramids.clear();
     mtensorImageCache.clear();
+    mtensorPackedImageCache.clear();
     mtensorCompositeImageCache.clear();
     mtensorCompositeImageCacheBackground.clear();
     mtensorLossMaskCache.clear();
@@ -307,6 +314,7 @@ void Camera::applyImageScale(float imageScale) {
     imagePyramids.clear();
     maskPyramids.clear();
     mtensorImageCache.clear();
+    mtensorPackedImageCache.clear();
     mtensorCompositeImageCache.clear();
     mtensorCompositeImageCacheBackground.clear();
     mtensorLossMaskCache.clear();
@@ -388,6 +396,34 @@ MTensor& Camera::getGPUImage(int downscaleFactor, const float background[3]) {
     return mtensorCompositeImageCache[downscaleFactor];
 }
 
+MTensor& Camera::getGPUPackedImage(int downscaleFactor) {
+    auto it = mtensorPackedImageCache.find(downscaleFactor);
+    if (it != mtensorPackedImageCache.end()) return it->second;
+
+    Image img = getImage(downscaleFactor);
+    Image mask;
+    const bool useExplicitMaskAlpha = !maskImage.empty();
+    if (useExplicitMaskAlpha) mask = getMaskImage(downscaleFactor);
+
+    MTensor mt = gpu_empty({img.height, img.width}, DType::UInt32);
+    uint32_t *dst = mt.data<uint32_t>();
+    const float *src = img.ptr();
+    for (int i = 0; i < img.width * img.height; i++) {
+        uint32_t r = floatToByte(src[i * 3 + 0]);
+        uint32_t g = floatToByte(src[i * 3 + 1]);
+        uint32_t b = floatToByte(src[i * 3 + 2]);
+        uint32_t a = 255;
+        if (useExplicitMaskAlpha) {
+            a = floatToByte(maskPixelValue(mask, i));
+        } else if (img.hasAlpha()) {
+            a = floatToByte(img.alpha[i]);
+        }
+        dst[i] = r | (g << 8) | (b << 16) | (a << 24);
+    }
+    mtensorPackedImageCache[downscaleFactor] = mt;
+    return mtensorPackedImageCache[downscaleFactor];
+}
+
 MTensor& Camera::getGPULossMask(int downscaleFactor) {
     auto it = mtensorLossMaskCache.find(downscaleFactor);
     if (it != mtensorLossMaskCache.end()) return it->second;
@@ -427,7 +463,23 @@ float Camera::getLossMaskMean(int downscaleFactor) {
     auto it = lossMaskMeanCache.find(downscaleFactor);
     if (it != lossMaskMeanCache.end()) return it->second;
     if (!hasLossMask()) return 1.0f;
-    getGPULossMask(downscaleFactor);
+
+    Image img = !maskImage.empty() ? getMaskImage(downscaleFactor) : getImage(downscaleFactor);
+    double sum = 0.0;
+    if (!maskImage.empty()) {
+        for (int i = 0; i < img.width * img.height; i++) {
+            sum += maskPixelValue(img, i);
+        }
+    } else if (img.hasAlpha()) {
+        for (int i = 0; i < img.width * img.height; i++) {
+            sum += std::clamp(img.alpha[i], 0.0f, 1.0f);
+        }
+    } else {
+        sum = img.width * img.height;
+    }
+    lossMaskMeanCache[downscaleFactor] = img.width > 0 && img.height > 0
+        ? (float)(sum / (double)(img.width * img.height))
+        : 1.0f;
     return lossMaskMeanCache[downscaleFactor];
 }
 
@@ -444,6 +496,11 @@ bool Camera::hasLossMask() {
 bool Camera::hasExplicitMask() {
     ensureImageLoaded();
     return !maskImage.empty();
+}
+
+bool Camera::hasCompositeAlpha() {
+    ensureImageLoaded();
+    return !maskImage.empty() || image.hasAlpha();
 }
 
 // ── Camera prefetching ──────────────────────────────────────────────────────

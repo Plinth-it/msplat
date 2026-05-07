@@ -800,23 +800,18 @@ int main(int argc, char *argv[]) {
             auto iter_start = cpu_now();
             int downscale = model.getDownscaleFactor(step);
             std::array<float, 3> stepBg = sampleBackground();
-            MTensor gt = cam.getGPUImage(downscale, stepBg.data());
-            MTensor *lossMask = nullptr;
-            MTensor mask;
+            MTensor &gtPacked = cam.getGPUPackedImage(downscale);
+            bool useLossMask = cam.hasLossMask();
             float lossMaskMean = 1.0f;
-            MTensor *alphaTarget = nullptr;
-            MTensor alpha;
-            if (cam.hasLossMask()) {
-                mask = cam.getGPULossMask(downscale);
-                lossMask = &mask;
+            if (useLossMask) {
                 lossMaskMean = cam.getLossMaskMean(downscale);
-            } else if (cam.imageHasAlpha()) {
-                alpha = cam.getGPULossMask(downscale);
-                alphaTarget = &alpha;
             }
-            model.fullIteration(cam, step, gt, lossMask, lossMaskMean,
-                                alphaTarget, matchAlphaWeight, stepBg.data(), ssimWeight,
-                                lpipsLossWeight);
+            bool useAlphaLoss = !useLossMask && cam.imageHasAlpha();
+            bool compositeGt = cam.hasCompositeAlpha()
+                && (stepBg[0] != 0.0f || stepBg[1] != 0.0f || stepBg[2] != 0.0f);
+            model.fullIteration(cam, step, gtPacked, useLossMask, lossMaskMean,
+                                useAlphaLoss, matchAlphaWeight, stepBg.data(), compositeGt,
+                                ssimWeight, lpipsLossWeight);
             model.schedulersStep(step);
             model.afterTrain(step);
             msplat_commit();
@@ -1006,24 +1001,19 @@ int main(int argc, char *argv[]) {
                     for (int refineStep = 1; refineStep <= lodRefineSteps; refineStep++) {
                         Camera &cam = (*lodTrainCams)[lodCamsPrefetcher.next()];
                         std::array<float, 3> stepBg = sampleBackground();
-                        MTensor gt = cam.getGPUImage(1, stepBg.data());
-                        MTensor *lossMask = nullptr;
-                        MTensor mask;
+                        MTensor &gtPacked = cam.getGPUPackedImage(1);
+                        bool useLossMask = cam.hasLossMask();
                         float lossMaskMean = 1.0f;
-                        MTensor *alphaTarget = nullptr;
-                        MTensor alpha;
-                        if (cam.hasLossMask()) {
-                            mask = cam.getGPULossMask(1);
-                            lossMask = &mask;
+                        if (useLossMask) {
                             lossMaskMean = cam.getLossMaskMean(1);
-                        } else if (cam.imageHasAlpha()) {
-                            alpha = cam.getGPULossMask(1);
-                            alphaTarget = &alpha;
                         }
+                        bool useAlphaLoss = !useLossMask && cam.imageHasAlpha();
+                        bool compositeGt = cam.hasCompositeAlpha()
+                            && (stepBg[0] != 0.0f || stepBg[1] != 0.0f || stepBg[2] != 0.0f);
                         int globalStep = numIters + (level - 1) * lodRefineSteps + refineStep;
-                        model.fullIteration(cam, globalStep, gt, lossMask, lossMaskMean,
-                                            alphaTarget, matchAlphaWeight, stepBg.data(), ssimWeight,
-                                            lpipsLossWeight, 1);
+                        model.fullIteration(cam, globalStep, gtPacked, useLossMask, lossMaskMean,
+                                            useAlphaLoss, matchAlphaWeight, stepBg.data(), compositeGt,
+                                            ssimWeight, lpipsLossWeight, 1);
                         model.schedulersStep(refineStep);
                         model.afterTrain(globalStep, refineStep, lodRefineSteps);
                         msplat_commit();

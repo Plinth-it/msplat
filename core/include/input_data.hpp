@@ -42,6 +42,7 @@ struct Camera {
     std::unordered_map<int, Image> imagePyramids;
     std::unordered_map<int, Image> maskPyramids;
     std::unordered_map<int, MTensor> mtensorImageCache;
+    std::unordered_map<int, MTensor> mtensorPackedImageCache;
     std::unordered_map<int, MTensor> mtensorCompositeImageCache;
     std::unordered_map<int, std::array<float, 3>> mtensorCompositeImageCacheBackground;
     std::unordered_map<int, MTensor> mtensorLossMaskCache;
@@ -63,11 +64,13 @@ struct Camera {
     Image getMaskImage(int downscaleFactor);
     MTensor& getGPUImage(int downscaleFactor);
     MTensor& getGPUImage(int downscaleFactor, const float background[3]);
+    MTensor& getGPUPackedImage(int downscaleFactor);
     MTensor& getGPULossMask(int downscaleFactor);
     float getLossMaskMean(int downscaleFactor);
     bool imageHasAlpha();
     bool hasLossMask();
     bool hasExplicitMask();
+    bool hasCompositeAlpha();
     bool hasDistortion() const { return k1 != 0 || k2 != 0 || k3 != 0 || p1 != 0 || p2 != 0; }
 };
 
