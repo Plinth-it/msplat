@@ -2716,6 +2716,52 @@ kernel void prefix_sum_kernel(
     }
 }
 
+// In-place inclusive prefix sum for compact intermediate arrays such as block
+// totals. This avoids a separate scratch buffer before block propagation.
+kernel void prefix_sum_inplace_kernel(
+    constant uint& N,
+    device int* values,
+    uint tg_tid [[thread_position_in_threadgroup]],
+    uint tg_size [[threads_per_threadgroup]],
+    uint sg_id [[simdgroup_index_in_threadgroup]],
+    uint sg_lane [[thread_index_in_simdgroup]],
+    uint sg_size [[threads_per_simdgroup]]
+) {
+    uint chunk = (N + tg_size - 1) / tg_size;
+    uint start = tg_tid * chunk;
+    uint end = min(start + chunk, N);
+
+    int my_sum = 0;
+    for (uint i = start; i < end; i++) {
+        my_sum += values[i];
+    }
+
+    int sg_prefix = simd_prefix_exclusive_sum(my_sum);
+    int sg_total = simd_sum(my_sum);
+
+    uint num_sg = (tg_size + sg_size - 1) / sg_size;
+    threadgroup int sg_totals[PS_TG_SIZE / 32];
+    if (sg_lane == 0) {
+        sg_totals[sg_id] = sg_total;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    threadgroup int sg_offsets[PS_TG_SIZE / 32];
+    if (tg_tid == 0) {
+        sg_offsets[0] = 0;
+        for (uint i = 1; i < num_sg; i++) {
+            sg_offsets[i] = sg_offsets[i - 1] + sg_totals[i - 1];
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    int running = sg_offsets[sg_id] + sg_prefix;
+    for (uint i = start; i < end; i++) {
+        running += values[i];
+        values[i] = running;
+    }
+}
+
 // Multi-threadgroup prefix sum, pass 1: each threadgroup reduces its block of
 // 1024 elements to a single total. Coalesced reads, 1 write per threadgroup.
 kernel void block_reduce_kernel(
@@ -2744,8 +2790,9 @@ kernel void block_reduce_kernel(
     }
 }
 
-// Multi-threadgroup prefix sum, pass 2: each threadgroup computes its block
-// offset from block_totals, then writes inclusive prefix sums with coalesced access.
+// Multi-threadgroup prefix sum, pass 2: block_totals must already contain the
+// inclusive prefix of per-block totals. Each threadgroup reads one offset and
+// writes inclusive prefix sums with coalesced access.
 kernel void block_scan_propagate_kernel(
     constant uint& N,
     constant int* input,
@@ -2757,11 +2804,7 @@ kernel void block_scan_propagate_kernel(
     uint sg_lane [[thread_index_in_simdgroup]],
     uint sg_size [[threads_per_simdgroup]]
 ) {
-    // Step 1: Compute block offset (sum of all preceding block totals)
-    int block_offset = 0;
-    for (uint i = 0; i < tg_id; i++) {
-        block_offset += block_totals[i];
-    }
+    int block_offset = (tg_id == 0) ? 0 : block_totals[tg_id - 1];
 
     // Step 2: Load element (coalesced)
     uint idx = tg_id * PS_TG_SIZE + tg_tid;
@@ -3512,7 +3555,10 @@ kernel void l1_loss_fwd_bwd_kernel(
     constant float& alpha_loss_weight,
     uint2 gid [[thread_position_in_grid]],
     uint tr [[thread_index_in_threadgroup]],
-    uint2 tg_size [[threads_per_threadgroup]]
+    uint2 tg_size [[threads_per_threadgroup]],
+    uint sg_id [[simdgroup_index_in_threadgroup]],
+    uint sg_lane [[thread_index_in_simdgroup]],
+    uint sg_size [[threads_per_simdgroup]]
 ) {
     const uint W = img_size.x;
     const uint H = img_size.y;
@@ -3538,16 +3584,21 @@ kernel void l1_loss_fwd_bwd_kernel(
         }
     }
 
-    threadgroup float tg_sum[256];
-    tg_sum[tr] = pixel_loss;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    uint tg_total = tg_size.x * tg_size.y;
-    for (uint s = tg_total / 2; s > 0; s >>= 1) {
-        if (tr < s) tg_sum[tr] += tg_sum[tr + s];
-        threadgroup_barrier(mem_flags::mem_threadgroup);
+    threadgroup float sg_sums[32];
+    float sg_sum = simd_sum(pixel_loss);
+    if (sg_lane == 0) {
+        sg_sums[sg_id] = sg_sum;
     }
-    if (tr == 0) {
-        atomic_fetch_add_explicit(loss_sum, tg_sum[0], memory_order_relaxed);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint tg_total = tg_size.x * tg_size.y;
+    uint num_sg = (tg_total + sg_size - 1) / sg_size;
+    if (sg_id == 0) {
+        float total = (sg_lane < num_sg) ? sg_sums[sg_lane] : 0.0f;
+        total = simd_sum(total);
+        if (sg_lane == 0) {
+            atomic_fetch_add_explicit(loss_sum, total, memory_order_relaxed);
+        }
     }
 }
 
@@ -3566,7 +3617,10 @@ kernel void ssim_v_fwd_kernel(
     uint2 lid [[thread_position_in_threadgroup]],
     uint tr [[thread_index_in_threadgroup]],
     uint2 tgid [[threadgroup_position_in_grid]],
-    uint2 tg_size [[threads_per_threadgroup]]
+    uint2 tg_size [[threads_per_threadgroup]],
+    uint sg_id [[simdgroup_index_in_threadgroup]],
+    uint sg_lane [[thread_index_in_simdgroup]],
+    uint sg_size [[threads_per_simdgroup]]
 ) {
     const uint W = img_size.x;
     const uint H = img_size.y;
@@ -3611,8 +3665,8 @@ kernel void ssim_v_fwd_kernel(
                 cross_xy += w * tg_hp[c][lid.y + dy][lid.x][4];
             }
 
-            float sigma_x_sq = sq_x - mu_x * mu_x;
-            float sigma_y_sq = sq_y - mu_y * mu_y;
+            float sigma_x_sq = max(0.0f, sq_x - mu_x * mu_x);
+            float sigma_y_sq = max(0.0f, sq_y - mu_y * mu_y);
             float sigma_xy = cross_xy - mu_x * mu_y;
 
             // Store intermediates (same format as fused_loss_forward_kernel)
@@ -3645,16 +3699,21 @@ kernel void ssim_v_fwd_kernel(
     }
 
     // Threadgroup reduction → atomic add to loss_sum
-    threadgroup float tg_sum[256];
-    tg_sum[tr] = pixel_loss;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    uint tg_total = tg_size.x * tg_size.y;
-    for (uint s = tg_total / 2; s > 0; s >>= 1) {
-        if (tr < s) tg_sum[tr] += tg_sum[tr + s];
-        threadgroup_barrier(mem_flags::mem_threadgroup);
+    threadgroup float sg_sums[32];
+    float sg_sum = simd_sum(pixel_loss);
+    if (sg_lane == 0) {
+        sg_sums[sg_id] = sg_sum;
     }
-    if (tr == 0) {
-        atomic_fetch_add_explicit(loss_sum, tg_sum[0], memory_order_relaxed);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint tg_total = tg_size.x * tg_size.y;
+    uint num_sg = (tg_total + sg_size - 1) / sg_size;
+    if (sg_id == 0) {
+        float total = (sg_lane < num_sg) ? sg_sums[sg_lane] : 0.0f;
+        total = simd_sum(total);
+        if (sg_lane == 0) {
+            atomic_fetch_add_explicit(loss_sum, total, memory_order_relaxed);
+        }
     }
 }
 
@@ -3671,7 +3730,10 @@ kernel void ssim_fused_v_fwd_h_bwd_kernel(
     constant uint& use_alpha_loss, constant float& alpha_loss_weight,
     uint2 gid [[thread_position_in_grid]], uint2 lid [[thread_position_in_threadgroup]],
     uint tr [[thread_index_in_threadgroup]], uint2 tgid [[threadgroup_position_in_grid]],
-    uint2 tg_size [[threads_per_threadgroup]]
+    uint2 tg_size [[threads_per_threadgroup]],
+    uint sg_id [[simdgroup_index_in_threadgroup]],
+    uint sg_lane [[thread_index_in_simdgroup]],
+    uint sg_size [[threads_per_simdgroup]]
 ) {
     const uint W = img_size.x, H = img_size.y;
     const uint px = gid.x, py = gid.y;
@@ -3679,7 +3741,7 @@ kernel void ssim_fused_v_fwd_h_bwd_kernel(
     const int base_gy = (int)(tgid.y * SSIM_TG) - SSIM_HALF_WIN;
     constexpr uint TILE_DIM = SSIM_TG + 2 * SSIM_HALF_WIN;
     constexpr uint TILE_PIXELS = TILE_DIM * TILE_DIM;
-    float ssim_sum = 0.0f, l1_sum = 0.0f;
+    float loss_accum = 0.0f;
 
     for (uint c = 0; c < 3; c++) {
         threadgroup float tg_hp[TILE_DIM][TILE_DIM][5];
@@ -3719,14 +3781,23 @@ kernel void ssim_fused_v_fwd_h_bwd_kernel(
             float iCD = 1.0f / (Cd * D);
             float dmu = 2.0f*B*(mu_x*Cd - A*mu_y) / (Cd*Cd*D);
             float dsyq = -A*B*iCD/D, dsxy = 2.0f*A*iCD;
-            tg_f1[dy][dx] = ssim_clamped ? 0.0f : dmu - 2.0f*mu_y*dsyq - mu_x*dsxy;
-            tg_f2[dy][dx] = ssim_clamped ? 0.0f : 2.0f*dsyq;
-            tg_f3[dy][dx] = ssim_clamped ? 0.0f : dsxy;
+            int gpx = base_gx + (int)dx;
+            int gpy = base_gy + (int)(dy + SSIM_HALF_WIN);
+            bool center_valid = gpx >= 0 && gpx < (int)W && gpy >= 0 && gpy < (int)H;
+            float center_mask = center_valid
+                ? ((use_loss_mask != 0) ? loss_mask[gpy * W + gpx] : 1.0f)
+                : 0.0f;
+            float deriv_scale = ssim_clamped ? 0.0f : center_mask;
+            tg_f1[dy][dx] = deriv_scale * (dmu - 2.0f*mu_y*dsyq - mu_x*dsxy);
+            tg_f2[dy][dx] = deriv_scale * (2.0f*dsyq);
+            tg_f3[dy][dx] = deriv_scale * dsxy;
             if (dx >= SSIM_HALF_WIN && dx < SSIM_HALF_WIN + SSIM_TG) {
-                int gpx = base_gx + (int)dx, gpy = base_gy + (int)(dy + SSIM_HALF_WIN);
-                if (gpx >= 0 && gpx < (int)W && gpy >= 0 && gpy < (int)H) {
-                    ssim_sum += clamp(raw_ssim, -1.0f, 1.0f);
-                    l1_sum += fabs(gt[(gpy*W+gpx)*3+c] - rendered[(gpy*W+gpx)*3+c]);
+                if (center_valid) {
+                    float l1 = fabs(gt[(gpy*W+gpx)*3+c] - rendered[(gpy*W+gpx)*3+c]);
+                    loss_accum += center_mask * (
+                        (c == 0 ? ssim_weight : 0.0f)
+                        + ((1.0f - ssim_weight) * l1 - ssim_weight * clamp(raw_ssim, -1.0f, 1.0f)) / 3.0f
+                    );
                 }
             }
         }
@@ -3744,22 +3815,26 @@ kernel void ssim_fused_v_fwd_h_bwd_kernel(
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
-    float mask_weight = (use_loss_mask != 0 && px < W && py < H) ? loss_mask[py * W + px] : 1.0f;
-    float pixel_loss = (px < W && py < H)
-        ? mask_weight * (ssim_weight*(1.0f-ssim_sum/3.0f) + (1.0f-ssim_weight)*l1_sum/3.0f)
-        : 0.0f;
     if (use_alpha_loss != 0 && px < W && py < H) {
-        pixel_loss += alpha_loss_weight * fabs(alpha_target[py * W + px] - (1.0f - final_Ts[py * W + px]));
+        loss_accum += alpha_loss_weight * fabs(alpha_target[py * W + px] - (1.0f - final_Ts[py * W + px]));
     }
-    threadgroup float tg_sum[256];
-    tg_sum[tr] = pixel_loss;
+
+    threadgroup float sg_sums[32];
+    float sg_sum = simd_sum(loss_accum);
+    if (sg_lane == 0) {
+        sg_sums[sg_id] = sg_sum;
+    }
     threadgroup_barrier(mem_flags::mem_threadgroup);
+
     uint tg_total = tg_size.x * tg_size.y;
-    for (uint s = tg_total/2; s > 0; s >>= 1) {
-        if (tr < s) tg_sum[tr] += tg_sum[tr+s];
-        threadgroup_barrier(mem_flags::mem_threadgroup);
+    uint num_sg = (tg_total + sg_size - 1) / sg_size;
+    if (sg_id == 0) {
+        float total = (sg_lane < num_sg) ? sg_sums[sg_lane] : 0.0f;
+        total = simd_sum(total);
+        if (sg_lane == 0) {
+            atomic_fetch_add_explicit(loss_sum, total, memory_order_relaxed);
+        }
     }
-    if (tr == 0) atomic_fetch_add_explicit(loss_sum, tg_sum[0], memory_order_relaxed);
 }
 
 // Backward pass 1: compute derivative fields + horizontal convolution.
@@ -3897,7 +3972,7 @@ kernel void ssim_v_bwd_kernel(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     if (px < W && py < H) {
-        float mask_weight = use_loss_mask != 0 ? loss_mask[py * W + px] : 1.0f;
+        float l1_mask_weight = use_loss_mask != 0 ? loss_mask[py * W + px] : 1.0f;
         for (uint c = 0; c < 3; c++) {
             float conv_f1 = 0, conv_f2 = 0, conv_f3 = 0;
             for (uint dy = 0; dy < SSIM_WIN; dy++) {
@@ -3913,8 +3988,8 @@ kernel void ssim_v_bwd_kernel(
             float v_ssim = conv_f1 + rend_val * conv_f2 + gt_val * conv_f3;
             float v_l1 = (gt_val > rend_val) ? -1.0f : ((gt_val < rend_val) ? 1.0f : 0.0f);
 
-            v_rendered[(py * W + px) * 3 + c] = mask_weight * inv_n * (
-                -ssim_weight * v_ssim + (1.0f - ssim_weight) * v_l1
+            v_rendered[(py * W + px) * 3 + c] = inv_n * (
+                -ssim_weight * v_ssim + (1.0f - ssim_weight) * l1_mask_weight * v_l1
             );
         }
     }

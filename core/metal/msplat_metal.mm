@@ -144,6 +144,7 @@ struct MetalContext {
     id<MTLComputePipelineState> bitonic_sort_per_tile_kernel_cpso;
     // Prefix sum
     id<MTLComputePipelineState> prefix_sum_kernel_cpso;
+    id<MTLComputePipelineState> prefix_sum_inplace_kernel_cpso;
     id<MTLComputePipelineState> block_reduce_kernel_cpso;
     id<MTLComputePipelineState> block_scan_propagate_kernel_cpso;
     // Depth-chunked rasterization
@@ -282,6 +283,7 @@ MetalContext* init_msplat_metal_context() {
     ctx->bitonic_sort_per_tile_kernel_cpso        = load(@"bitonic_sort_per_tile_kernel");
     // Prefix sum
     ctx->prefix_sum_kernel_cpso                   = load(@"prefix_sum_kernel");
+    ctx->prefix_sum_inplace_kernel_cpso           = load(@"prefix_sum_inplace_kernel");
     ctx->block_reduce_kernel_cpso                 = load(@"block_reduce_kernel");
     ctx->block_scan_propagate_kernel_cpso         = load(@"block_scan_propagate_kernel");
     // Depth-chunked rasterization
@@ -311,6 +313,20 @@ MetalContext* init_msplat_metal_context() {
     ctx->densify_cull_classify_kernel_cpso        = load(@"densify_cull_classify_kernel");
     ctx->compact_scatter_kernel_cpso              = load(@"compact_scatter_kernel");
     ctx->compact_copy_back_kernel_cpso            = load(@"compact_copy_back_kernel");
+
+    auto requireThreadgroupSize = [&](id<MTLComputePipelineState> pso, NSString *name, NSUInteger required) {
+        if (pso && pso.maxTotalThreadsPerThreadgroup < required) {
+            fprintf(stderr, "msplat: kernel %s supports only %lu threads per threadgroup; need %lu\n",
+                    [name UTF8String],
+                    (unsigned long)pso.maxTotalThreadsPerThreadgroup,
+                    (unsigned long)required);
+            pipeline_load_failed = true;
+        }
+    };
+    requireThreadgroupSize(ctx->prefix_sum_kernel_cpso, @"prefix_sum_kernel", 1024);
+    requireThreadgroupSize(ctx->prefix_sum_inplace_kernel_cpso, @"prefix_sum_inplace_kernel", 1024);
+    requireThreadgroupSize(ctx->block_reduce_kernel_cpso, @"block_reduce_kernel", 1024);
+    requireThreadgroupSize(ctx->block_scan_propagate_kernel_cpso, @"block_scan_propagate_kernel", 1024);
 
     [metal_library release];
     if (pipeline_load_failed) {
@@ -1061,7 +1077,7 @@ static void forward_pipeline(
 
     auto encode_loss_fwd = [&](id<MTLComputeCommandEncoder> enc) {
         // Separable SSIM forward: H conv → barrier → V conv + SSIM + reduction
-        MTLSize grid = MTLSizeMake(img_width, img_height, 1);
+        MTLSize loss_tg_count = MTLSizeMake((img_width + 15) / 16, (img_height + 15) / 16, 1);
         MTLSize tg = MTLSizeMake(16, 16, 1);
 
         // Pass 1: horizontal convolution
@@ -1069,7 +1085,7 @@ static void forward_pipeline(
         ENC_BUF(enc, out_img, 0); ENC_BUF(enc, gt, 1);
         [enc setBytes:loss_img_size->data() length:sizeof(*loss_img_size) atIndex:2];
         ENC_BUF(enc, g_tcache.ssim_h_buf, 3);
-        [enc dispatchThreads:grid threadsPerThreadgroup:tg];
+        [enc dispatchThreadgroups:loss_tg_count threadsPerThreadgroup:tg];
 
         [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
 
@@ -1080,7 +1096,7 @@ static void forward_pipeline(
         [enc setBytes:loss_img_size->data() length:sizeof(*loss_img_size) atIndex:3];
         ENC_SCALAR(enc, ssim_weight, 4);
         ENC_BUF(enc, loss_intermediates, 5); ENC_BUF(enc, loss_sum, 6);
-        [enc dispatchThreads:grid threadsPerThreadgroup:tg];
+        [enc dispatchThreadgroups:loss_tg_count threadsPerThreadgroup:tg];
     };
 
     // Zero cached buffers will be done inside the command encoder via blit.
@@ -1415,7 +1431,7 @@ std::tuple<MTensor, float> msplat_train_step(
     // Fused loss: ssim_h_fwd → fused_v_fwd_h_bwd → ssim_v_bwd
     // Eliminates loss_intermediates round-trip (130 MB/iter bandwidth saved).
     auto encode_loss_fwd_bwd = [&](id<MTLComputeCommandEncoder> enc) {
-        MTLSize grid = MTLSizeMake(img_width, img_height, 1);
+        MTLSize loss_tg_count = MTLSizeMake((img_width + 15) / 16, (img_height + 15) / 16, 1);
         MTLSize tg = MTLSizeMake(16, 16, 1);
         if (ssim_weight <= 0.0f) {
             [enc setComputePipelineState:ctx->l1_loss_fwd_bwd_kernel_cpso];
@@ -1426,7 +1442,7 @@ std::tuple<MTensor, float> msplat_train_step(
             ENC_BUF(enc, loss_mask, 6); ENC_SCALAR(enc, use_loss_mask_u32, 7);
             ENC_BUF(enc, final_Ts, 8); ENC_BUF(enc, alpha_target, 9);
             ENC_SCALAR(enc, use_alpha_loss_u32, 10); ENC_SCALAR(enc, alpha_loss_weight, 11);
-            [enc dispatchThreads:grid threadsPerThreadgroup:tg];
+            [enc dispatchThreadgroups:loss_tg_count threadsPerThreadgroup:tg];
             return;
         }
         // Pass 1: H conv on images → ssim_h_buf
@@ -1434,7 +1450,7 @@ std::tuple<MTensor, float> msplat_train_step(
         ENC_BUF(enc, out_img, 0); ENC_BUF(enc, gt, 1);
         [enc setBytes:loss_img_size->data() length:sizeof(*loss_img_size) atIndex:2];
         ENC_BUF(enc, g_tcache.ssim_h_buf, 3);
-        [enc dispatchThreads:grid threadsPerThreadgroup:tg];
+        [enc dispatchThreadgroups:loss_tg_count threadsPerThreadgroup:tg];
         [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
         // Pass 2: Fused V fwd + H bwd
         [enc setComputePipelineState:ctx->ssim_fused_v_fwd_h_bwd_kernel_cpso];
@@ -1446,7 +1462,7 @@ std::tuple<MTensor, float> msplat_train_step(
         ENC_BUF(enc, loss_mask, 8); ENC_SCALAR(enc, use_loss_mask_u32, 9);
         ENC_BUF(enc, final_Ts, 10); ENC_BUF(enc, alpha_target, 11);
         ENC_SCALAR(enc, use_alpha_loss_u32, 12); ENC_SCALAR(enc, alpha_loss_weight, 13);
-        [enc dispatchThreads:grid threadsPerThreadgroup:tg];
+        [enc dispatchThreadgroups:loss_tg_count threadsPerThreadgroup:tg];
         [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
         // Pass 3: V bwd
         [enc setComputePipelineState:ctx->ssim_v_bwd_kernel_cpso];
@@ -1456,7 +1472,7 @@ std::tuple<MTensor, float> msplat_train_step(
         ENC_SCALAR(enc, ssim_weight, 4); ENC_SCALAR(enc, loss_inv_n, 5);
         ENC_BUF(enc, v_rendered, 6);
         ENC_BUF(enc, loss_mask, 7); ENC_SCALAR(enc, use_loss_mask_u32, 8);
-        [enc dispatchThreads:grid threadsPerThreadgroup:tg];
+        [enc dispatchThreadgroups:loss_tg_count threadsPerThreadgroup:tg];
     };
 
     auto encode_lpips = [&](MPSCommandBuffer *command_buffer) {
@@ -1854,8 +1870,9 @@ std::tuple<MTensor, float> msplat_train_step(
         });
     }
 
-    float loss_val = *loss_sum.data<float>() / (float)(img_height * img_width);
-    return std::make_tuple(radii_out, loss_val);
+    // Callers currently use the returned radii only. Reading loss_sum here would
+    // force a stale shared-memory read before this command buffer is committed.
+    return std::make_tuple(radii_out, 0.0f);
 }
 
 // ============================================================================
@@ -1926,6 +1943,13 @@ int msplat_densify(
     id<MTLCommandBuffer> command_buffer = ctx->getCommandBuffer();
     assert(command_buffer && "Failed to retrieve command buffer reference");
 
+    auto encode_block_totals_prefix = [&](id<MTLComputeCommandEncoder> enc, uint32_t block_count) {
+        [enc setComputePipelineState:ctx->prefix_sum_inplace_kernel_cpso];
+        ENC_SCALAR(enc, block_count, 0);
+        ENC_BUF(enc, block_totals, 1);
+        [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1024, 1, 1)];
+    };
+
     dispatch_sync(ctx->d_queue, ^(){
         id<MTLComputeCommandEncoder> enc = [command_buffer computeCommandEncoder];
         assert(enc && "Failed to create compute command encoder");
@@ -1960,6 +1984,8 @@ int msplat_densify(
             [enc dispatchThreadgroups:MTLSizeMake(K, 1, 1) threadsPerThreadgroup:MTLSizeMake(1024, 1, 1)];
         }
         [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+        encode_block_totals_prefix(enc, K);
+        [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
         {
             [enc setComputePipelineState:ctx->block_scan_propagate_kernel_cpso];
             ENC_SCALAR(enc, N_u32, 0); ENC_BUF(enc, split_flag, 1);
@@ -1975,6 +2001,8 @@ int msplat_densify(
             ENC_BUF(enc, block_totals, 2);
             [enc dispatchThreadgroups:MTLSizeMake(K, 1, 1) threadsPerThreadgroup:MTLSizeMake(1024, 1, 1)];
         }
+        [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+        encode_block_totals_prefix(enc, K);
         [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
         {
             [enc setComputePipelineState:ctx->block_scan_propagate_kernel_cpso];
@@ -2083,18 +2111,19 @@ int msplat_densify(
 
         // ---- Stage 7: Prefix sum on keep_flag → keep_prefix ----
         // Over worst_case elements (includes padding zeros for unused slots)
+        uint32_t K2 = (uint32_t)((worst_case + 1023) / 1024);
         {
             uint32_t wc = (uint32_t)worst_case;
-            uint32_t K2 = (uint32_t)((worst_case + 1023) / 1024);
             [enc setComputePipelineState:ctx->block_reduce_kernel_cpso];
             ENC_SCALAR(enc, wc, 0); ENC_BUF(enc, keep_flag, 1);
             ENC_BUF(enc, block_totals, 2);
             [enc dispatchThreadgroups:MTLSizeMake(K2, 1, 1) threadsPerThreadgroup:MTLSizeMake(1024, 1, 1)];
         }
         [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+        encode_block_totals_prefix(enc, K2);
+        [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
         {
             uint32_t wc = (uint32_t)worst_case;
-            uint32_t K2 = (uint32_t)((worst_case + 1023) / 1024);
             [enc setComputePipelineState:ctx->block_scan_propagate_kernel_cpso];
             ENC_SCALAR(enc, wc, 0); ENC_BUF(enc, keep_flag, 1);
             ENC_BUF(enc, keep_prefix, 2); ENC_BUF(enc, block_totals, 3);
