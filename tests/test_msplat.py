@@ -313,6 +313,18 @@ def test_dataset_detects_transparent_png_alpha():
         assert ds.camera_has_alpha(0) is True
 
 
+def test_nerfstudio_pose_keeps_opengl_forward_direction():
+    from msplat import Dataset
+
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_minimal_nerfstudio_dataset(tmp, alpha=False)
+        ds = Dataset(tmp)
+
+        pose = ds.camera_pose(0)
+
+        np.testing.assert_allclose(pose[:3, 2], [0.0, 0.0, 1.0], atol=1e-6)
+
+
 def test_dataset_ignores_fully_opaque_png_alpha_channel():
     from msplat import Dataset
 

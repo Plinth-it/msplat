@@ -221,15 +221,12 @@ InputData loaders::loadNerfstudio(const std::string &projectRoot) {
             cam.cx = jsonFloat(frame, "cx", jsonFloat(doc, "cx", cam.width * 0.5f));
             cam.cy = jsonFloat(frame, "cy", jsonFloat(doc, "cy", cam.height * 0.5f));
 
-            // transform_matrix is 4x4 c2w; flip camera Y/Z into msplat's pose convention.
+            // Nerfstudio transform_matrix is already OpenGL camera-to-world
+            // (Y up, Z back), which matches msplat's public pose convention.
             auto &tm = frame["transform_matrix"];
             for (int r = 0; r < 4; r++)
                 for (int c = 0; c < 4; c++)
                     cam.camToWorld[r*4+c] = tm[r][c].get<float>();
-            for (int r = 0; r < 4; r++) {
-                cam.camToWorld[r*4+1] *= -1.0f;
-                cam.camToWorld[r*4+2] *= -1.0f;
-            }
             if (!isFiniteCamera(cam)) continue;
 
             out.push_back(cam);
