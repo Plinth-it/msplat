@@ -118,11 +118,11 @@ def _write_binary_float64_point_ply(path, rows):
             f.write(struct.pack("<6d", *row))
 
 
-def _write_minimal_colmap_text_dataset(root, mask_filename=None, point_rows=None):
+def _write_minimal_colmap_text_dataset(root, mask_filename=None, point_rows=None, image_filename="image.png"):
     os.makedirs(os.path.join(root, "images"))
     os.makedirs(os.path.join(root, "sparse"))
 
-    _write_rgba_png(os.path.join(root, "images", "image.png"), 2, 1, bytes([
+    _write_rgba_png(os.path.join(root, "images", image_filename), 2, 1, bytes([
         255, 0, 0, 255,
         0, 0, 255, 255,
     ]))
@@ -140,7 +140,7 @@ def _write_minimal_colmap_text_dataset(root, mask_filename=None, point_rows=None
 
     with open(os.path.join(root, "sparse", "images.txt"), "w", encoding="utf-8") as f:
         f.write("# IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME\n")
-        f.write("1 1 0 0 0 0 0 0 1 image.png\n")
+        f.write(f"1 1 0 0 0 0 0 0 1 {image_filename}\n")
         f.write("\n")
 
     with open(os.path.join(root, "sparse", "points3D.txt"), "w", encoding="utf-8") as f:
@@ -243,6 +243,175 @@ def test_native_cli_exposes_quality_presets():
 
     assert "--quality" in result.stdout
     assert "fast, default, brush" in result.stdout
+    assert "--image-prefetch-workers" in result.stdout
+    assert "--no-log-image-loading" in result.stdout
+
+
+def test_native_cli_can_log_image_loading():
+    if not NATIVE_CLI.exists():
+        pytest.skip("native CLI is not built")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_minimal_colmap_text_dataset(tmp)
+
+        result = subprocess.run(
+            [
+                str(NATIVE_CLI),
+                tmp,
+                "--output", os.path.join(tmp, "out.ply"),
+                "--total-train-iters", "1",
+                "--num-downscales", "0",
+                "--ssim-weight", "0.0",
+                "--progress-every", "1",
+                "--save-every", "-1",
+                "--log-image-loading",
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+    combined_output = result.stdout + result.stderr
+    assert b"image cache 1/1 (100.0%)" in combined_output
+    assert b"loading image image.png" in combined_output
+    assert b"loaded image image.png" in combined_output
+    assert b"source 2x1, decoded 2x1, final 2x1" in combined_output
+    assert b"prepared target image.png" in combined_output
+    assert b"image 1/1 (100.0%) prepared target image.png" in combined_output
+    assert b"\rmsplat: image cache 1/1 (100.0%) loading image image.png" in result.stderr
+    assert b"\nmsplat: loaded image image.png" not in result.stderr
+    assert b"\nmsplat: prepared target image.png" not in result.stderr
+
+
+def test_native_cli_logs_image_loading_by_default():
+    if not NATIVE_CLI.exists():
+        pytest.skip("native CLI is not built")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_minimal_colmap_text_dataset(tmp)
+
+        result = subprocess.run(
+            [
+                str(NATIVE_CLI),
+                tmp,
+                "--output", os.path.join(tmp, "out.ply"),
+                "--total-train-iters", "1",
+                "--num-downscales", "0",
+                "--ssim-weight", "0.0",
+                "--progress-every", "1",
+                "--save-every", "-1",
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+    combined_output = result.stdout + result.stderr
+    assert b"image cache 1/1 (100.0%)" in combined_output
+    assert b"image 1/1 (100.0%) prepared target image.png" in combined_output
+
+
+def test_native_cli_can_disable_default_image_loading_log():
+    if not NATIVE_CLI.exists():
+        pytest.skip("native CLI is not built")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_minimal_colmap_text_dataset(tmp)
+
+        result = subprocess.run(
+            [
+                str(NATIVE_CLI),
+                tmp,
+                "--output", os.path.join(tmp, "out.ply"),
+                "--total-train-iters", "1",
+                "--num-downscales", "0",
+                "--ssim-weight", "0.0",
+                "--progress-every", "1",
+                "--save-every", "-1",
+                "--no-log-image-loading",
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+    combined_output = result.stdout + result.stderr
+    assert b"image cache" not in combined_output
+    assert b"prepared target image.png" not in combined_output
+
+
+def test_native_cli_clamps_image_loading_status_to_terminal_width():
+    if not NATIVE_CLI.exists():
+        pytest.skip("native CLI is not built")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        image_filename = "very-long-gallery-installation-image-name-that-would-wrap-a-terminal-row.png"
+        _write_minimal_colmap_text_dataset(tmp, image_filename=image_filename)
+        env = os.environ.copy()
+        env["MSPLAT_IMAGE_LOADING_COLUMNS"] = "96"
+
+        result = subprocess.run(
+            [
+                str(NATIVE_CLI),
+                tmp,
+                "--output", os.path.join(tmp, "out.ply"),
+                "--total-train-iters", "1",
+                "--num-downscales", "0",
+                "--ssim-weight", "0.0",
+                "--progress-every", "1",
+                "--save-every", "-1",
+                "--log-image-loading",
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+        )
+
+    status_segments = [
+        segment.replace(b"\033[K", b"")
+        for segment in result.stderr.split(b"\r")
+        if segment.startswith(b"msplat:")
+    ]
+    assert status_segments
+    assert all(len(segment) <= 96 for segment in status_segments)
+
+
+def test_native_cli_decodes_image_at_max_resolution():
+    if not NATIVE_CLI.exists():
+        pytest.skip("native CLI is not built")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_minimal_colmap_text_dataset(tmp)
+        pixels = bytes([
+            255, 0, 0, 255,  0, 255, 0, 255,  0, 0, 255, 255,  255, 255, 255, 255,
+            255, 0, 255, 255,  0, 255, 255, 255,  255, 255, 0, 255,  0, 0, 0, 255,
+        ])
+        _write_rgba_png(os.path.join(tmp, "images", "image.png"), 4, 2, pixels)
+        with open(os.path.join(tmp, "sparse", "cameras.txt"), "w", encoding="utf-8") as f:
+            f.write("# CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]\n")
+            f.write("1 PINHOLE 4 2 4.0 4.0 2.0 1.0\n")
+
+        result = subprocess.run(
+            [
+                str(NATIVE_CLI),
+                tmp,
+                "--output", os.path.join(tmp, "out.ply"),
+                "--total-train-iters", "1",
+                "--num-downscales", "0",
+                "--ssim-weight", "0.0",
+                "--progress-every", "1",
+                "--save-every", "-1",
+                "--max-resolution", "2",
+                "--log-image-loading",
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+    combined_output = result.stdout + result.stderr
+    assert b"source 4x2, decoded 2x1, final 2x1" in combined_output
 
 
 def test_training_config_defaults():

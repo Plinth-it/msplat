@@ -7,7 +7,10 @@
 #include <unordered_map>
 #include <array>
 #include <memory>
+#include <atomic>
 #include "metal_tensor.hpp"
+
+void clearImageLoadingStatusLine();
 
 // Simple float32 RGB image — replaces cv::Mat
 struct Image {
@@ -54,9 +57,16 @@ struct Camera {
     AlphaModeOverride lazyAlphaMode = AlphaModeOverride::Auto;
     bool lazyImageLoadConfigured = false;
     bool imageLoadAttempted = false;
+    bool logImageLoading = false;
+    std::shared_ptr<std::atomic<size_t>> imageLoadCounter;
+    size_t imageLoadTotal = 0;
+    size_t imageLoadOrdinal = 0;
 
     void loadImage(float downscaleFactor, AlphaModeOverride alphaMode = AlphaModeOverride::Auto);
-    void configureLazyImageLoad(float downscaleFactor, AlphaModeOverride alphaMode = AlphaModeOverride::Auto);
+    void configureLazyImageLoad(float downscaleFactor, AlphaModeOverride alphaMode = AlphaModeOverride::Auto,
+                                bool logLoading = false,
+                                std::shared_ptr<std::atomic<size_t>> loadCounter = nullptr,
+                                size_t loadTotal = 0);
     void ensureImageLoaded();
     bool imageLoaded() const { return !image.empty(); }
     void applyImageScale(float imageScale);
@@ -76,7 +86,7 @@ struct Camera {
 
 class CameraPrefetcher {
 public:
-    CameraPrefetcher(std::vector<Camera> &cameras, unsigned seed = 42);
+    CameraPrefetcher(std::vector<Camera> &cameras, unsigned seed = 42, size_t workerCount = 1);
     ~CameraPrefetcher();
 
     CameraPrefetcher(const CameraPrefetcher&) = delete;

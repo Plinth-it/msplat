@@ -12,6 +12,8 @@
 #include <unordered_set>
 #include <random>
 #include <vector>
+#include <memory>
+#include <atomic>
 #include <CLI/CLI.hpp>
 #include "model.hpp"
 #include "input_data.hpp"
@@ -468,6 +470,17 @@ int main(int argc, char *argv[]) {
     float downScaleFactor = 1.0f;
     app.add_option("-d,--downscale-factor", downScaleFactor, "Image downscale factor")
         ->check(CLI::Range(1.0f, 32.0f));
+    bool logImageLoading = true;
+    bool disableImageLoadingLog = false;
+    app.add_flag("--log-image-loading", logImageLoading,
+                 "Log lazy image decode, resize, and packed target preparation (default on)");
+    app.add_flag("--no-log-image-loading", disableImageLoadingLog,
+                 "Disable image loading status output");
+    int imagePrefetchWorkers = 2;
+    auto *imagePrefetchWorkersOption = app.add_option(
+        "--image-prefetch-workers", imagePrefetchWorkers,
+        "Background CPU image decode workers")
+        ->check(CLI::Range(1, 8));
     std::string qualityPreset = "default";
     app.add_option("--quality", qualityPreset, "Quality preset: fast, default, brush")
         ->check(CLI::IsMember({"fast", "default", "brush"}));
@@ -623,6 +636,8 @@ int main(int argc, char *argv[]) {
     if (maxResolutionOption->count() == 0) maxResolution = selectedQuality.maxResolution;
     if (densifyGradThreshOption->count() == 0) densifyGradThresh = selectedQuality.growthGradThreshold;
     if (growthSelectFractionOption->count() == 0) growthSelectFraction = selectedQuality.growthSelectFraction;
+    if (maxResolution == 0 && imagePrefetchWorkersOption->count() == 0) imagePrefetchWorkers = 1;
+    if (disableImageLoadingLog) logImageLoading = false;
 
     if (normalizeCrs) keepCrs = false;
     if (stopScreenSizeAtOption->count() == 0) stopScreenSizeAt = growthStopIter;
@@ -667,10 +682,18 @@ int main(int argc, char *argv[]) {
         subsamplePoints(inputData, subsamplePointStep);
         if (!validate && !inputData.evalCameras.empty()) evalMode = true;
 
+        auto imageLoadCounter = logImageLoading
+            ? std::make_shared<std::atomic<size_t>>(0)
+            : nullptr;
+        const size_t imageLoadTotal = inputData.cameras.size() + inputData.evalCameras.size();
         for (auto &cam : inputData.cameras)
-            cam.configureLazyImageLoad(cameraDownscaleFactor(cam, downScaleFactor, maxResolution), alphaMode);
+            cam.configureLazyImageLoad(cameraDownscaleFactor(cam, downScaleFactor, maxResolution),
+                                       alphaMode, logImageLoading,
+                                       imageLoadCounter, imageLoadTotal);
         for (auto &cam : inputData.evalCameras)
-            cam.configureLazyImageLoad(cameraDownscaleFactor(cam, downScaleFactor, maxResolution), alphaMode);
+            cam.configureLazyImageLoad(cameraDownscaleFactor(cam, downScaleFactor, maxResolution),
+                                       alphaMode, logImageLoading,
+                                       imageLoadCounter, imageLoadTotal);
 
         std::vector<Camera> cams;
         std::vector<Camera> testCams;
@@ -687,7 +710,8 @@ int main(int argc, char *argv[]) {
         const auto datasetEnd = CliClock::now();
 
         constexpr unsigned brushSceneLoaderSeed = 42;
-        CameraPrefetcher camsPrefetcher(cams, brushSceneLoaderSeed);
+        CameraPrefetcher camsPrefetcher(cams, brushSceneLoaderSeed,
+                                        static_cast<size_t>(imagePrefetchWorkers));
 
         const auto modelStart = CliClock::now();
         Model model(inputData, cams.size(),
@@ -735,6 +759,7 @@ int main(int argc, char *argv[]) {
                 fs::create_directories(imageDir);
             }
 
+            clearImageLoadingStatusLine();
             std::cout << "\n=== Evaluation (" << nTest << " test views";
             if (evalStep != numIters) std::cout << ", step " << evalStep;
             std::cout << ") ===" << std::endl;
@@ -836,6 +861,7 @@ int main(int argc, char *argv[]) {
                 const size_t completedSteps = step >= firstTrainingStep
                     ? step - firstTrainingStep + 1
                     : 0;
+                clearImageLoadingStatusLine();
                 std::cout << formatProgressLine(step, numIters, completedSteps,
                                                 model.means.size(0), elapsedSeconds)
                           << std::endl;
@@ -844,6 +870,7 @@ int main(int argc, char *argv[]) {
             if (saveEvery > 0 && step % saveEvery == 0) {
                 fs::path p = exportPathForStep(projectRoot, exportPath, exportName, outputScene, (int)step, numIters);
                 if (p.has_parent_path()) fs::create_directories(p.parent_path());
+                clearImageLoadingStatusLine();
                 model.save(p.string(), step);
             }
 
@@ -868,6 +895,7 @@ int main(int argc, char *argv[]) {
         const auto finalizationStart = CliClock::now();
 
         if (benchmarking && !bench_iter_ms.empty()) {
+            clearImageLoadingStatusLine();
             auto bench_end = cpu_now();
             double total_s = std::chrono::duration_cast<std::chrono::milliseconds>(bench_end - bench_start).count() / 1000.0;
             size_t n = bench_iter_ms.size();
@@ -957,6 +985,7 @@ int main(int argc, char *argv[]) {
             : brushExportPathForName(projectRoot, exportPath, exportName, numIters, numIters);
         if (baseOutputPath.has_parent_path()) fs::create_directories(baseOutputPath.parent_path());
         inputData.saveCameras((baseOutputPath.parent_path() / "cameras.json").string(), keepCrs);
+        clearImageLoadingStatusLine();
         model.save(baseOutputPath.string(), numIters);
         if (lodLevels > 0) {
             for (int level = 1; level <= lodLevels; level++) {
@@ -993,7 +1022,8 @@ int main(int argc, char *argv[]) {
                         for (Camera &cam : lodCams) cam.applyImageScale(cumulativeScale);
                         lodTrainCams = &lodCams;
                     }
-                    CameraPrefetcher lodCamsPrefetcher(*lodTrainCams, brushSceneLoaderSeed);
+                    CameraPrefetcher lodCamsPrefetcher(*lodTrainCams, brushSceneLoaderSeed,
+                                                       static_cast<size_t>(imagePrefetchWorkers));
                     std::cout << ", refining " << lodRefineSteps
                               << " steps at image scale " << (cumulativeScale * 100.0f) << "%";
                     std::cout << std::endl;
@@ -1021,6 +1051,7 @@ int main(int argc, char *argv[]) {
                 } else {
                     std::cout << std::endl;
                 }
+                clearImageLoadingStatusLine();
                 model.save(lodPath.string(), numIters + level * lodRefineSteps);
             }
         }
@@ -1035,6 +1066,7 @@ int main(int argc, char *argv[]) {
             MTensor gt_cpu = valCam->getGPUImage(model.getDownscaleFactor(numIters), evalBg).cpu();
             quantizeRenderedForEval(rgb_cpu);
 
+            clearImageLoadingStatusLine();
             std::cout << "\n=== Validation (" << valCam->filePath << ") ===" << std::endl;
             std::cout << "  PSNR:  " << psnr(rgb_cpu, gt_cpu)
                       << "  SSIM:  " << ssim_eval(rgb_cpu, gt_cpu)
@@ -1049,6 +1081,7 @@ int main(int argc, char *argv[]) {
         const double finalizationSeconds = secondsBetween(finalizationStart, finalizationEnd);
         const double totalSeconds = secondsBetween(totalStart, finalizationEnd);
 
+        clearImageLoadingStatusLine();
         std::cout << "\n=== Timings ===" << std::endl;
         std::cout << "  dataset/setup:   " << formatDuration(datasetSeconds) << std::endl;
         std::cout << "  model/init:      " << formatDuration(modelSeconds) << std::endl;
@@ -1066,6 +1099,7 @@ int main(int argc, char *argv[]) {
         const float finalEvalBg[3] = {0.0f, 0.0f, 0.0f};
         FinalPsnrResult trainPsnr = computeTrainPsnr(model, cams, numIters, finalEvalBg);
         const double finalPsnrSeconds = secondsBetween(finalPsnrStart, CliClock::now());
+        clearImageLoadingStatusLine();
         if (trainPsnr.views > 0) {
             std::cout << "\n=== Final Quality ===" << std::endl;
             std::cout << "  train PSNR:      " << std::fixed << std::setprecision(2)
@@ -1078,6 +1112,7 @@ int main(int argc, char *argv[]) {
         cleanup_msplat_metal();
         msplat_gpu_sync();
     } catch (const std::exception &e) {
+        clearImageLoadingStatusLine();
         std::cerr << e.what() << std::endl;
         cleanup_msplat_metal();
         msplat_gpu_sync();

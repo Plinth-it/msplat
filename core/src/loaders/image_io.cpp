@@ -10,23 +10,15 @@
 
 // ── Image loading (CoreGraphics) ─────────────────────────────────────────────
 
-Image imreadRGB(const std::string &path) {
-    CFStringRef cfPath = CFStringCreateWithCString(nullptr, path.c_str(), kCFStringEncodingUTF8);
-    CFURLRef url = CFURLCreateWithFileSystemPath(nullptr, cfPath, kCFURLPOSIXPathStyle, false);
-    CFRelease(cfPath);
+static int cfNumberInt(CFDictionaryRef dict, CFStringRef key) {
+    if (!dict) return 0;
+    CFNumberRef number = (CFNumberRef)CFDictionaryGetValue(dict, key);
+    if (!number) return 0;
+    int value = 0;
+    return CFNumberGetValue(number, kCFNumberIntType, &value) ? value : 0;
+}
 
-    CGImageSourceRef source = CGImageSourceCreateWithURL(url, nullptr);
-    CFRelease(url);
-    if (!source) {
-        throw std::runtime_error("Failed to load image: " + path);
-    }
-
-    CGImageRef cgImage = CGImageSourceCreateImageAtIndex(source, 0, nullptr);
-    CFRelease(source);
-    if (!cgImage) {
-        throw std::runtime_error("Failed to decode image: " + path);
-    }
-
+static Image imageFromCGImage(CGImageRef cgImage) {
     int w = (int)CGImageGetWidth(cgImage);
     int h = (int)CGImageGetHeight(cgImage);
 
@@ -40,7 +32,6 @@ Image imreadRGB(const std::string &path) {
     CGContextDrawImage(ctx, CGRectMake(0, 0, w, h), cgImage);
     CGContextRelease(ctx);
     CGColorSpaceRelease(colorSpace);
-    CGImageRelease(cgImage);
 
     // RGBA → float32 RGB [0,1]. RGB is premultiplied when alpha is present,
     // which lets the trainer composite targets with `rgb + bg * (1 - alpha)`.
@@ -62,6 +53,68 @@ Image imreadRGB(const std::string &path) {
         }
     }
     return img;
+}
+
+ImageReadResult imreadRGBWithMaxSize(const std::string &path, int maxPixelSize) {
+    CFStringRef cfPath = CFStringCreateWithCString(nullptr, path.c_str(), kCFStringEncodingUTF8);
+    CFURLRef url = CFURLCreateWithFileSystemPath(nullptr, cfPath, kCFURLPOSIXPathStyle, false);
+    CFRelease(cfPath);
+
+    CGImageSourceRef source = CGImageSourceCreateWithURL(url, nullptr);
+    CFRelease(url);
+    if (!source) {
+        throw std::runtime_error("Failed to load image: " + path);
+    }
+
+    ImageReadResult result;
+    CFDictionaryRef props = CGImageSourceCopyPropertiesAtIndex(source, 0, nullptr);
+    result.sourceWidth = cfNumberInt(props, kCGImagePropertyPixelWidth);
+    result.sourceHeight = cfNumberInt(props, kCGImagePropertyPixelHeight);
+    if (props) CFRelease(props);
+
+    CGImageRef cgImage = nullptr;
+    const int sourceMax = std::max(result.sourceWidth, result.sourceHeight);
+    if (maxPixelSize > 0 && sourceMax > maxPixelSize) {
+        CFNumberRef maxSize = CFNumberCreate(nullptr, kCFNumberIntType, &maxPixelSize);
+        const void *keys[] = {
+            kCGImageSourceCreateThumbnailFromImageAlways,
+            kCGImageSourceThumbnailMaxPixelSize,
+            kCGImageSourceShouldCacheImmediately,
+        };
+        const void *values[] = {
+            kCFBooleanTrue,
+            maxSize,
+            kCFBooleanTrue,
+        };
+        CFDictionaryRef options = CFDictionaryCreate(
+            nullptr, keys, values, 3,
+            &kCFTypeDictionaryKeyCallBacks,
+            &kCFTypeDictionaryValueCallBacks
+        );
+        cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options);
+        CFRelease(options);
+        CFRelease(maxSize);
+    } else {
+        cgImage = CGImageSourceCreateImageAtIndex(source, 0, nullptr);
+    }
+    CFRelease(source);
+    if (!cgImage) {
+        throw std::runtime_error("Failed to decode image: " + path);
+    }
+
+    result.decodedWidth = (int)CGImageGetWidth(cgImage);
+    result.decodedHeight = (int)CGImageGetHeight(cgImage);
+    result.image = imageFromCGImage(cgImage);
+    CGImageRelease(cgImage);
+    if (result.sourceWidth == 0 || result.sourceHeight == 0) {
+        result.sourceWidth = result.decodedWidth;
+        result.sourceHeight = result.decodedHeight;
+    }
+    return result;
+}
+
+Image imreadRGB(const std::string &path) {
+    return imreadRGBWithMaxSize(path, 0).image;
 }
 
 // ── Image writing (CoreGraphics PNG) ─────────────────────────────────────────

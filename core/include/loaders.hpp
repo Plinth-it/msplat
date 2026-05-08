@@ -20,7 +20,15 @@ bool loadDatasetPlyOverride(const std::string &projectRoot, Points &points,
 Points readColmapPoints(const std::string &path);
 
 // Image I/O
+struct ImageReadResult {
+    Image image;
+    int sourceWidth = 0;
+    int sourceHeight = 0;
+    int decodedWidth = 0;
+    int decodedHeight = 0;
+};
 Image imreadRGB(const std::string &path);       // returns float32 [0,1] directly
+ImageReadResult imreadRGBWithMaxSize(const std::string &path, int maxPixelSize);
 Image resizeArea(const Image &src, int dstW, int dstH);  // triangle-filter resize
 void imwriteRGB(const std::string &path, const Image &img);  // save as PNG
 

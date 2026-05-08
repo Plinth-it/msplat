@@ -14,6 +14,16 @@
 #include <mutex>
 #include <thread>
 #include <cstdint>
+#include <chrono>
+#include <sstream>
+#include <iomanip>
+#include <utility>
+#include <deque>
+#include <cstdlib>
+#if !defined(_WIN32)
+#include <sys/ioctl.h>
+#include <unistd.h>
+#endif
 #include "random_iter.hpp"
 
 namespace fs = std::filesystem;
@@ -172,6 +182,96 @@ static uint8_t floatToByte(float value) {
     return static_cast<uint8_t>(scaled + 0.5f);
 }
 
+static std::string imageLogName(const std::string &path) {
+    std::string name = fs::path(path).filename().string();
+    return name.empty() ? path : name;
+}
+
+static int64_t elapsedMillis(std::chrono::steady_clock::time_point start) {
+    auto elapsed = std::chrono::steady_clock::now() - start;
+    return std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+}
+
+static int roundedScaledSize(int size, float factor) {
+    return std::max(1, (int)std::round((float)size / factor));
+}
+
+static std::string imageProgressText(const char *label, size_t ordinal, size_t total) {
+    if (ordinal == 0 || total == 0) return "";
+    std::ostringstream out;
+    double percent = 100.0 * static_cast<double>(std::min(ordinal, total)) /
+                     static_cast<double>(total);
+    out << label << " " << ordinal << "/" << total << " ("
+        << std::fixed << std::setprecision(1) << percent << "%) ";
+    return out.str();
+}
+
+static std::string imageLoadProgressText(size_t ordinal, size_t total) {
+    return imageProgressText("image cache", ordinal, total);
+}
+
+static std::string currentImageProgressText(size_t ordinal, size_t total) {
+    return imageProgressText("image", ordinal, total);
+}
+
+static std::mutex imageLoadingLogMutex;
+static bool imageLoadingStatusVisible = false;
+
+static size_t parseTerminalColumns(const char *value) {
+    if (value == nullptr || *value == '\0') return 0;
+    char *end = nullptr;
+    long columns = std::strtol(value, &end, 10);
+    if (end == value || columns <= 0) return 0;
+    return static_cast<size_t>(columns);
+}
+
+static size_t terminalColumnsForStatusLine() {
+    const size_t forcedColumns = parseTerminalColumns(std::getenv("MSPLAT_IMAGE_LOADING_COLUMNS"));
+    if (forcedColumns > 0) return forcedColumns;
+
+#if !defined(_WIN32)
+    if (::isatty(STDERR_FILENO)) {
+        struct winsize size {};
+        if (::ioctl(STDERR_FILENO, TIOCGWINSZ, &size) == 0 && size.ws_col > 0) {
+            return static_cast<size_t>(size.ws_col);
+        }
+        return parseTerminalColumns(std::getenv("COLUMNS"));
+    }
+#endif
+    return 0;
+}
+
+static std::string truncateMiddle(const std::string &message, size_t maxLength) {
+    if (maxLength == 0 || message.size() <= maxLength) return message;
+    if (maxLength <= 3) return message.substr(0, maxLength);
+
+    const size_t available = maxLength - 3;
+    const size_t left = (available + 1) / 2;
+    const size_t right = available - left;
+    return message.substr(0, left) + "..." + message.substr(message.size() - right);
+}
+
+static std::string fitStatusLineToTerminal(const std::string &message) {
+    const size_t columns = terminalColumnsForStatusLine();
+    if (columns == 0) return message;
+
+    const size_t maxLength = columns > 1 ? columns - 1 : columns;
+    return truncateMiddle(message, maxLength);
+}
+
+static void updateImageLoadingStatusLine(const std::string &message) {
+    std::lock_guard<std::mutex> lock(imageLoadingLogMutex);
+    std::cerr << '\r' << fitStatusLineToTerminal(message) << "\033[K" << std::flush;
+    imageLoadingStatusVisible = true;
+}
+
+void clearImageLoadingStatusLine() {
+    std::lock_guard<std::mutex> lock(imageLoadingLogMutex);
+    if (!imageLoadingStatusVisible) return;
+    std::cerr << "\r\033[K" << std::flush;
+    imageLoadingStatusVisible = false;
+}
+
 static void copyMaskToAlpha(Image &image, const Image &mask) {
     if (image.empty() || mask.empty()) return;
     image.alpha.resize((size_t)image.width * (size_t)image.height);
@@ -203,10 +303,17 @@ static void premultiplyAlpha(Image &image) {
     }
 }
 
-void Camera::configureLazyImageLoad(float downscaleFactor, AlphaModeOverride alphaMode) {
+void Camera::configureLazyImageLoad(float downscaleFactor, AlphaModeOverride alphaMode,
+                                    bool logLoading,
+                                    std::shared_ptr<std::atomic<size_t>> loadCounter,
+                                    size_t loadTotal) {
     lazyImageDownscaleFactor = downscaleFactor;
     lazyAlphaMode = alphaMode;
     lazyImageLoadConfigured = true;
+    logImageLoading = logLoading;
+    imageLoadCounter = std::move(loadCounter);
+    imageLoadTotal = loadTotal;
+    imageLoadOrdinal = 0;
 }
 
 void Camera::ensureImageLoaded() {
@@ -215,6 +322,19 @@ void Camera::ensureImageLoaded() {
 }
 
 void Camera::loadImage(float downscaleFactor, AlphaModeOverride alphaMode) {
+    auto start = std::chrono::steady_clock::now();
+    const std::string logName = imageLogName(filePath);
+    if (imageLoadCounter && imageLoadTotal > 0) {
+        imageLoadOrdinal = imageLoadCounter->fetch_add(1) + 1;
+    }
+    const std::string progressText = imageLoadProgressText(imageLoadOrdinal, imageLoadTotal);
+    if (logImageLoading) {
+        std::ostringstream out;
+        out << "msplat: " << progressText << "loading image " << logName
+            << " (downscale " << downscaleFactor << ")";
+        updateImageLoadingStatusLine(out.str());
+    }
+
     imageLoadAttempted = true;
     imagePyramids.clear();
     maskPyramids.clear();
@@ -225,38 +345,60 @@ void Camera::loadImage(float downscaleFactor, AlphaModeOverride alphaMode) {
     mtensorLossMaskCache.clear();
     lossMaskMeanCache.clear();
 
-    Image raw = imreadRGB(filePath);
+    int maxDecodedPixelSize = 0;
+    if (downscaleFactor > 1.0f && width > 0 && height > 0) {
+        maxDecodedPixelSize = std::max(1, (int)std::ceil(
+            (float)std::max(width, height) / downscaleFactor));
+    }
+
+    ImageReadResult loaded = imreadRGBWithMaxSize(filePath, maxDecodedPixelSize);
+    Image raw = std::move(loaded.image);
     if (raw.empty()) return;
+    const int sourceWidth = loaded.sourceWidth > 0 ? loaded.sourceWidth : raw.width;
+    const int sourceHeight = loaded.sourceHeight > 0 ? loaded.sourceHeight : raw.height;
+    const int decodedWidth = loaded.decodedWidth > 0 ? loaded.decodedWidth : raw.width;
+    const int decodedHeight = loaded.decodedHeight > 0 ? loaded.decodedHeight : raw.height;
     alphaAsMask = false;
 
     if (maskPath.empty()) maskPath = findMaskPath(filePath, datasetRoot);
     Image rawMask;
     if (!maskPath.empty() && fs::exists(maskPath)) {
-        rawMask = imreadRGB(maskPath);
+        rawMask = imreadRGBWithMaxSize(maskPath, maxDecodedPixelSize).image;
         if (!rawMask.empty() && (rawMask.width != raw.width || rawMask.height != raw.height)) {
             rawMask = resizeArea(rawMask, raw.width, raw.height);
         }
     }
 
-    // If actual image dimensions differ from metadata, rescale intrinsics
-    if (width > 0 && height > 0 && (raw.width != width || raw.height != height)) {
-        float sx = (float)raw.width / (float)width;
-        float sy = (float)raw.height / (float)height;
+    auto scaleIntrinsicsTo = [&](int newW, int newH) {
+        if (width <= 0 || height <= 0) {
+            width = newW;
+            height = newH;
+            return;
+        }
+        float sx = (float)newW / (float)width;
+        float sy = (float)newH / (float)height;
         fx *= sx; fy *= sy; cx *= sx; cy *= sy;
-        width = raw.width; height = raw.height;
+        width = newW; height = newH;
+    };
+
+    // If actual image dimensions differ from metadata, rescale intrinsics.
+    if (width > 0 && height > 0 && (sourceWidth != width || sourceHeight != height)) {
+        scaleIntrinsicsTo(sourceWidth, sourceHeight);
     } else if (width == 0 || height == 0) {
-        width = raw.width; height = raw.height;
+        width = sourceWidth; height = sourceHeight;
     }
 
-    // Downscale
+    // Downscale only if ImageIO did not already decode to the requested size.
     if (downscaleFactor > 1.0f) {
-        int newW = (int)(width / downscaleFactor);
-        int newH = (int)(height / downscaleFactor);
-        raw = resizeArea(raw, newW, newH);
-        if (!rawMask.empty()) rawMask = resizeArea(rawMask, newW, newH);
-        float s = 1.0f / downscaleFactor;
-        fx *= s; fy *= s; cx *= s; cy *= s;
-        width = newW; height = newH;
+        int newW = roundedScaledSize(width, downscaleFactor);
+        int newH = roundedScaledSize(height, downscaleFactor);
+        if (raw.width != newW || raw.height != newH) {
+            raw = resizeArea(raw, newW, newH);
+            if (!rawMask.empty()) rawMask = resizeArea(rawMask, newW, newH);
+        }
+        scaleIntrinsicsTo(newW, newH);
+    } else if (raw.width != width || raw.height != height) {
+        scaleIntrinsicsTo(raw.width, raw.height);
     }
 
     // Undistort if needed
@@ -288,6 +430,16 @@ void Camera::loadImage(float downscaleFactor, AlphaModeOverride alphaMode) {
 
     image = std::move(raw);
     maskImage = std::move(rawMask);
+
+    if (logImageLoading) {
+        std::ostringstream out;
+        out << "msplat: " << progressText << "loaded image " << logName
+            << " source " << sourceWidth << "x" << sourceHeight
+            << ", decoded " << decodedWidth << "x" << decodedHeight
+            << ", final " << width << "x" << height
+            << " in " << elapsedMillis(start) << " ms";
+        updateImageLoadingStatusLine(out.str());
+    }
 }
 
 void Camera::applyImageScale(float imageScale) {
@@ -400,6 +552,7 @@ MTensor& Camera::getGPUPackedImage(int downscaleFactor) {
     auto it = mtensorPackedImageCache.find(downscaleFactor);
     if (it != mtensorPackedImageCache.end()) return it->second;
 
+    auto start = std::chrono::steady_clock::now();
     Image img = getImage(downscaleFactor);
     Image mask;
     const bool useExplicitMaskAlpha = !maskImage.empty();
@@ -421,6 +574,14 @@ MTensor& Camera::getGPUPackedImage(int downscaleFactor) {
         dst[i] = r | (g << 8) | (b << 16) | (a << 24);
     }
     mtensorPackedImageCache[downscaleFactor] = mt;
+    if (logImageLoading) {
+        std::ostringstream out;
+        out << "msplat: " << currentImageProgressText(imageLoadOrdinal, imageLoadTotal)
+            << "prepared target " << imageLogName(filePath)
+            << " " << img.width << "x" << img.height
+            << " in " << elapsedMillis(start) << " ms";
+        updateImageLoadingStatusLine(out.str());
+    }
     return mtensorPackedImageCache[downscaleFactor];
 }
 
@@ -514,22 +675,32 @@ static std::vector<size_t> cameraIndexList(size_t count) {
 struct CameraPrefetcher::Impl {
     std::vector<Camera> &cameras;
     InfiniteRandomIterator<size_t> iterator;
-    std::thread worker;
+    std::vector<std::thread> workers;
     std::mutex mutex;
     std::condition_variable cv;
+    std::condition_variable jobCv;
     bool stop = false;
-    bool requestPending = false;
-    bool ready = false;
-    size_t currentIndex = 0;
-    size_t requestedIndex = 0;
-    size_t readyIndex = 0;
+    size_t inFlight = 0;
+    size_t prefetchDepth = 1;
+    std::deque<size_t> order;
+    std::deque<size_t> jobs;
+    std::vector<bool> ready;
+    std::vector<bool> queuedOrLoading;
 
-    Impl(std::vector<Camera> &cameras, unsigned seed)
-        : cameras(cameras), iterator(cameraIndexList(cameras.size()), seed) {
+    Impl(std::vector<Camera> &cameras, unsigned seed, size_t workerCount)
+        : cameras(cameras), iterator(cameraIndexList(cameras.size()), seed),
+          prefetchDepth(std::max<size_t>(1, workerCount)),
+          ready(cameras.size(), false),
+          queuedOrLoading(cameras.size(), false) {
         if (cameras.empty()) return;
 
-        worker = std::thread([this]() { run(); });
-        requestNext(iterator.next());
+        workers.reserve(prefetchDepth);
+        for (size_t i = 0; i < prefetchDepth; i++) {
+            workers.emplace_back([this]() { run(); });
+        }
+
+        std::lock_guard<std::mutex> lock(mutex);
+        fillPrefetchLocked();
     }
 
     ~Impl() {
@@ -538,24 +709,30 @@ struct CameraPrefetcher::Impl {
             stop = true;
         }
         cv.notify_all();
-        if (worker.joinable()) worker.join();
+        jobCv.notify_all();
+        for (std::thread &worker : workers) {
+            if (worker.joinable()) worker.join();
+        }
     }
 
-    void requestNext(size_t index) {
-        std::lock_guard<std::mutex> lock(mutex);
-        currentIndex = index;
-        requestPending = false;
-        if (cameras[index].imageLoaded()) {
-            readyIndex = index;
-            ready = true;
-            cv.notify_all();
-            return;
+    void fillPrefetchLocked() {
+        while (!stop && order.size() + inFlight < prefetchDepth) {
+            size_t index = iterator.next();
+            order.push_back(index);
+            if (ready[index]) {
+                continue;
+            }
+            if (queuedOrLoading[index]) {
+                continue;
+            }
+            if (cameras[index].imageLoaded()) {
+                ready[index] = true;
+                continue;
+            }
+            queuedOrLoading[index] = true;
+            jobs.push_back(index);
+            jobCv.notify_one();
         }
-
-        ready = false;
-        requestedIndex = index;
-        requestPending = true;
-        cv.notify_all();
     }
 
     void run() {
@@ -563,18 +740,21 @@ struct CameraPrefetcher::Impl {
             size_t index = 0;
             {
                 std::unique_lock<std::mutex> lock(mutex);
-                cv.wait(lock, [&]() { return stop || requestPending; });
+                jobCv.wait(lock, [&]() { return stop || !jobs.empty(); });
                 if (stop) return;
-                index = requestedIndex;
-                requestPending = false;
+                index = jobs.front();
+                jobs.pop_front();
+                inFlight++;
             }
 
             cameras[index].ensureImageLoaded();
 
             {
                 std::lock_guard<std::mutex> lock(mutex);
-                readyIndex = index;
-                ready = true;
+                inFlight--;
+                ready[index] = true;
+                queuedOrLoading[index] = false;
+                fillPrefetchLocked();
             }
             cv.notify_all();
         }
@@ -588,17 +768,23 @@ struct CameraPrefetcher::Impl {
         size_t index = 0;
         {
             std::unique_lock<std::mutex> lock(mutex);
-            cv.wait(lock, [&]() { return ready && readyIndex == currentIndex; });
-            index = readyIndex;
+            cv.wait(lock, [&]() {
+                return stop || (!order.empty() && ready[order.front()]);
+            });
+            if (stop) {
+                throw std::runtime_error("Camera prefetcher stopped");
+            }
+            index = order.front();
+            order.pop_front();
+            fillPrefetchLocked();
         }
 
-        requestNext(iterator.next());
         return index;
     }
 };
 
-CameraPrefetcher::CameraPrefetcher(std::vector<Camera> &cameras, unsigned seed)
-    : impl(std::make_unique<Impl>(cameras, seed)) {}
+CameraPrefetcher::CameraPrefetcher(std::vector<Camera> &cameras, unsigned seed, size_t workerCount)
+    : impl(std::make_unique<Impl>(cameras, seed, workerCount)) {}
 
 CameraPrefetcher::~CameraPrefetcher() = default;
 
