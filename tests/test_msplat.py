@@ -247,6 +247,24 @@ def test_native_cli_exposes_quality_presets():
     assert "--no-log-image-loading" in result.stdout
 
 
+def test_metal_uses_dynamic_global_intersections():
+    repo_root = Path(__file__).resolve().parents[1]
+    host_source = (repo_root / "core" / "metal" / "msplat_metal.mm").read_text(encoding="utf-8")
+    shader_source = (repo_root / "core" / "metal" / "msplat_metal.metal").read_text(encoding="utf-8")
+
+    assert "map_gaussian_to_intersects_kernel_cpso" in host_source
+    assert "radix_sort_histogram_kernel_cpso" in host_source
+    assert "get_tile_bin_edges_kernel_cpso" in host_source
+    assert "should_use_dynamic_intersections" in host_source
+    assert "MSPLAT_INTERSECTION_SORT" in host_source
+    assert "needs_fixed_tile_bins" in host_source
+    assert "dynamic_capacity_valid" in host_source
+    assert "did_dynamic_count_prepass" in host_source
+    assert "padded_dynamic_intersection_capacity" in host_source
+    assert "(tile_id << 32) | depth_bits" in shader_source
+    assert "packed_opacity_comp[idx] = opacity_comp[g_id]" in shader_source
+
+
 def test_native_cli_can_log_image_loading():
     if not NATIVE_CLI.exists():
         pytest.skip("native CLI is not built")
