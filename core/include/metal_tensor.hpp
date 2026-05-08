@@ -53,11 +53,11 @@ public:
         size_t bytes = _numel * dtypeSize(_dtype);
         if (bytes == 0) bytes = 4;
         id<MTLBuffer> buf = [device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
-        _buffer = (__bridge_retained void*)buf;
+        _buffer = (void*)buf;
         _data = [buf contents];  // cache CPU-accessible pointer for C++ access
     }
 
-    id<MTLBuffer> buffer() const { return (__bridge id<MTLBuffer>)_buffer; }
+    id<MTLBuffer> buffer() const { return (id<MTLBuffer>)_buffer; }
 #endif
 
     // CPU allocation (no Metal buffer)

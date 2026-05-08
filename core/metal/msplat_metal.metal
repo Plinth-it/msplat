@@ -537,7 +537,7 @@ kernel void project_gaussians_forward_kernel(
     uint3 gp [[thread_position_in_grid]]
 ) {
     uint idx = gp.x;
-    if (idx >= num_points) {
+    if (idx >= (uint)num_points) {
         return;
     }
     radii[idx] = 0;
@@ -1434,7 +1434,7 @@ kernel void nd_rasterize_backward_kernel(
         // update v_rgb for this gaussian
         const float fac = alpha * T;
         float v_alpha = 0.f;
-        for (int c = 0; c < channels; ++c) {
+        for (uint c = 0; c < channels; ++c) {
             // gradient wrt rgb
             atomic_fetch_add_explicit(v_rgb + channels * g + c, fac * v_out[c], memory_order_relaxed);
             // contribution from this pixel
@@ -1805,7 +1805,7 @@ kernel void project_gaussians_backward_kernel(
     device float* v_quat, // float4
     uint idx [[thread_position_in_grid]]
 ) {
-    if (idx >= num_points || radii[idx] <= 0) {
+    if (idx >= (uint)num_points || radii[idx] <= 0) {
         return;
     }
     float3 p_world = read_packed_float3(means3d, idx);
