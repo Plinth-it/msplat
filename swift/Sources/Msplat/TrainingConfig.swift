@@ -35,6 +35,8 @@ public struct TrainingConfig {
     public var randomInitSceneScale: Float = 0.0
     /// Use Brush-style scalar second moment for SH Adam updates.
     public var reduceSecondMoment: Bool = false
+    /// Background CPU image decode workers used by the native trainer.
+    public var imagePrefetchWorkers: Int32 = 2
     public var keepCrs: Bool = false
     /// Use MIP splatting opacity compensation during training and rendering.
     public var renderMip: Bool = false
@@ -78,6 +80,7 @@ public struct TrainingConfig {
         c.lrOpacity = lrOpacity
         c.randomInitSceneScale = randomInitSceneScale
         c.reduceSecondMoment = reduceSecondMoment
+        c.imagePrefetchWorkers = imagePrefetchWorkers
         c.keepCrs = keepCrs
         c.renderMip = renderMip
         c.downscaleFactor = downscaleFactor

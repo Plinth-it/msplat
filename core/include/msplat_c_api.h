@@ -50,6 +50,7 @@ typedef struct {
     float lpipsLossWeight;
     float randomInitSceneScale;
     bool reduceSecondMoment;
+    int imagePrefetchWorkers;
 } MsplatConfig;
 
 static inline MsplatConfig msplat_default_config(void) {
@@ -90,6 +91,7 @@ static inline MsplatConfig msplat_default_config(void) {
     c.lpipsLossWeight = 0.0f;
     c.randomInitSceneScale = 0.0f;
     c.reduceSecondMoment = false;
+    c.imagePrefetchWorkers = 2;
     return c;
 }
 

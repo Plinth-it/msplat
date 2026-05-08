@@ -36,6 +36,7 @@ final class MsplatTests: XCTestCase {
         XCTAssertEqual(config.lpipsLossWeight, 0.0, accuracy: 0.001)
         XCTAssertEqual(config.randomInitSceneScale, 0.0, accuracy: 0.001)
         XCTAssertFalse(config.reduceSecondMoment)
+        XCTAssertEqual(config.imagePrefetchWorkers, 2)
     }
 
     func testLoadDataset() throws {

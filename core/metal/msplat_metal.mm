@@ -1126,21 +1126,21 @@ static void forward_pipeline(
     MTensor &final_idx = g_tcache.final_idx;
     MTensor &loss_intermediates = g_tcache.loss_intermediates;
 
-    auto loss_img_size = std::make_shared<std::array<uint32_t, 2>>(std::array<uint32_t, 2>{img_width, img_height});
+    std::array<uint32_t, 2> loss_img_size = {img_width, img_height};
     uint32_t composite_gt_u32 = 0;
 
-    // --- Constants (heap-allocated for Obj-C block) ---
-    auto proj_intrins = std::make_shared<std::array<float, 4>>(std::array<float, 4>{fx, fy, cx, cy});
-    auto proj_img_size = std::make_shared<std::array<uint32_t, 2>>(std::array<uint32_t, 2>{img_width, img_height});
-    auto tile_bounds_arr = std::make_shared<std::array<uint32_t, 4>>(std::array<uint32_t, 4>{
+    // --- Constants copied into Metal encoders via setBytes ---
+    std::array<float, 4> proj_intrins = {fx, fy, cx, cy};
+    std::array<uint32_t, 2> proj_img_size = {img_width, img_height};
+    std::array<uint32_t, 4> tile_bounds_arr = {
         (uint32_t)tile_bounds_x, (uint32_t)tile_bounds_y,
         (uint32_t)std::get<2>(tile_bounds), 0xDEAD
-    });
-    auto cam_pos_arr = std::make_shared<std::array<float, 4>>(std::array<float, 4>{cam_pos[0], cam_pos[1], cam_pos[2], 0.0f});
+    };
+    std::array<float, 4> cam_pos_arr = {cam_pos[0], cam_pos[1], cam_pos[2], 0.0f};
     uint32_t num_points_u32 = (uint32_t)num_points;
     uint32_t capacity_u32 = (uint32_t)capacity;
-    auto img_size_dim3 = std::make_shared<std::array<uint32_t, 4>>(std::array<uint32_t, 4>{img_width, img_height, 1, 0xDEAD});
-    auto block_size_dim2 = std::make_shared<std::array<int32_t, 2>>(std::array<int32_t, 2>{RAST_BLOCK_X, RAST_BLOCK_Y});
+    std::array<uint32_t, 4> img_size_dim3 = {img_width, img_height, 1, 0xDEAD};
+    std::array<int32_t, 2> block_size_dim2 = {RAST_BLOCK_X, RAST_BLOCK_Y};
 
     // Periodic diagnostic: print key dimensions for roofline analysis
     static int diag_count = 0;
@@ -1168,15 +1168,15 @@ static void forward_pipeline(
         ENC_BUF(enc, means3d, 1); ENC_BUF(enc, scales, 2);
         ENC_SCALAR(enc, glob_scale, 3); ENC_BUF(enc, quats, 4);
         ENC_BUF(enc, viewmat, 5); ENC_BUF(enc, projmat, 6);
-        [enc setBytes:proj_intrins->data() length:sizeof(*proj_intrins) atIndex:7];
-        [enc setBytes:proj_img_size->data() length:sizeof(*proj_img_size) atIndex:8];
-        [enc setBytes:tile_bounds_arr->data() length:sizeof(*tile_bounds_arr) atIndex:9];
+        [enc setBytes:proj_intrins.data() length:sizeof(proj_intrins) atIndex:7];
+        [enc setBytes:proj_img_size.data() length:sizeof(proj_img_size) atIndex:8];
+        [enc setBytes:tile_bounds_arr.data() length:sizeof(tile_bounds_arr) atIndex:9];
         ENC_SCALAR(enc, clip_thresh, 10);
         ENC_BUF(enc, xys, 11); ENC_BUF(enc, depths, 12);
         ENC_BUF(enc, radii_out, 13); ENC_BUF(enc, conics, 14);
         ENC_BUF(enc, num_tiles_hit, 15);
         ENC_SCALAR(enc, degree, 16); ENC_SCALAR(enc, degrees_to_use, 17);
-        [enc setBytes:cam_pos_arr->data() length:sizeof(*cam_pos_arr) atIndex:18];
+        [enc setBytes:cam_pos_arr.data() length:sizeof(cam_pos_arr) atIndex:18];
         ENC_BUF(enc, features_dc, 19); ENC_BUF(enc, features_rest, 20);
         ENC_BUF(enc, colors, 21); ENC_BUF(enc, aabb, 22);
         ENC_BUF(enc, opacity_comp, 23); ENC_SCALAR(enc, use_mip_splatting_u32, 24);
@@ -1204,7 +1204,7 @@ static void forward_pipeline(
         ENC_BUF(enc, depths, 2);
         ENC_BUF(enc, radii_out, 3);
         ENC_BUF(enc, cum_tiles_hit, 4);
-        [enc setBytes:tile_bounds_arr->data() length:sizeof(*tile_bounds_arr) atIndex:5];
+        [enc setBytes:tile_bounds_arr.data() length:sizeof(tile_bounds_arr) atIndex:5];
         ENC_SCALAR(enc, capacity_u32, 6);
         if (use_dynamic_u32_keys) {
             ENC_BUF(enc, isect_ids_u32, 7);
@@ -1337,7 +1337,7 @@ static void forward_pipeline(
             ENC_BUF(enc, depths, 2);
             ENC_BUF(enc, radii_out, 3);
             ENC_BUF(enc, aabb, 4);
-            [enc setBytes:tile_bounds_arr->data() length:sizeof(*tile_bounds_arr) atIndex:5];
+            [enc setBytes:tile_bounds_arr.data() length:sizeof(tile_bounds_arr) atIndex:5];
             ENC_BUF(enc, g_tcache.tile_scatter_counters, 6);
             ENC_BUF(enc, g_tcache.prealloc_bins, 7);
             ENC_BUF(enc, g_tcache.overflow_flag, 8);
@@ -1383,14 +1383,14 @@ static void forward_pipeline(
         MTLSize num_tg = MTLSizeMake((img_width + RAST_BLOCK_X - 1) / RAST_BLOCK_X, (img_height + RAST_BLOCK_Y - 1) / RAST_BLOCK_Y, 1);
         MTLSize tg_size = MTLSizeMake(RAST_BLOCK_X, RAST_BLOCK_Y, 1);
         [enc setComputePipelineState:ctx->nd_rasterize_forward_kernel_cpso];
-        [enc setBytes:tile_bounds_arr->data() length:sizeof(*tile_bounds_arr) atIndex:0];
-        [enc setBytes:img_size_dim3->data() length:sizeof(*img_size_dim3) atIndex:1];
+        [enc setBytes:tile_bounds_arr.data() length:sizeof(tile_bounds_arr) atIndex:0];
+        [enc setBytes:img_size_dim3.data() length:sizeof(img_size_dim3) atIndex:1];
         ENC_SCALAR(enc, channels, 2); ENC_BUF(enc, tile_bins, 3);
         ENC_BUF(enc, packed_xy_opac, 4); ENC_BUF(enc, packed_conic, 5); ENC_BUF(enc, packed_rgb, 6);
         ENC_BUF(enc, packed_opacity_comp, 7);
         ENC_BUF(enc, final_Ts, 8); ENC_BUF(enc, final_idx, 9); ENC_BUF(enc, out_img, 10);
         ENC_BUF(enc, background, 11);
-        [enc setBytes:block_size_dim2->data() length:sizeof(*block_size_dim2) atIndex:12];
+        [enc setBytes:block_size_dim2.data() length:sizeof(block_size_dim2) atIndex:12];
         [enc dispatchThreadgroups:num_tg threadsPerThreadgroup:tg_size];
     };
 
@@ -1399,18 +1399,18 @@ static void forward_pipeline(
         uint32_t tile_x = (img_width + RAST_BLOCK_X - 1) / RAST_BLOCK_X;
         uint32_t tile_y = (img_height + RAST_BLOCK_Y - 1) / RAST_BLOCK_Y;
         uint32_t num_pix = img_width * img_height;
-        auto img_sz_2 = std::make_shared<std::array<uint32_t, 2>>(std::array<uint32_t, 2>{img_width, img_height});
+        std::array<uint32_t, 2> img_sz_2 = {img_width, img_height};
         MTLSize chunked_tg = MTLSizeMake(tile_x, tile_y, K_max);
         MTLSize tg_size = MTLSizeMake(RAST_BLOCK_X, RAST_BLOCK_Y, 1);
         [enc setComputePipelineState:ctx->rasterize_forward_chunked_kernel_cpso];
-        [enc setBytes:tile_bounds_arr->data() length:sizeof(*tile_bounds_arr) atIndex:0];
-        [enc setBytes:img_size_dim3->data() length:sizeof(*img_size_dim3) atIndex:1];
+        [enc setBytes:tile_bounds_arr.data() length:sizeof(tile_bounds_arr) atIndex:0];
+        [enc setBytes:img_size_dim3.data() length:sizeof(img_size_dim3) atIndex:1];
         ENC_SCALAR(enc, channels, 2); ENC_BUF(enc, tile_bins, 3);
         ENC_BUF(enc, packed_xy_opac, 4); ENC_BUF(enc, packed_conic, 5); ENC_BUF(enc, packed_rgb, 6);
         ENC_BUF(enc, packed_opacity_comp, 7);
         ENC_BUF(enc, g_tcache.chunk_T, 8); ENC_BUF(enc, g_tcache.chunk_C, 9); ENC_BUF(enc, g_tcache.chunk_final_idx, 10);
         ENC_SCALAR(enc, CHUNK_SIZE, 11); ENC_SCALAR(enc, K_max, 12);
-        [enc setBytes:block_size_dim2->data() length:sizeof(*block_size_dim2) atIndex:13];
+        [enc setBytes:block_size_dim2.data() length:sizeof(block_size_dim2) atIndex:13];
         [enc dispatchThreadgroups:chunked_tg threadsPerThreadgroup:tg_size];
 
         // Phase 2: merge kernel — one thread per pixel
@@ -1421,7 +1421,7 @@ static void forward_pipeline(
         ENC_BUF(enc, g_tcache.chunk_T, 2); ENC_BUF(enc, g_tcache.chunk_C, 3); ENC_BUF(enc, g_tcache.chunk_final_idx, 4);
         ENC_BUF(enc, final_Ts, 5); ENC_BUF(enc, final_idx, 6); ENC_BUF(enc, out_img, 7);
         ENC_BUF(enc, background, 8);
-        [enc setBytes:img_sz_2->data() length:sizeof(*img_sz_2) atIndex:9];
+        [enc setBytes:img_sz_2.data() length:sizeof(img_sz_2) atIndex:9];
         [enc dispatchThreads:MTLSizeMake(img_width, img_height, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
     };
 
@@ -1441,7 +1441,7 @@ static void forward_pipeline(
         // Pass 1: horizontal convolution
         [enc setComputePipelineState:ctx->ssim_h_fwd_kernel_cpso];
         ENC_BUF(enc, out_img, 0); ENC_BUF(enc, gt, 1);
-        [enc setBytes:loss_img_size->data() length:sizeof(*loss_img_size) atIndex:2];
+        [enc setBytes:loss_img_size.data() length:sizeof(loss_img_size) atIndex:2];
         ENC_BUF(enc, g_tcache.ssim_h_buf, 3);
         ENC_BUF(enc, background, 4); ENC_SCALAR(enc, composite_gt_u32, 5);
         [enc dispatchThreadgroups:loss_tg_count threadsPerThreadgroup:tg];
@@ -1452,7 +1452,7 @@ static void forward_pipeline(
         [enc setComputePipelineState:ctx->ssim_v_fwd_kernel_cpso];
         ENC_BUF(enc, out_img, 0); ENC_BUF(enc, gt, 1);
         ENC_BUF(enc, g_tcache.ssim_h_buf, 2);
-        [enc setBytes:loss_img_size->data() length:sizeof(*loss_img_size) atIndex:3];
+        [enc setBytes:loss_img_size.data() length:sizeof(loss_img_size) atIndex:3];
         ENC_SCALAR(enc, ssim_weight, 4);
         ENC_BUF(enc, loss_intermediates, 5); ENC_BUF(enc, loss_sum, 6);
         ENC_BUF(enc, background, 7); ENC_SCALAR(enc, composite_gt_u32, 8);
@@ -1678,34 +1678,36 @@ std::tuple<MTensor, float> msplat_train_step(
     MTensor &v_features_rest = g_tcache.v_features_rest;
 
     // Wire backward outputs as Adam grads (MTensor references for gradient buffers)
-    auto adam_grads = std::make_shared<std::array<MTensor, 6>>(
-        std::array<MTensor, 6>{v_mean3d, v_scale, v_quat, v_features_dc, v_features_rest, v_opacity});
+    std::array<MTensor, 6> adam_grads = {
+        v_mean3d, v_scale, v_quat, v_features_dc, v_features_rest, v_opacity
+    };
 
-    // --- Constants (heap-allocated for Obj-C block capture) ---
-    auto loss_img_size = std::make_shared<std::array<uint32_t, 2>>(std::array<uint32_t, 2>{img_width, img_height});
+    // --- Constants copied into Metal encoders via setBytes ---
+    std::array<uint32_t, 2> loss_img_size = {img_width, img_height};
     uint32_t lpips_numel = img_width * img_height * 3;
     uint32_t use_loss_mask_u32 = use_loss_mask ? 1u : 0u;
     uint32_t use_alpha_loss_u32 = use_alpha_loss ? 1u : 0u;
     uint32_t composite_gt_u32 = composite_gt ? 1u : 0u;
     float alpha_loss_grad_scale = use_alpha_loss ? (alpha_loss_weight / (float)(img_height * img_width)) : 0.0f;
-    auto proj_intrins = std::make_shared<std::array<float, 4>>(std::array<float, 4>{fx, fy, cx, cy});
-    auto proj_img_size = std::make_shared<std::array<uint32_t, 2>>(std::array<uint32_t, 2>{img_width, img_height});
-    auto tile_bounds_arr = std::make_shared<std::array<uint32_t, 4>>(std::array<uint32_t, 4>{
+    std::array<float, 4> proj_intrins = {fx, fy, cx, cy};
+    std::array<uint32_t, 2> proj_img_size = {img_width, img_height};
+    std::array<uint32_t, 4> tile_bounds_arr = {
         (uint32_t)tile_bounds_x, (uint32_t)tile_bounds_y,
         (uint32_t)std::get<2>(tile_bounds), 0xDEAD
-    });
-    auto cam_pos_arr = std::make_shared<std::array<float, 4>>(std::array<float, 4>{cam_pos[0], cam_pos[1], cam_pos[2], 0.0f});
+    };
+    std::array<float, 4> cam_pos_arr = {cam_pos[0], cam_pos[1], cam_pos[2], 0.0f};
     uint32_t num_points_u32 = (uint32_t)num_points;
     uint32_t capacity_u32 = (uint32_t)capacity;
-    auto img_size_dim3 = std::make_shared<std::array<uint32_t, 4>>(std::array<uint32_t, 4>{img_width, img_height, 1, 0xDEAD});
-    auto block_size_dim2 = std::make_shared<std::array<int32_t, 2>>(std::array<int32_t, 2>{RAST_BLOCK_X, RAST_BLOCK_Y});
+    std::array<uint32_t, 4> img_size_dim3 = {img_width, img_height, 1, 0xDEAD};
+    std::array<int32_t, 2> block_size_dim2 = {RAST_BLOCK_X, RAST_BLOCK_Y};
     // tile_bounds for rasterize kernels must be 16x16 tile counts (tile_bins granularity)
-    auto rast_tb = std::make_shared<std::array<uint32_t, 4>>(std::array<uint32_t, 4>{
+    std::array<uint32_t, 4> rast_tb = {
         (img_width + 15u) / 16u,
-        (img_height + 15u) / 16u, 1, 0xDEAD});
-    auto rast_isz = std::make_shared<std::array<uint32_t, 2>>(std::array<uint32_t, 2>{img_width, img_height});
-    auto proj_bwd_intr = std::make_shared<std::array<float, 4>>(std::array<float, 4>{fx, fy, cx, cy});
-    auto proj_bwd_isz = std::make_shared<std::array<uint32_t, 2>>(std::array<uint32_t, 2>{img_width, img_height});
+        (img_height + 15u) / 16u, 1, 0xDEAD
+    };
+    std::array<uint32_t, 2> rast_isz = {img_width, img_height};
+    std::array<float, 4> proj_bwd_intr = {fx, fy, cx, cy};
+    std::array<uint32_t, 2> proj_bwd_isz = {img_width, img_height};
 
     // --- K_max for chunked rasterization ---
     uint32_t K_max = 1;
@@ -1722,15 +1724,15 @@ std::tuple<MTensor, float> msplat_train_step(
         ENC_BUF(enc, means3d, 1); ENC_BUF(enc, scales, 2);
         ENC_SCALAR(enc, glob_scale, 3); ENC_BUF(enc, quats, 4);
         ENC_BUF(enc, viewmat, 5); ENC_BUF(enc, projmat, 6);
-        [enc setBytes:proj_intrins->data() length:sizeof(*proj_intrins) atIndex:7];
-        [enc setBytes:proj_img_size->data() length:sizeof(*proj_img_size) atIndex:8];
-        [enc setBytes:tile_bounds_arr->data() length:sizeof(*tile_bounds_arr) atIndex:9];
+        [enc setBytes:proj_intrins.data() length:sizeof(proj_intrins) atIndex:7];
+        [enc setBytes:proj_img_size.data() length:sizeof(proj_img_size) atIndex:8];
+        [enc setBytes:tile_bounds_arr.data() length:sizeof(tile_bounds_arr) atIndex:9];
         ENC_SCALAR(enc, clip_thresh, 10);
         ENC_BUF(enc, xys, 11); ENC_BUF(enc, depths, 12);
         ENC_BUF(enc, radii_out, 13); ENC_BUF(enc, conics, 14);
         ENC_BUF(enc, num_tiles_hit, 15);
         ENC_SCALAR(enc, degree, 16); ENC_SCALAR(enc, degrees_to_use, 17);
-        [enc setBytes:cam_pos_arr->data() length:sizeof(*cam_pos_arr) atIndex:18];
+        [enc setBytes:cam_pos_arr.data() length:sizeof(cam_pos_arr) atIndex:18];
         ENC_BUF(enc, features_dc, 19); ENC_BUF(enc, features_rest, 20);
         ENC_BUF(enc, colors, 21); ENC_BUF(enc, aabb, 22);
         ENC_BUF(enc, opacity_comp, 23); ENC_SCALAR(enc, use_mip_splatting_u32, 24);
@@ -1758,7 +1760,7 @@ std::tuple<MTensor, float> msplat_train_step(
         ENC_BUF(enc, depths, 2);
         ENC_BUF(enc, radii_out, 3);
         ENC_BUF(enc, cum_tiles_hit, 4);
-        [enc setBytes:tile_bounds_arr->data() length:sizeof(*tile_bounds_arr) atIndex:5];
+        [enc setBytes:tile_bounds_arr.data() length:sizeof(tile_bounds_arr) atIndex:5];
         ENC_SCALAR(enc, capacity_u32, 6);
         if (use_dynamic_u32_keys) {
             ENC_BUF(enc, isect_ids_u32, 7);
@@ -1891,7 +1893,7 @@ std::tuple<MTensor, float> msplat_train_step(
             ENC_BUF(enc, depths, 2);
             ENC_BUF(enc, radii_out, 3);
             ENC_BUF(enc, aabb, 4);
-            [enc setBytes:tile_bounds_arr->data() length:sizeof(*tile_bounds_arr) atIndex:5];
+            [enc setBytes:tile_bounds_arr.data() length:sizeof(tile_bounds_arr) atIndex:5];
             ENC_BUF(enc, g_tcache.tile_scatter_counters, 6);
             ENC_BUF(enc, g_tcache.prealloc_bins, 7);
             ENC_BUF(enc, g_tcache.overflow_flag, 8);
@@ -1934,30 +1936,30 @@ std::tuple<MTensor, float> msplat_train_step(
             // Monolithic
             MTLSize num_tg = MTLSizeMake((img_width + RAST_BLOCK_X - 1) / RAST_BLOCK_X, (img_height + RAST_BLOCK_Y - 1) / RAST_BLOCK_Y, 1);
             [enc setComputePipelineState:ctx->nd_rasterize_forward_kernel_cpso];
-            [enc setBytes:tile_bounds_arr->data() length:sizeof(*tile_bounds_arr) atIndex:0];
-            [enc setBytes:img_size_dim3->data() length:sizeof(*img_size_dim3) atIndex:1];
+            [enc setBytes:tile_bounds_arr.data() length:sizeof(tile_bounds_arr) atIndex:0];
+            [enc setBytes:img_size_dim3.data() length:sizeof(img_size_dim3) atIndex:1];
             ENC_SCALAR(enc, channels, 2); ENC_BUF(enc, tile_bins, 3);
             ENC_BUF(enc, packed_xy_opac, 4); ENC_BUF(enc, packed_conic, 5); ENC_BUF(enc, packed_rgb, 6);
             ENC_BUF(enc, packed_opacity_comp, 7);
             ENC_BUF(enc, final_Ts, 8); ENC_BUF(enc, final_idx, 9); ENC_BUF(enc, out_img, 10);
             ENC_BUF(enc, background, 11);
-            [enc setBytes:block_size_dim2->data() length:sizeof(*block_size_dim2) atIndex:12];
+            [enc setBytes:block_size_dim2.data() length:sizeof(block_size_dim2) atIndex:12];
             [enc dispatchThreadgroups:num_tg threadsPerThreadgroup:MTLSizeMake(RAST_BLOCK_X, RAST_BLOCK_Y, 1)];
         } else {
             // Chunked
             uint32_t tile_x = (img_width + RAST_BLOCK_X - 1) / RAST_BLOCK_X;
             uint32_t tile_y = (img_height + RAST_BLOCK_Y - 1) / RAST_BLOCK_Y;
             uint32_t num_pix = img_width * img_height;
-            auto img_sz_2 = std::make_shared<std::array<uint32_t, 2>>(std::array<uint32_t, 2>{img_width, img_height});
+            std::array<uint32_t, 2> img_sz_2 = {img_width, img_height};
             [enc setComputePipelineState:ctx->rasterize_forward_chunked_kernel_cpso];
-            [enc setBytes:tile_bounds_arr->data() length:sizeof(*tile_bounds_arr) atIndex:0];
-            [enc setBytes:img_size_dim3->data() length:sizeof(*img_size_dim3) atIndex:1];
+            [enc setBytes:tile_bounds_arr.data() length:sizeof(tile_bounds_arr) atIndex:0];
+            [enc setBytes:img_size_dim3.data() length:sizeof(img_size_dim3) atIndex:1];
             ENC_SCALAR(enc, channels, 2); ENC_BUF(enc, tile_bins, 3);
             ENC_BUF(enc, packed_xy_opac, 4); ENC_BUF(enc, packed_conic, 5); ENC_BUF(enc, packed_rgb, 6);
             ENC_BUF(enc, packed_opacity_comp, 7);
             ENC_BUF(enc, g_tcache.chunk_T, 8); ENC_BUF(enc, g_tcache.chunk_C, 9); ENC_BUF(enc, g_tcache.chunk_final_idx, 10);
             ENC_SCALAR(enc, CHUNK_SIZE, 11); ENC_SCALAR(enc, K_max, 12);
-            [enc setBytes:block_size_dim2->data() length:sizeof(*block_size_dim2) atIndex:13];
+            [enc setBytes:block_size_dim2.data() length:sizeof(block_size_dim2) atIndex:13];
             [enc dispatchThreadgroups:MTLSizeMake(tile_x, tile_y, K_max) threadsPerThreadgroup:MTLSizeMake(RAST_BLOCK_X, RAST_BLOCK_Y, 1)];
             [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
             // Merge
@@ -1966,7 +1968,7 @@ std::tuple<MTensor, float> msplat_train_step(
             ENC_BUF(enc, g_tcache.chunk_T, 2); ENC_BUF(enc, g_tcache.chunk_C, 3); ENC_BUF(enc, g_tcache.chunk_final_idx, 4);
             ENC_BUF(enc, final_Ts, 5); ENC_BUF(enc, final_idx, 6); ENC_BUF(enc, out_img, 7);
             ENC_BUF(enc, background, 8);
-            [enc setBytes:img_sz_2->data() length:sizeof(*img_sz_2) atIndex:9];
+            [enc setBytes:img_sz_2.data() length:sizeof(img_sz_2) atIndex:9];
             [enc dispatchThreads:MTLSizeMake(img_width, img_height, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
         }
     };
@@ -1979,7 +1981,7 @@ std::tuple<MTensor, float> msplat_train_step(
         if (ssim_weight <= 0.0f) {
             [enc setComputePipelineState:ctx->l1_loss_fwd_bwd_kernel_cpso];
             ENC_BUF(enc, out_img, 0); ENC_BUF(enc, gt_packed, 1);
-            [enc setBytes:loss_img_size->data() length:sizeof(*loss_img_size) atIndex:2];
+            [enc setBytes:loss_img_size.data() length:sizeof(loss_img_size) atIndex:2];
             ENC_SCALAR(enc, loss_inv_n, 3);
             ENC_BUF(enc, v_rendered, 4); ENC_BUF(enc, loss_sum, 5);
             ENC_BUF(enc, background, 6); ENC_SCALAR(enc, composite_gt_u32, 7);
@@ -1992,7 +1994,7 @@ std::tuple<MTensor, float> msplat_train_step(
         // Pass 1: H conv on images → ssim_h_buf
         [enc setComputePipelineState:ctx->ssim_h_fwd_kernel_cpso];
         ENC_BUF(enc, out_img, 0); ENC_BUF(enc, gt_packed, 1);
-        [enc setBytes:loss_img_size->data() length:sizeof(*loss_img_size) atIndex:2];
+        [enc setBytes:loss_img_size.data() length:sizeof(loss_img_size) atIndex:2];
         ENC_BUF(enc, g_tcache.ssim_h_buf, 3);
         ENC_BUF(enc, background, 4); ENC_SCALAR(enc, composite_gt_u32, 5);
         [enc dispatchThreadgroups:loss_tg_count threadsPerThreadgroup:tg];
@@ -2001,7 +2003,7 @@ std::tuple<MTensor, float> msplat_train_step(
         [enc setComputePipelineState:ctx->ssim_fused_v_fwd_h_bwd_kernel_cpso];
         ENC_BUF(enc, out_img, 0); ENC_BUF(enc, gt_packed, 1);
         ENC_BUF(enc, g_tcache.ssim_h_buf, 2);
-        [enc setBytes:loss_img_size->data() length:sizeof(*loss_img_size) atIndex:3];
+        [enc setBytes:loss_img_size.data() length:sizeof(loss_img_size) atIndex:3];
         ENC_SCALAR(enc, ssim_weight, 4); ENC_SCALAR(enc, loss_inv_n, 5);
         ENC_BUF(enc, loss_intermediates, 6); ENC_BUF(enc, loss_sum, 7);
         ENC_BUF(enc, background, 8); ENC_SCALAR(enc, composite_gt_u32, 9);
@@ -2014,7 +2016,7 @@ std::tuple<MTensor, float> msplat_train_step(
         [enc setComputePipelineState:ctx->ssim_v_bwd_kernel_cpso];
         ENC_BUF(enc, out_img, 0); ENC_BUF(enc, gt_packed, 1);
         ENC_BUF(enc, loss_intermediates, 2);
-        [enc setBytes:loss_img_size->data() length:sizeof(*loss_img_size) atIndex:3];
+        [enc setBytes:loss_img_size.data() length:sizeof(loss_img_size) atIndex:3];
         ENC_SCALAR(enc, ssim_weight, 4); ENC_SCALAR(enc, loss_inv_n, 5);
         ENC_BUF(enc, v_rendered, 6);
         ENC_BUF(enc, background, 7); ENC_SCALAR(enc, composite_gt_u32, 8);
@@ -2031,7 +2033,7 @@ std::tuple<MTensor, float> msplat_train_step(
             id<MTLComputeCommandEncoder> enc = [command_buffer computeCommandEncoder];
             [enc setComputePipelineState:ctx->lpips_prepare_nchw_kernel_cpso];
             ENC_BUF(enc, out_img, 0); ENC_BUF(enc, gt_packed, 1);
-            [enc setBytes:loss_img_size->data() length:sizeof(*loss_img_size) atIndex:2];
+            [enc setBytes:loss_img_size.data() length:sizeof(loss_img_size) atIndex:2];
             ENC_BUF(enc, g_tcache.lpips_rendered_nchw, 3);
             ENC_BUF(enc, g_tcache.lpips_gt_nchw, 4);
             ENC_BUF(enc, background, 5); ENC_SCALAR(enc, composite_gt_u32, 6);
@@ -2070,7 +2072,7 @@ std::tuple<MTensor, float> msplat_train_step(
             [enc setComputePipelineState:ctx->lpips_apply_grad_kernel_cpso];
             ENC_BUF(enc, g_tcache.lpips_grad_nchw, 0);
             ENC_BUF(enc, g_tcache.lpips_loss, 1);
-            [enc setBytes:loss_img_size->data() length:sizeof(*loss_img_size) atIndex:2];
+            [enc setBytes:loss_img_size.data() length:sizeof(loss_img_size) atIndex:2];
             ENC_SCALAR(enc, lpips_loss_weight, 3);
             ENC_BUF(enc, v_rendered, 4);
             ENC_BUF(enc, loss_sum, 5);
@@ -2086,8 +2088,8 @@ std::tuple<MTensor, float> msplat_train_step(
             // Monolithic
             MTLSize num_tg = MTLSizeMake((img_width+RAST_BLOCK_X-1)/RAST_BLOCK_X, (img_height+RAST_BLOCK_Y-1)/RAST_BLOCK_Y, 1);
             [enc setComputePipelineState:ctx->rasterize_backward_kernel_cpso];
-            [enc setBytes:rast_tb->data() length:sizeof(*rast_tb) atIndex:0];
-            [enc setBytes:rast_isz->data() length:sizeof(*rast_isz) atIndex:1];
+            [enc setBytes:rast_tb.data() length:sizeof(rast_tb) atIndex:0];
+            [enc setBytes:rast_isz.data() length:sizeof(rast_isz) atIndex:1];
             ENC_BUF(enc, gaussian_ids, 2); ENC_BUF(enc, tile_bins, 3);
             ENC_BUF(enc, packed_xy_opac, 4); ENC_BUF(enc, packed_conic, 5);
             ENC_BUF(enc, packed_rgb, 6);
@@ -2105,20 +2107,20 @@ std::tuple<MTensor, float> msplat_train_step(
             uint32_t tile_x = (img_width + RAST_BLOCK_X - 1) / RAST_BLOCK_X;
             uint32_t tile_y = (img_height + RAST_BLOCK_Y - 1) / RAST_BLOCK_Y;
             uint32_t num_pix = img_width * img_height;
-            auto bwd_img_sz = std::make_shared<std::array<uint32_t, 2>>(std::array<uint32_t, 2>{img_width, img_height});
+            std::array<uint32_t, 2> bwd_img_sz = {img_width, img_height};
             // Phase 1: prefix_T and after_C
             [enc setComputePipelineState:ctx->compute_chunk_prefix_suffix_kernel_cpso];
             ENC_SCALAR(enc, num_pix, 0); ENC_SCALAR(enc, bwd_K_max, 1);
             ENC_BUF(enc, g_tcache.chunk_T, 2); ENC_BUF(enc, g_tcache.chunk_C, 3);
             ENC_BUF(enc, g_tcache.chunk_final_idx, 4);
             ENC_BUF(enc, g_tcache.prefix_T, 5); ENC_BUF(enc, g_tcache.after_C, 6);
-            [enc setBytes:bwd_img_sz->data() length:sizeof(*bwd_img_sz) atIndex:7];
+            [enc setBytes:bwd_img_sz.data() length:sizeof(bwd_img_sz) atIndex:7];
             [enc dispatchThreads:MTLSizeMake(img_width, img_height, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
             [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
             // Phase 2: backward chunked
             [enc setComputePipelineState:ctx->rasterize_backward_chunked_kernel_cpso];
-            [enc setBytes:rast_tb->data() length:sizeof(*rast_tb) atIndex:0];
-            [enc setBytes:rast_isz->data() length:sizeof(*rast_isz) atIndex:1];
+            [enc setBytes:rast_tb.data() length:sizeof(rast_tb) atIndex:0];
+            [enc setBytes:rast_isz.data() length:sizeof(rast_isz) atIndex:1];
             ENC_BUF(enc, gaussian_ids, 2); ENC_BUF(enc, tile_bins, 3);
             ENC_BUF(enc, packed_xy_opac, 4); ENC_BUF(enc, packed_conic, 5);
             ENC_BUF(enc, packed_rgb, 6);
@@ -2145,16 +2147,16 @@ std::tuple<MTensor, float> msplat_train_step(
         float beta1, beta2, eps;
         uint32_t reduce_second_moment;
     };
-    auto sh_adam_hp = std::make_shared<SHAdamParams>();
+    SHAdamParams sh_adam_hp{};
     if (num_adam_groups >= 5) {
-        sh_adam_hp->dc_step_size = adam_step_sizes[3];
-        sh_adam_hp->dc_bc2_sqrt = adam_bc2_sqrts[3];
-        sh_adam_hp->rest_step_size = adam_step_sizes[4];
-        sh_adam_hp->rest_bc2_sqrt = adam_bc2_sqrts[4];
-        sh_adam_hp->beta1 = adam_beta1;
-        sh_adam_hp->beta2 = adam_beta2;
-        sh_adam_hp->eps = adam_eps;
-        sh_adam_hp->reduce_second_moment = reduce_second_moment ? 1u : 0u;
+        sh_adam_hp.dc_step_size = adam_step_sizes[3];
+        sh_adam_hp.dc_bc2_sqrt = adam_bc2_sqrts[3];
+        sh_adam_hp.rest_step_size = adam_step_sizes[4];
+        sh_adam_hp.rest_bc2_sqrt = adam_bc2_sqrts[4];
+        sh_adam_hp.beta1 = adam_beta1;
+        sh_adam_hp.beta2 = adam_beta2;
+        sh_adam_hp.eps = adam_eps;
+        sh_adam_hp.reduce_second_moment = reduce_second_moment ? 1u : 0u;
     }
 
     auto encode_proj_sh_bwd_adam = [&](id<MTLComputeCommandEncoder> enc) {
@@ -2163,13 +2165,13 @@ std::tuple<MTensor, float> msplat_train_step(
         ENC_SCALAR(enc, num_points, 0); ENC_BUF(enc, means3d, 1); ENC_BUF(enc, scales, 2);
         ENC_SCALAR(enc, glob_scale, 3); ENC_BUF(enc, quats, 4);
         ENC_BUF(enc, viewmat, 5); ENC_BUF(enc, projmat, 6);
-        [enc setBytes:proj_bwd_intr->data() length:sizeof(*proj_bwd_intr) atIndex:7];
-        [enc setBytes:proj_bwd_isz->data() length:sizeof(*proj_bwd_isz) atIndex:8];
+        [enc setBytes:proj_bwd_intr.data() length:sizeof(proj_bwd_intr) atIndex:7];
+        [enc setBytes:proj_bwd_isz.data() length:sizeof(proj_bwd_isz) atIndex:8];
         ENC_BUF(enc, radii_out, 9); ENC_BUF(enc, conics, 10);
         ENC_BUF(enc, v_xy, 11); ENC_BUF(enc, v_depth, 12); ENC_BUF(enc, v_conic, 13);
         ENC_BUF(enc, v_mean3d, 14); ENC_BUF(enc, v_scale, 15); ENC_BUF(enc, v_quat, 16);
         ENC_SCALAR(enc, degree, 17); ENC_SCALAR(enc, degrees_to_use, 18);
-        [enc setBytes:cam_pos_arr->data() length:sizeof(*cam_pos_arr) atIndex:19];
+        [enc setBytes:cam_pos_arr.data() length:sizeof(cam_pos_arr) atIndex:19];
         ENC_BUF(enc, v_colors_rast, 20);
         // Fused SH backward + Adam: pass params + optimizer state instead of gradient buffers
         [enc setBuffer:adam_params[3].buffer() offset:0 atIndex:21];  // features_dc params
@@ -2178,7 +2180,7 @@ std::tuple<MTensor, float> msplat_train_step(
         [enc setBuffer:adam_exp_avg_sq[3].buffer() offset:0 atIndex:24]; // dc exp_avg_sq
         [enc setBuffer:adam_exp_avg[4].buffer() offset:0 atIndex:25]; // rest exp_avg
         [enc setBuffer:adam_exp_avg_sq[4].buffer() offset:0 atIndex:26]; // rest exp_avg_sq
-        [enc setBytes:sh_adam_hp.get() length:sizeof(SHAdamParams) atIndex:27];
+        [enc setBytes:&sh_adam_hp length:sizeof(sh_adam_hp) atIndex:27];
         [enc dispatchThreads:MTLSizeMake(num_points, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
         // Adam for remaining groups (skip 3=featuresDc, 4=featuresRest — fused above)
         if (num_adam_groups > 0) {
@@ -2190,7 +2192,7 @@ std::tuple<MTensor, float> msplat_train_step(
                 NSUInteger atpg = MIN(ctx->fused_adam_kernel_cpso.maxTotalThreadsPerThreadgroup, (NSUInteger)n);
                 [enc setComputePipelineState:ctx->fused_adam_kernel_cpso];
                 [enc setBuffer:adam_params[g].buffer() offset:0 atIndex:0];
-                [enc setBuffer:(*adam_grads)[g].buffer() offset:0 atIndex:1];
+                [enc setBuffer:adam_grads[g].buffer() offset:0 atIndex:1];
                 [enc setBuffer:adam_exp_avg[g].buffer() offset:0 atIndex:2];
                 [enc setBuffer:adam_exp_avg_sq[g].buffer() offset:0 atIndex:3];
                 ENC_SCALAR(enc, adam_step_sizes[g], 4);

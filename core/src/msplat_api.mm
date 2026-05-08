@@ -80,7 +80,8 @@ struct Trainer::Impl {
     std::unique_ptr<CameraPrefetcher> cameraPrefetcher;
 
     void resetCameraPrefetcher() {
-        cameraPrefetcher = std::make_unique<CameraPrefetcher>(ds->trainCams, 42);
+        size_t workerCount = static_cast<size_t>(std::clamp(config.imagePrefetchWorkers, 1, 8));
+        cameraPrefetcher = std::make_unique<CameraPrefetcher>(ds->trainCams, 42, workerCount);
     }
 
     size_t nextCamera() {
@@ -378,6 +379,7 @@ static msplat::Config configFromC(MsplatConfig c) {
     cfg.lpipsLossWeight = c.lpipsLossWeight;
     cfg.randomInitSceneScale = c.randomInitSceneScale;
     cfg.reduceSecondMoment = c.reduceSecondMoment;
+    cfg.imagePrefetchWorkers = c.imagePrefetchWorkers;
     cfg.matchAlphaWeight = c.matchAlphaWeight;
     cfg.backgroundNoiseStrength = c.backgroundNoiseStrength;
     cfg.opacityDecay = c.opacityDecay;

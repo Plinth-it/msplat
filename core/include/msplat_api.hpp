@@ -50,6 +50,7 @@ struct Config {
     float lpipsLossWeight = 0.0f;
     float randomInitSceneScale = 0.0f;  // 0 estimates from cameras when no point cloud exists
     bool reduceSecondMoment = false;
+    int imagePrefetchWorkers = 2;
 };
 
 // ── Stats ───────────────────────────────────────────────────────────────────
