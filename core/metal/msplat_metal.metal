@@ -954,7 +954,7 @@ kernel void map_gaussian_to_intersects_kernel(
     uint3 gp [[thread_position_in_grid]]
 ) {
     uint idx = gp.x;
-    if (idx >= num_points)
+    if (idx >= (uint)num_points)
         return;
     if (radii[idx] <= 0)
         return;
@@ -989,6 +989,59 @@ kernel void map_gaussian_to_intersects_kernel(
     }
 }
 
+kernel void map_gaussian_to_intersects_u32_kernel(
+    constant int& num_points,
+    constant float* xys, // float2
+    constant float* depths,
+    constant int* radii,
+    constant int32_t* num_tiles_hit,
+    constant uint3& tile_bounds,
+    constant uint& capacity,
+    device uint* isect_ids,
+    device int32_t* gaussian_ids,
+    constant float* aabb, // float2: per-axis pixel extents
+    device atomic_uint* overflow_flag,
+    constant float* conics,
+    constant float* opacities,
+    constant float* opacity_comp,
+    uint3 gp [[thread_position_in_grid]]
+) {
+    uint idx = gp.x;
+    if (idx >= (uint)num_points)
+        return;
+    if (radii[idx] <= 0)
+        return;
+    float2 center = read_packed_float2(xys, idx);
+    float3 conic = read_packed_float3(conics, idx);
+    float opacity = (1.0f / (1.0f + exp(-opacities[idx]))) * opacity_comp[idx];
+    if (!isfinite(opacity) || opacity < (1.0f / 255.0f))
+        return;
+    float power_threshold = log(255.0f * opacity);
+
+    uint2 tile_min, tile_max;
+    get_tile_bbox(center, read_packed_float2(aabb, idx), (int3)tile_bounds, tile_min, tile_max);
+
+    int32_t cur_idx = (idx == 0) ? 0 : num_tiles_hit[idx - 1];
+    // project_and_sh_forward_kernel culls non-contributing/behind-camera splats
+    // before count prefixing, so positive float bits sort monotonically here.
+    uint depth_q16 = as_type<uint>(depths[idx]) >> 16;
+    for (uint i = tile_min.y; i < tile_max.y; ++i) {
+        for (uint j = tile_min.x; j < tile_max.x; ++j) {
+            if (!will_primitive_contribute(tile_rect(uint2(j, i)), center, conic, power_threshold)) {
+                continue;
+            }
+            if ((uint)cur_idx >= capacity) {
+                atomic_store_explicit(overflow_flag, 1u, memory_order_relaxed);
+                return;
+            }
+            uint tile_id = i * tile_bounds.x + j;
+            isect_ids[cur_idx] = (tile_id << 16) | depth_q16;
+            gaussian_ids[cur_idx] = idx;
+            ++cur_idx;
+        }
+    }
+}
+
 // Find start/end offsets for each tile in the sorted intersection array.
 kernel void get_tile_bin_edges_kernel(
     constant uint& capacity,
@@ -1012,6 +1065,33 @@ kernel void get_tile_bin_edges_kernel(
         return;
     }
     int32_t prev_tile_idx = (int32_t)(((uint64_t)isect_ids_sorted[idx - 1]) >> 32);
+    if (prev_tile_idx != cur_tile_idx) {
+        write_packed_int2y(tile_bins, prev_tile_idx, idx);
+        write_packed_int2x(tile_bins, cur_tile_idx, idx);
+        return;
+    }
+}
+
+kernel void get_tile_bin_edges_u32_kernel(
+    constant uint& capacity,
+    constant uint* isect_ids_sorted,
+    device int* tile_bins, // int2
+    device const int32_t* cum_tiles_hit,
+    constant uint& num_points,
+    uint idx [[thread_position_in_grid]]
+) {
+    uint num_intersects = min(capacity, (uint)cum_tiles_hit[num_points - 1]);
+    if (idx >= num_intersects)
+        return;
+    int32_t cur_tile_idx = (int32_t)(isect_ids_sorted[idx] >> 16);
+    if (idx == 0 || idx == num_intersects - 1) {
+        if (idx == 0)
+            write_packed_int2x(tile_bins, cur_tile_idx, 0);
+        if (idx == num_intersects - 1)
+            write_packed_int2y(tile_bins, cur_tile_idx, num_intersects);
+        return;
+    }
+    int32_t prev_tile_idx = (int32_t)(isect_ids_sorted[idx - 1] >> 16);
     if (prev_tile_idx != cur_tile_idx) {
         write_packed_int2y(tile_bins, prev_tile_idx, idx);
         write_packed_int2x(tile_bins, cur_tile_idx, idx);
@@ -2570,6 +2650,37 @@ kernel void radix_sort_histogram_kernel(
     counts[bid * RS_RADIX + tid] = atomic_load_explicit(&local_hist[tid], memory_order_relaxed);
 }
 
+kernel void radix_sort_histogram_u32_kernel(
+    constant uint& capacity        [[buffer(0)]],
+    device const uint* keys_in     [[buffer(1)]],
+    device uint* counts            [[buffer(2)]],
+    constant uint& shift           [[buffer(3)]],
+    device const int32_t* cum_tiles_hit [[buffer(4)]],
+    constant uint& num_points      [[buffer(5)]],
+    uint tid [[thread_position_in_threadgroup]],
+    uint bid [[threadgroup_position_in_grid]]
+) {
+    uint N = min(capacity, (uint)cum_tiles_hit[num_points - 1]);
+
+    if (bid * RS_TG_SIZE >= N) {
+        counts[bid * RS_RADIX + tid] = 0;
+        return;
+    }
+
+    threadgroup atomic_uint local_hist[RS_RADIX];
+    atomic_store_explicit(&local_hist[tid], 0, memory_order_relaxed);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint global_idx = bid * RS_TG_SIZE + tid;
+    if (global_idx < N) {
+        uint digit = extract_bits((uint64_t)keys_in[global_idx], shift, 8);
+        atomic_fetch_add_explicit(&local_hist[digit], 1, memory_order_relaxed);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    counts[bid * RS_RADIX + tid] = atomic_load_explicit(&local_hist[tid], memory_order_relaxed);
+}
+
 kernel void radix_sort_scan_kernel(
     device uint* counts                     [[buffer(0)]],
     constant uint& num_blocks               [[buffer(1)]],
@@ -2614,6 +2725,67 @@ kernel void radix_sort_scan_kernel(
     uint global_offset = digit_totals[d];
     for (uint b = 0; b < actual_num_blocks; b++) {
         counts[b * RS_RADIX + d] += global_offset;
+    }
+}
+
+kernel void radix_sort_scatter_u32_kernel(
+    constant uint& capacity            [[buffer(0)]],
+    device const uint* keys_in         [[buffer(1)]],
+    device const int32_t* vals_in      [[buffer(2)]],
+    device uint* keys_out              [[buffer(3)]],
+    device int32_t* vals_out           [[buffer(4)]],
+    device const uint* counts          [[buffer(5)]],
+    constant uint& shift               [[buffer(6)]],
+    device const int32_t* cum_tiles_hit [[buffer(7)]],
+    constant uint& num_points          [[buffer(8)]],
+    uint tid [[thread_position_in_threadgroup]],
+    uint bid [[threadgroup_position_in_grid]],
+    uint sg_id [[simdgroup_index_in_threadgroup]],
+    uint sg_lane [[thread_index_in_simdgroup]]
+) {
+    uint N = min(capacity, (uint)cum_tiles_hit[num_points - 1]);
+    if (bid * RS_TG_SIZE >= N) return;
+
+    threadgroup uchar shared_digits[RS_TG_SIZE];
+    uint global_idx = bid * RS_TG_SIZE + tid;
+
+    uint my_key = 0;
+    int32_t my_val = 0;
+    uint my_digit = 0;
+    bool valid = (global_idx < N);
+
+    if (valid) {
+        my_key = keys_in[global_idx];
+        my_val = vals_in[global_idx];
+        my_digit = extract_bits((uint64_t)my_key, shift, 8);
+    }
+
+    shared_digits[tid] = (uchar)my_digit;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint sg_rank = 0;
+    for (ushort l = 0; l < 32; l++) {
+        uint other = simd_broadcast(my_digit, l);
+        if (l < sg_lane && other == my_digit) sg_rank++;
+    }
+
+    uint cross_rank = 0;
+    uint preceding_end = sg_id * 32;
+    uint full_words = preceding_end / 4;
+    threadgroup uint* digits_u32 = (threadgroup uint*)shared_digits;
+    for (uint i = 0; i < full_words; i++) {
+        uint four = digits_u32[i];
+        if (((four >>  0) & 0xFF) == my_digit) cross_rank++;
+        if (((four >>  8) & 0xFF) == my_digit) cross_rank++;
+        if (((four >> 16) & 0xFF) == my_digit) cross_rank++;
+        if (((four >> 24) & 0xFF) == my_digit) cross_rank++;
+    }
+    uint rank = cross_rank + sg_rank;
+
+    if (valid) {
+        uint global_pos = counts[bid * RS_RADIX + my_digit] + rank;
+        keys_out[global_pos] = my_key;
+        vals_out[global_pos] = my_val;
     }
 }
 

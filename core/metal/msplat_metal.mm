@@ -37,10 +37,11 @@ static bool g_profile_stages_checked = false;
 
 // Stage names for training pipeline
 static const char* g_train_stage_names[] = {
-    "blit_zero", "proj_sh_fwd", "prefix_sort_pack", "rast_fwd",
-    "loss_fwd_bwd", "rast_bwd", "proj_sh_bwd_adam", "grad_stats"
+    "blit_zero", "proj_count", "map_intersects", "radix_sort",
+    "tile_edges", "pack_sorted", "rast_fwd", "loss_fwd_bwd",
+    "rast_bwd", "proj_sh_bwd_adam", "grad_stats"
 };
-static constexpr int N_TRAIN_STAGES = 8;
+static constexpr int N_TRAIN_STAGES = 11;
 
 static std::mutex g_stage_timing_mutex;
 // Per-stage accumulated times (ms), indexed by stage
@@ -147,6 +148,10 @@ struct MetalContext {
     id<MTLComputePipelineState> radix_sort_histogram_kernel_cpso;
     id<MTLComputePipelineState> radix_sort_scan_kernel_cpso;
     id<MTLComputePipelineState> radix_sort_scatter_kernel_cpso;
+    id<MTLComputePipelineState> map_gaussian_to_intersects_u32_kernel_cpso;
+    id<MTLComputePipelineState> get_tile_bin_edges_u32_kernel_cpso;
+    id<MTLComputePipelineState> radix_sort_histogram_u32_kernel_cpso;
+    id<MTLComputePipelineState> radix_sort_scatter_u32_kernel_cpso;
     // Legacy tile-local sorting
     id<MTLComputePipelineState> scatter_to_prealloc_bins_kernel_cpso;
     id<MTLComputePipelineState> bitonic_sort_per_tile_kernel_cpso;
@@ -293,6 +298,10 @@ MetalContext* init_msplat_metal_context() {
     ctx->radix_sort_histogram_kernel_cpso         = load(@"radix_sort_histogram_kernel");
     ctx->radix_sort_scan_kernel_cpso              = load(@"radix_sort_scan_kernel");
     ctx->radix_sort_scatter_kernel_cpso           = load(@"radix_sort_scatter_kernel");
+    ctx->map_gaussian_to_intersects_u32_kernel_cpso = load(@"map_gaussian_to_intersects_u32_kernel");
+    ctx->get_tile_bin_edges_u32_kernel_cpso       = load(@"get_tile_bin_edges_u32_kernel");
+    ctx->radix_sort_histogram_u32_kernel_cpso     = load(@"radix_sort_histogram_u32_kernel");
+    ctx->radix_sort_scatter_u32_kernel_cpso       = load(@"radix_sort_scatter_u32_kernel");
     // Legacy tile-local sorting
     ctx->scatter_to_prealloc_bins_kernel_cpso      = load(@"scatter_to_prealloc_bins_kernel");
     ctx->bitonic_sort_per_tile_kernel_cpso        = load(@"bitonic_sort_per_tile_kernel");
@@ -379,6 +388,44 @@ MetalContext* get_global_context() {
 #define ENC_SCALAR(encoder, x, i) [encoder setBytes:&x length:sizeof(x) atIndex:i]
 #define ENC_ARRAY(encoder, x, i) [encoder setBytes:x length:sizeof(x) atIndex:i]
 #define ENC_BUF(encoder, x, i) [encoder setBuffer:x.buffer() offset:0 atIndex:i]
+
+static uint32_t prefix_sum_block_count(uint32_t count) {
+    return std::max<uint32_t>(1, (count + 1023u) / 1024u);
+}
+
+static void encode_int32_prefix_sum(MetalContext *ctx, id<MTLComputeCommandEncoder> enc,
+                                    uint32_t count, MTensor &input, MTensor &output,
+                                    MTensor &block_totals) {
+    if (count <= 1024u) {
+        [enc setComputePipelineState:ctx->prefix_sum_kernel_cpso];
+        ENC_SCALAR(enc, count, 0);
+        ENC_BUF(enc, input, 1);
+        ENC_BUF(enc, output, 2);
+        [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1024, 1, 1)];
+        return;
+    }
+
+    uint32_t block_count = prefix_sum_block_count(count);
+    [enc setComputePipelineState:ctx->block_reduce_kernel_cpso];
+    ENC_SCALAR(enc, count, 0);
+    ENC_BUF(enc, input, 1);
+    ENC_BUF(enc, block_totals, 2);
+    [enc dispatchThreadgroups:MTLSizeMake(block_count, 1, 1) threadsPerThreadgroup:MTLSizeMake(1024, 1, 1)];
+    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+
+    [enc setComputePipelineState:ctx->prefix_sum_inplace_kernel_cpso];
+    ENC_SCALAR(enc, block_count, 0);
+    ENC_BUF(enc, block_totals, 1);
+    [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1024, 1, 1)];
+    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+
+    [enc setComputePipelineState:ctx->block_scan_propagate_kernel_cpso];
+    ENC_SCALAR(enc, count, 0);
+    ENC_BUF(enc, input, 1);
+    ENC_BUF(enc, output, 2);
+    ENC_BUF(enc, block_totals, 3);
+    [enc dispatchThreadgroups:MTLSizeMake(block_count, 1, 1) threadsPerThreadgroup:MTLSizeMake(1024, 1, 1)];
+}
 
 id<MTLDevice> msplat_device() {
     return get_global_context()->device;
@@ -469,6 +516,7 @@ struct FusedTensorCache {
     MTensor gaussian_ids;
     MTensor gaussian_ids_tmp;
     MTensor isect_ids, isect_ids_tmp;
+    MTensor isect_ids_u32, isect_ids_u32_tmp;
     MTensor radix_counts;
     MTensor packed_xy_opac, packed_conic, packed_rgb, packed_opacity_comp;
     MTensor out_img, final_Ts, final_idx;
@@ -508,7 +556,8 @@ struct FusedTensorCache {
 
     void ensure_forward(int np, int64_t cap, int ih, int iw, int nt,
                         bool needs_ssim_buffers, bool needs_lpips_buffers,
-                        bool needs_fixed_tile_bins, id<MTLDevice> dev) {
+                        bool needs_fixed_tile_bins, bool needs_dynamic_u32_keys,
+                        id<MTLDevice> dev) {
         if (np != fwd_num_points) {
             fwd_num_points = np;
             xys = mtensor_empty(dev, {np, 2}, DType::Float32);
@@ -520,7 +569,11 @@ struct FusedTensorCache {
             cum_tiles_hit = mtensor_empty(dev, {np}, DType::Int32);
             colors = mtensor_empty(dev, {np, 3}, DType::Float32);
             aabb = mtensor_empty(dev, {np, 2}, DType::Float32);
-            block_totals = mtensor_empty(dev, {(np + 1023) / 1024}, DType::Int32);
+        }
+        int64_t prefix_count_capacity = std::max<int64_t>(np, nt);
+        int64_t prefix_blocks = std::max<int64_t>(1, (prefix_count_capacity + 1023) / 1024);
+        if (!block_totals.defined() || block_totals.size(0) < prefix_blocks) {
+            block_totals = mtensor_empty(dev, {prefix_blocks}, DType::Int32);
         }
         if (cap != capacity) {
             capacity = cap;
@@ -528,6 +581,13 @@ struct FusedTensorCache {
             gaussian_ids_tmp = mtensor_empty(dev, {cap}, DType::Int32);
             isect_ids = mtensor_empty(dev, {cap}, DType::Int64);
             isect_ids_tmp = mtensor_empty(dev, {cap}, DType::Int64);
+            if (needs_dynamic_u32_keys) {
+                isect_ids_u32 = mtensor_empty(dev, {cap}, DType::UInt32);
+                isect_ids_u32_tmp = mtensor_empty(dev, {cap}, DType::UInt32);
+            } else {
+                isect_ids_u32.reset();
+                isect_ids_u32_tmp.reset();
+            }
             packed_xy_opac = mtensor_empty(dev, {cap, 3}, DType::Float32);
             packed_conic = mtensor_empty(dev, {cap, 3}, DType::Float32);
             packed_rgb = mtensor_empty(dev, {cap, 3}, DType::Float32);
@@ -538,6 +598,13 @@ struct FusedTensorCache {
                 radix_block_capacity = blocks;
                 radix_counts = mtensor_empty(dev, {(int64_t)blocks * 256}, DType::UInt32);
             }
+        }
+        if (needs_dynamic_u32_keys && (!isect_ids_u32.defined() || !isect_ids_u32_tmp.defined())) {
+            isect_ids_u32 = mtensor_empty(dev, {cap}, DType::UInt32);
+            isect_ids_u32_tmp = mtensor_empty(dev, {cap}, DType::UInt32);
+        } else if (!needs_dynamic_u32_keys && (isect_ids_u32.defined() || isect_ids_u32_tmp.defined())) {
+            isect_ids_u32.reset();
+            isect_ids_u32_tmp.reset();
         }
         bool image_size_changed = (ih != img_height || iw != img_width);
         if (image_size_changed) {
@@ -928,10 +995,27 @@ static uint32_t ceil_log2_u32(uint32_t v) {
 static uint32_t radix_pass_count_for_tiles(int num_tiles) {
     uint32_t tile_bits = ceil_log2_u32((uint32_t)std::max(1, num_tiles));
     uint32_t passes = (32u + tile_bits + 7u) / 8u;
-    if ((passes & 1u) != 0u) {
-        ++passes;
-    }
     return std::max(2u, std::min(8u, passes));
+}
+
+static bool should_use_32_bit_intersection_keys(int num_tiles) {
+    static const bool requested = [] {
+        const char *mode = std::getenv("MSPLAT_INTERSECTION_KEY_BITS");
+        return mode && std::strcmp(mode, "32") == 0;
+    }();
+    if (!requested) {
+        return false;
+    }
+    if (num_tiles <= 65536) {
+        return true;
+    }
+    static bool warned = false;
+    if (!warned) {
+        fprintf(stderr, "WARNING: MSPLAT_INTERSECTION_KEY_BITS=32 requested, "
+                "but %d tiles require 64-bit intersection keys.\n", num_tiles);
+        warned = true;
+    }
+    return false;
 }
 
 static int64_t read_dynamic_intersection_count(const MTensor &cum_tiles_hit, int num_points) {
@@ -1002,6 +1086,8 @@ static void forward_pipeline(
     }
     bool use_dynamic_intersections = should_use_dynamic_intersections(
         img_width, img_height, num_tiles, g_tcache.force_dynamic_intersections);
+    bool use_dynamic_u32_keys = use_dynamic_intersections
+        && should_use_32_bit_intersection_keys(num_tiles);
     g_tcache.last_sort_path_dynamic = use_dynamic_intersections;
     int64_t capacity = use_dynamic_intersections
         ? std::max<int64_t>(1, g_tcache.capacity)
@@ -1011,7 +1097,8 @@ static void forward_pipeline(
 
     // --- Cached buffer pool ---
     g_tcache.ensure_forward(num_points, capacity, img_height, img_width, num_tiles,
-                            compute_loss, false, !use_dynamic_intersections, ctx->device);
+                            compute_loss, false, !use_dynamic_intersections,
+                            use_dynamic_u32_keys, ctx->device);
     MTensor &xys = g_tcache.xys;
     MTensor &depths = g_tcache.depths;
     MTensor &radii_out = g_tcache.radii_out;
@@ -1025,6 +1112,8 @@ static void forward_pipeline(
     MTensor &gaussian_ids_tmp = g_tcache.gaussian_ids_tmp;
     MTensor &isect_ids = g_tcache.isect_ids;
     MTensor &isect_ids_tmp = g_tcache.isect_ids_tmp;
+    MTensor &isect_ids_u32 = g_tcache.isect_ids_u32;
+    MTensor &isect_ids_u32_tmp = g_tcache.isect_ids_u32_tmp;
     MTensor &radix_counts = g_tcache.radix_counts;
     MTensor &tile_bins = g_tcache.tile_bins;
     MTensor &loss_sum = g_tcache.loss_sum;
@@ -1097,47 +1186,58 @@ static void forward_pipeline(
     };
 
     auto encode_count_prefix = [&](id<MTLComputeCommandEncoder> enc) {
-        NSUInteger tg = MIN(ctx->prefix_sum_kernel_cpso.maxTotalThreadsPerThreadgroup, (NSUInteger)1024);
-        [enc setComputePipelineState:ctx->prefix_sum_kernel_cpso];
-        ENC_SCALAR(enc, num_points_u32, 0);
-        ENC_BUF(enc, num_tiles_hit, 1);
-        ENC_BUF(enc, cum_tiles_hit, 2);
-        [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+        encode_int32_prefix_sum(ctx, enc, num_points_u32, num_tiles_hit, cum_tiles_hit, g_tcache.block_totals);
     };
 
-    auto encode_prefix_map = [&](id<MTLComputeCommandEncoder> enc) {
-        uint32_t num_blocks = std::max<uint32_t>(1, (capacity_u32 + 255u) / 256u);
-        {
-            NSUInteger tpg = MIN(ctx->map_gaussian_to_intersects_kernel_cpso.maxTotalThreadsPerThreadgroup, (NSUInteger)num_points);
-            [enc setComputePipelineState:ctx->map_gaussian_to_intersects_kernel_cpso];
-            ENC_SCALAR(enc, num_points_u32, 0);
-            ENC_BUF(enc, xys, 1);
-            ENC_BUF(enc, depths, 2);
-            ENC_BUF(enc, radii_out, 3);
-            ENC_BUF(enc, cum_tiles_hit, 4);
-            [enc setBytes:tile_bounds_arr->data() length:sizeof(*tile_bounds_arr) atIndex:5];
-            ENC_SCALAR(enc, capacity_u32, 6);
-            ENC_BUF(enc, isect_ids, 7);
-            ENC_BUF(enc, gaussian_ids, 8);
-            ENC_BUF(enc, aabb, 9);
-            ENC_BUF(enc, g_tcache.overflow_flag, 10);
-            ENC_BUF(enc, conics, 11);
-            ENC_BUF(enc, opacities, 12);
-            ENC_BUF(enc, opacity_comp, 13);
-            [enc dispatchThreads:MTLSizeMake(num_points, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
-        }
-        [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+    MTensor *sorted_isect_ids = &isect_ids;
+    MTensor *sorted_isect_ids_u32 = &isect_ids_u32;
+    MTensor *sorted_gaussian_ids = &gaussian_ids;
 
-        uint32_t radix_passes = radix_pass_count_for_tiles(num_tiles);
+    auto encode_map_dynamic = [&](id<MTLComputeCommandEncoder> enc) {
+        id<MTLComputePipelineState> pso = use_dynamic_u32_keys
+            ? ctx->map_gaussian_to_intersects_u32_kernel_cpso
+            : ctx->map_gaussian_to_intersects_kernel_cpso;
+        NSUInteger tpg = MIN(pso.maxTotalThreadsPerThreadgroup, (NSUInteger)num_points);
+        [enc setComputePipelineState:pso];
+        ENC_SCALAR(enc, num_points_u32, 0);
+        ENC_BUF(enc, xys, 1);
+        ENC_BUF(enc, depths, 2);
+        ENC_BUF(enc, radii_out, 3);
+        ENC_BUF(enc, cum_tiles_hit, 4);
+        [enc setBytes:tile_bounds_arr->data() length:sizeof(*tile_bounds_arr) atIndex:5];
+        ENC_SCALAR(enc, capacity_u32, 6);
+        if (use_dynamic_u32_keys) {
+            ENC_BUF(enc, isect_ids_u32, 7);
+        } else {
+            ENC_BUF(enc, isect_ids, 7);
+        }
+        ENC_BUF(enc, gaussian_ids, 8);
+        ENC_BUF(enc, aabb, 9);
+        ENC_BUF(enc, g_tcache.overflow_flag, 10);
+        ENC_BUF(enc, conics, 11);
+        ENC_BUF(enc, opacities, 12);
+        ENC_BUF(enc, opacity_comp, 13);
+        [enc dispatchThreads:MTLSizeMake(num_points, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+    };
+
+    auto encode_radix_dynamic = [&](id<MTLComputeCommandEncoder> enc) {
+        uint32_t num_blocks = std::max<uint32_t>(1, (capacity_u32 + 255u) / 256u);
+        uint32_t radix_passes = use_dynamic_u32_keys ? 4u : radix_pass_count_for_tiles(num_tiles);
         for (uint32_t pass = 0; pass < radix_passes; ++pass) {
             uint32_t shift = pass * 8u;
             bool even_pass = (pass % 2u) == 0u;
-            MTensor &keys_in = even_pass ? isect_ids : isect_ids_tmp;
+            MTensor &keys_in = use_dynamic_u32_keys
+                ? (even_pass ? isect_ids_u32 : isect_ids_u32_tmp)
+                : (even_pass ? isect_ids : isect_ids_tmp);
             MTensor &vals_in = even_pass ? gaussian_ids : gaussian_ids_tmp;
-            MTensor &keys_out = even_pass ? isect_ids_tmp : isect_ids;
+            MTensor &keys_out = use_dynamic_u32_keys
+                ? (even_pass ? isect_ids_u32_tmp : isect_ids_u32)
+                : (even_pass ? isect_ids_tmp : isect_ids);
             MTensor &vals_out = even_pass ? gaussian_ids_tmp : gaussian_ids;
 
-            [enc setComputePipelineState:ctx->radix_sort_histogram_kernel_cpso];
+            [enc setComputePipelineState:(use_dynamic_u32_keys
+                ? ctx->radix_sort_histogram_u32_kernel_cpso
+                : ctx->radix_sort_histogram_kernel_cpso)];
             ENC_SCALAR(enc, capacity_u32, 0);
             ENC_BUF(enc, keys_in, 1);
             ENC_BUF(enc, radix_counts, 2);
@@ -1156,7 +1256,9 @@ static void forward_pipeline(
             [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
             [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
 
-            [enc setComputePipelineState:ctx->radix_sort_scatter_kernel_cpso];
+            [enc setComputePipelineState:(use_dynamic_u32_keys
+                ? ctx->radix_sort_scatter_u32_kernel_cpso
+                : ctx->radix_sort_scatter_kernel_cpso)];
             ENC_SCALAR(enc, capacity_u32, 0);
             ENC_BUF(enc, keys_in, 1);
             ENC_BUF(enc, vals_in, 2);
@@ -1169,34 +1271,60 @@ static void forward_pipeline(
             [enc dispatchThreadgroups:MTLSizeMake(num_blocks, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
             [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
         }
+        // Publish the final ping-pong buffers for tile edge and pack consumers.
+        if ((radix_passes & 1u) != 0u) {
+            sorted_isect_ids = &isect_ids_tmp;
+            sorted_isect_ids_u32 = &isect_ids_u32_tmp;
+            sorted_gaussian_ids = &gaussian_ids_tmp;
+        } else {
+            sorted_isect_ids = &isect_ids;
+            sorted_isect_ids_u32 = &isect_ids_u32;
+            sorted_gaussian_ids = &gaussian_ids;
+        }
+    };
 
-        {
-            [enc setComputePipelineState:ctx->get_tile_bin_edges_kernel_cpso];
-            ENC_SCALAR(enc, capacity_u32, 0);
-            ENC_BUF(enc, isect_ids, 1);
-            ENC_BUF(enc, tile_bins, 2);
-            ENC_BUF(enc, cum_tiles_hit, 3);
-            ENC_SCALAR(enc, num_points_u32, 4);
-            [enc dispatchThreads:MTLSizeMake(capacity_u32, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    auto encode_tile_edges_dynamic = [&](id<MTLComputeCommandEncoder> enc) {
+        [enc setComputePipelineState:(use_dynamic_u32_keys
+            ? ctx->get_tile_bin_edges_u32_kernel_cpso
+            : ctx->get_tile_bin_edges_kernel_cpso)];
+        ENC_SCALAR(enc, capacity_u32, 0);
+        if (use_dynamic_u32_keys) {
+            [enc setBuffer:(*sorted_isect_ids_u32).buffer() offset:0 atIndex:1];
+        } else {
+            [enc setBuffer:(*sorted_isect_ids).buffer() offset:0 atIndex:1];
         }
+        ENC_BUF(enc, tile_bins, 2);
+        ENC_BUF(enc, cum_tiles_hit, 3);
+        ENC_SCALAR(enc, num_points_u32, 4);
+        [enc dispatchThreads:MTLSizeMake(capacity_u32, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    };
+
+    auto encode_pack_dynamic = [&](id<MTLComputeCommandEncoder> enc) {
+        [enc setComputePipelineState:ctx->pack_sorted_gaussians_kernel_cpso];
+        [enc setBuffer:(*sorted_gaussian_ids).buffer() offset:0 atIndex:0];
+        ENC_BUF(enc, xys, 1);
+        ENC_BUF(enc, conics, 2);
+        ENC_BUF(enc, colors, 3);
+        ENC_BUF(enc, opacities, 4);
+        ENC_BUF(enc, packed_xy_opac, 5);
+        ENC_BUF(enc, packed_conic, 6);
+        ENC_BUF(enc, packed_rgb, 7);
+        ENC_BUF(enc, opacity_comp, 8);
+        ENC_BUF(enc, packed_opacity_comp, 9);
+        ENC_SCALAR(enc, capacity_u32, 10);
+        ENC_BUF(enc, cum_tiles_hit, 11);
+        ENC_SCALAR(enc, num_points_u32, 12);
+        [enc dispatchThreads:MTLSizeMake(capacity_u32, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    };
+
+    auto encode_prefix_map = [&](id<MTLComputeCommandEncoder> enc) {
+        encode_map_dynamic(enc);
         [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
-        {
-            [enc setComputePipelineState:ctx->pack_sorted_gaussians_kernel_cpso];
-            ENC_BUF(enc, gaussian_ids, 0);
-            ENC_BUF(enc, xys, 1);
-            ENC_BUF(enc, conics, 2);
-            ENC_BUF(enc, colors, 3);
-            ENC_BUF(enc, opacities, 4);
-            ENC_BUF(enc, packed_xy_opac, 5);
-            ENC_BUF(enc, packed_conic, 6);
-            ENC_BUF(enc, packed_rgb, 7);
-            ENC_BUF(enc, opacity_comp, 8);
-            ENC_BUF(enc, packed_opacity_comp, 9);
-            ENC_SCALAR(enc, capacity_u32, 10);
-            ENC_BUF(enc, cum_tiles_hit, 11);
-            ENC_SCALAR(enc, num_points_u32, 12);
-            [enc dispatchThreads:MTLSizeMake(capacity_u32, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
-        }
+        encode_radix_dynamic(enc);
+        [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+        encode_tile_edges_dynamic(enc);
+        [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+        encode_pack_dynamic(enc);
     };
 
     auto encode_prefix_map_fixed = [&](id<MTLComputeCommandEncoder> enc) {
@@ -1220,12 +1348,8 @@ static void forward_pipeline(
         }
         [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
         {
-            NSUInteger tg = MIN(ctx->prefix_sum_kernel_cpso.maxTotalThreadsPerThreadgroup, (NSUInteger)1024);
-            [enc setComputePipelineState:ctx->prefix_sum_kernel_cpso];
-            ENC_SCALAR(enc, num_tiles_u32, 0);
-            ENC_BUF(enc, g_tcache.tile_scatter_counters, 1);
-            ENC_BUF(enc, g_tcache.tile_offsets, 2);
-            [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+            encode_int32_prefix_sum(ctx, enc, num_tiles_u32, g_tcache.tile_scatter_counters,
+                                    g_tcache.tile_offsets, g_tcache.block_totals);
         }
         [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
         {
@@ -1353,7 +1477,7 @@ static void forward_pipeline(
         capacity = padded_dynamic_intersection_capacity(exact_intersections);
         capacity_u32 = (uint32_t)capacity;
         g_tcache.ensure_forward(num_points, capacity, img_height, img_width, num_tiles,
-                                compute_loss, false, false, ctx->device);
+                                compute_loss, false, false, use_dynamic_u32_keys, ctx->device);
         g_tcache.mark_dynamic_capacity(num_points, img_height, img_width, num_tiles);
         did_dynamic_count_prepass = true;
     } else {
@@ -1498,6 +1622,8 @@ std::tuple<MTensor, float> msplat_train_step(
     }
     bool use_dynamic_intersections = should_use_dynamic_intersections(
         img_width, img_height, num_tiles, g_tcache.force_dynamic_intersections);
+    bool use_dynamic_u32_keys = use_dynamic_intersections
+        && should_use_32_bit_intersection_keys(num_tiles);
     g_tcache.last_sort_path_dynamic = use_dynamic_intersections;
     int64_t capacity = use_dynamic_intersections
         ? std::max<int64_t>(1, g_tcache.capacity)
@@ -1508,7 +1634,7 @@ std::tuple<MTensor, float> msplat_train_step(
     // --- Cached buffer pool ---
     g_tcache.ensure_forward(num_points, capacity, img_height, img_width, num_tiles,
                             ssim_weight > 0.0f, lpips_loss_weight > 0.0f,
-                            !use_dynamic_intersections, ctx->device);
+                            !use_dynamic_intersections, use_dynamic_u32_keys, ctx->device);
     g_tcache.ensure_backward(num_points, features_rest_bases, ctx->device);
 
     MTensor &xys = g_tcache.xys;
@@ -1524,6 +1650,8 @@ std::tuple<MTensor, float> msplat_train_step(
     MTensor &gaussian_ids_tmp = g_tcache.gaussian_ids_tmp;
     MTensor &isect_ids = g_tcache.isect_ids;
     MTensor &isect_ids_tmp = g_tcache.isect_ids_tmp;
+    MTensor &isect_ids_u32 = g_tcache.isect_ids_u32;
+    MTensor &isect_ids_u32_tmp = g_tcache.isect_ids_u32_tmp;
     MTensor &radix_counts = g_tcache.radix_counts;
     MTensor &tile_bins = g_tcache.tile_bins;
     MTensor &loss_sum = g_tcache.loss_sum;
@@ -1612,47 +1740,58 @@ std::tuple<MTensor, float> msplat_train_step(
     };
 
     auto encode_count_prefix = [&](id<MTLComputeCommandEncoder> enc) {
-        NSUInteger tg = MIN(ctx->prefix_sum_kernel_cpso.maxTotalThreadsPerThreadgroup, (NSUInteger)1024);
-        [enc setComputePipelineState:ctx->prefix_sum_kernel_cpso];
-        ENC_SCALAR(enc, num_points_u32, 0);
-        ENC_BUF(enc, num_tiles_hit, 1);
-        ENC_BUF(enc, cum_tiles_hit, 2);
-        [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+        encode_int32_prefix_sum(ctx, enc, num_points_u32, num_tiles_hit, cum_tiles_hit, g_tcache.block_totals);
     };
 
-    auto encode_prefix_map = [&](id<MTLComputeCommandEncoder> enc) {
-        uint32_t num_blocks = std::max<uint32_t>(1, (capacity_u32 + 255u) / 256u);
-        {
-            NSUInteger tpg = MIN(ctx->map_gaussian_to_intersects_kernel_cpso.maxTotalThreadsPerThreadgroup, (NSUInteger)num_points);
-            [enc setComputePipelineState:ctx->map_gaussian_to_intersects_kernel_cpso];
-            ENC_SCALAR(enc, num_points_u32, 0);
-            ENC_BUF(enc, xys, 1);
-            ENC_BUF(enc, depths, 2);
-            ENC_BUF(enc, radii_out, 3);
-            ENC_BUF(enc, cum_tiles_hit, 4);
-            [enc setBytes:tile_bounds_arr->data() length:sizeof(*tile_bounds_arr) atIndex:5];
-            ENC_SCALAR(enc, capacity_u32, 6);
-            ENC_BUF(enc, isect_ids, 7);
-            ENC_BUF(enc, gaussian_ids, 8);
-            ENC_BUF(enc, aabb, 9);
-            ENC_BUF(enc, g_tcache.overflow_flag, 10);
-            ENC_BUF(enc, conics, 11);
-            ENC_BUF(enc, opacities, 12);
-            ENC_BUF(enc, opacity_comp, 13);
-            [enc dispatchThreads:MTLSizeMake(num_points, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
-        }
-        [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+    MTensor *sorted_isect_ids = &isect_ids;
+    MTensor *sorted_isect_ids_u32 = &isect_ids_u32;
+    MTensor *sorted_gaussian_ids = &gaussian_ids;
 
-        uint32_t radix_passes = radix_pass_count_for_tiles(num_tiles);
+    auto encode_map_dynamic = [&](id<MTLComputeCommandEncoder> enc) {
+        id<MTLComputePipelineState> pso = use_dynamic_u32_keys
+            ? ctx->map_gaussian_to_intersects_u32_kernel_cpso
+            : ctx->map_gaussian_to_intersects_kernel_cpso;
+        NSUInteger tpg = MIN(pso.maxTotalThreadsPerThreadgroup, (NSUInteger)num_points);
+        [enc setComputePipelineState:pso];
+        ENC_SCALAR(enc, num_points_u32, 0);
+        ENC_BUF(enc, xys, 1);
+        ENC_BUF(enc, depths, 2);
+        ENC_BUF(enc, radii_out, 3);
+        ENC_BUF(enc, cum_tiles_hit, 4);
+        [enc setBytes:tile_bounds_arr->data() length:sizeof(*tile_bounds_arr) atIndex:5];
+        ENC_SCALAR(enc, capacity_u32, 6);
+        if (use_dynamic_u32_keys) {
+            ENC_BUF(enc, isect_ids_u32, 7);
+        } else {
+            ENC_BUF(enc, isect_ids, 7);
+        }
+        ENC_BUF(enc, gaussian_ids, 8);
+        ENC_BUF(enc, aabb, 9);
+        ENC_BUF(enc, g_tcache.overflow_flag, 10);
+        ENC_BUF(enc, conics, 11);
+        ENC_BUF(enc, opacities, 12);
+        ENC_BUF(enc, opacity_comp, 13);
+        [enc dispatchThreads:MTLSizeMake(num_points, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+    };
+
+    auto encode_radix_dynamic = [&](id<MTLComputeCommandEncoder> enc) {
+        uint32_t num_blocks = std::max<uint32_t>(1, (capacity_u32 + 255u) / 256u);
+        uint32_t radix_passes = use_dynamic_u32_keys ? 4u : radix_pass_count_for_tiles(num_tiles);
         for (uint32_t pass = 0; pass < radix_passes; ++pass) {
             uint32_t shift = pass * 8u;
             bool even_pass = (pass % 2u) == 0u;
-            MTensor &keys_in = even_pass ? isect_ids : isect_ids_tmp;
+            MTensor &keys_in = use_dynamic_u32_keys
+                ? (even_pass ? isect_ids_u32 : isect_ids_u32_tmp)
+                : (even_pass ? isect_ids : isect_ids_tmp);
             MTensor &vals_in = even_pass ? gaussian_ids : gaussian_ids_tmp;
-            MTensor &keys_out = even_pass ? isect_ids_tmp : isect_ids;
+            MTensor &keys_out = use_dynamic_u32_keys
+                ? (even_pass ? isect_ids_u32_tmp : isect_ids_u32)
+                : (even_pass ? isect_ids_tmp : isect_ids);
             MTensor &vals_out = even_pass ? gaussian_ids_tmp : gaussian_ids;
 
-            [enc setComputePipelineState:ctx->radix_sort_histogram_kernel_cpso];
+            [enc setComputePipelineState:(use_dynamic_u32_keys
+                ? ctx->radix_sort_histogram_u32_kernel_cpso
+                : ctx->radix_sort_histogram_kernel_cpso)];
             ENC_SCALAR(enc, capacity_u32, 0);
             ENC_BUF(enc, keys_in, 1);
             ENC_BUF(enc, radix_counts, 2);
@@ -1671,7 +1810,9 @@ std::tuple<MTensor, float> msplat_train_step(
             [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
             [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
 
-            [enc setComputePipelineState:ctx->radix_sort_scatter_kernel_cpso];
+            [enc setComputePipelineState:(use_dynamic_u32_keys
+                ? ctx->radix_sort_scatter_u32_kernel_cpso
+                : ctx->radix_sort_scatter_kernel_cpso)];
             ENC_SCALAR(enc, capacity_u32, 0);
             ENC_BUF(enc, keys_in, 1);
             ENC_BUF(enc, vals_in, 2);
@@ -1684,34 +1825,60 @@ std::tuple<MTensor, float> msplat_train_step(
             [enc dispatchThreadgroups:MTLSizeMake(num_blocks, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
             [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
         }
+        // Publish the final ping-pong buffers for tile edge and pack consumers.
+        if ((radix_passes & 1u) != 0u) {
+            sorted_isect_ids = &isect_ids_tmp;
+            sorted_isect_ids_u32 = &isect_ids_u32_tmp;
+            sorted_gaussian_ids = &gaussian_ids_tmp;
+        } else {
+            sorted_isect_ids = &isect_ids;
+            sorted_isect_ids_u32 = &isect_ids_u32;
+            sorted_gaussian_ids = &gaussian_ids;
+        }
+    };
 
-        {
-            [enc setComputePipelineState:ctx->get_tile_bin_edges_kernel_cpso];
-            ENC_SCALAR(enc, capacity_u32, 0);
-            ENC_BUF(enc, isect_ids, 1);
-            ENC_BUF(enc, tile_bins, 2);
-            ENC_BUF(enc, cum_tiles_hit, 3);
-            ENC_SCALAR(enc, num_points_u32, 4);
-            [enc dispatchThreads:MTLSizeMake(capacity_u32, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    auto encode_tile_edges_dynamic = [&](id<MTLComputeCommandEncoder> enc) {
+        [enc setComputePipelineState:(use_dynamic_u32_keys
+            ? ctx->get_tile_bin_edges_u32_kernel_cpso
+            : ctx->get_tile_bin_edges_kernel_cpso)];
+        ENC_SCALAR(enc, capacity_u32, 0);
+        if (use_dynamic_u32_keys) {
+            [enc setBuffer:(*sorted_isect_ids_u32).buffer() offset:0 atIndex:1];
+        } else {
+            [enc setBuffer:(*sorted_isect_ids).buffer() offset:0 atIndex:1];
         }
+        ENC_BUF(enc, tile_bins, 2);
+        ENC_BUF(enc, cum_tiles_hit, 3);
+        ENC_SCALAR(enc, num_points_u32, 4);
+        [enc dispatchThreads:MTLSizeMake(capacity_u32, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    };
+
+    auto encode_pack_dynamic = [&](id<MTLComputeCommandEncoder> enc) {
+        [enc setComputePipelineState:ctx->pack_sorted_gaussians_kernel_cpso];
+        [enc setBuffer:(*sorted_gaussian_ids).buffer() offset:0 atIndex:0];
+        ENC_BUF(enc, xys, 1);
+        ENC_BUF(enc, conics, 2);
+        ENC_BUF(enc, colors, 3);
+        ENC_BUF(enc, opacities, 4);
+        ENC_BUF(enc, packed_xy_opac, 5);
+        ENC_BUF(enc, packed_conic, 6);
+        ENC_BUF(enc, packed_rgb, 7);
+        ENC_BUF(enc, opacity_comp, 8);
+        ENC_BUF(enc, packed_opacity_comp, 9);
+        ENC_SCALAR(enc, capacity_u32, 10);
+        ENC_BUF(enc, cum_tiles_hit, 11);
+        ENC_SCALAR(enc, num_points_u32, 12);
+        [enc dispatchThreads:MTLSizeMake(capacity_u32, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    };
+
+    auto encode_prefix_map = [&](id<MTLComputeCommandEncoder> enc) {
+        encode_map_dynamic(enc);
         [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
-        {
-            [enc setComputePipelineState:ctx->pack_sorted_gaussians_kernel_cpso];
-            ENC_BUF(enc, gaussian_ids, 0);
-            ENC_BUF(enc, xys, 1);
-            ENC_BUF(enc, conics, 2);
-            ENC_BUF(enc, colors, 3);
-            ENC_BUF(enc, opacities, 4);
-            ENC_BUF(enc, packed_xy_opac, 5);
-            ENC_BUF(enc, packed_conic, 6);
-            ENC_BUF(enc, packed_rgb, 7);
-            ENC_BUF(enc, opacity_comp, 8);
-            ENC_BUF(enc, packed_opacity_comp, 9);
-            ENC_SCALAR(enc, capacity_u32, 10);
-            ENC_BUF(enc, cum_tiles_hit, 11);
-            ENC_SCALAR(enc, num_points_u32, 12);
-            [enc dispatchThreads:MTLSizeMake(capacity_u32, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
-        }
+        encode_radix_dynamic(enc);
+        [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+        encode_tile_edges_dynamic(enc);
+        [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+        encode_pack_dynamic(enc);
     };
 
     auto encode_prefix_map_fixed = [&](id<MTLComputeCommandEncoder> enc) {
@@ -1735,12 +1902,8 @@ std::tuple<MTensor, float> msplat_train_step(
         }
         [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
         {
-            NSUInteger tg = MIN(ctx->prefix_sum_kernel_cpso.maxTotalThreadsPerThreadgroup, (NSUInteger)1024);
-            [enc setComputePipelineState:ctx->prefix_sum_kernel_cpso];
-            ENC_SCALAR(enc, num_tiles_u32, 0);
-            ENC_BUF(enc, g_tcache.tile_scatter_counters, 1);
-            ENC_BUF(enc, g_tcache.tile_offsets, 2);
-            [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+            encode_int32_prefix_sum(ctx, enc, num_tiles_u32, g_tcache.tile_scatter_counters,
+                                    g_tcache.tile_offsets, g_tcache.block_totals);
         }
         [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
         {
@@ -2118,7 +2281,7 @@ std::tuple<MTensor, float> msplat_train_step(
         capacity_u32 = (uint32_t)capacity;
         g_tcache.ensure_forward(num_points, capacity, img_height, img_width, num_tiles,
                                 ssim_weight > 0.0f, lpips_loss_weight > 0.0f,
-                                false, ctx->device);
+                                false, use_dynamic_u32_keys, ctx->device);
         g_tcache.mark_dynamic_capacity(num_points, img_height, img_width, num_tiles);
         did_dynamic_count_prepass = true;
     } else {
@@ -2171,9 +2334,8 @@ std::tuple<MTensor, float> msplat_train_step(
             // -- Blit zero (no direct timestamp, included in first compute stage overhead) --
             do_blit_zero(command_buffer);
 
-            // Stage encoders with timestamps
-            // We have 8 compute stages (indices 0-7 in counter sample buffer)
-            // Each stage uses sample indices: start = stage*2, end = stage*2+1
+            // Stage encoders with timestamps. Blit zero is not sampled directly;
+            // sampled encoder slots 0..9 map to g_train_stage_names[1..10].
             auto make_profiled_encoder = [&](int stage_idx) -> id<MTLComputeCommandEncoder> {
                 MTLComputePassDescriptor *passDesc = [MTLComputePassDescriptor computePassDescriptor];
                 passDesc.sampleBufferAttachments[0].sampleBuffer = csb;
@@ -2184,7 +2346,7 @@ std::tuple<MTensor, float> msplat_train_step(
 
             id<MTLComputeCommandEncoder> enc;
 
-            // Stage 1: proj_sh_fwd
+            // Stage 1: projection + intersection count prefix
             enc = make_profiled_encoder(0);
             if (!use_dynamic_intersections || !did_dynamic_count_prepass) {
                 encode_proj_sh(enc);
@@ -2195,38 +2357,57 @@ std::tuple<MTensor, float> msplat_train_step(
             }
             [enc endEncoding];
 
-            // Stage 2: prefix_sort_pack
+            // Stage 2-5: dynamic intersection map/sort/edge/pack.
+            // The fixed path keeps its fused per-tile sort+pack in the map slot.
             enc = make_profiled_encoder(1);
             if (use_dynamic_intersections) {
-                encode_prefix_map(enc);
+                encode_map_dynamic(enc);
             } else {
                 encode_prefix_map_fixed(enc);
             }
             [enc endEncoding];
 
-            // Stage 3: rast_fwd
             enc = make_profiled_encoder(2);
+            if (use_dynamic_intersections) {
+                encode_radix_dynamic(enc);
+            }
+            [enc endEncoding];
+
+            enc = make_profiled_encoder(3);
+            if (use_dynamic_intersections) {
+                encode_tile_edges_dynamic(enc);
+            }
+            [enc endEncoding];
+
+            enc = make_profiled_encoder(4);
+            if (use_dynamic_intersections) {
+                encode_pack_dynamic(enc);
+            }
+            [enc endEncoding];
+
+            // Stage 6: rast_fwd
+            enc = make_profiled_encoder(5);
             encode_rast_fwd(enc);
             [enc endEncoding];
 
-            // Stage 4+5: loss_fwd_bwd (fused)
-            enc = make_profiled_encoder(3);
+            // Stage 7: loss_fwd_bwd (fused)
+            enc = make_profiled_encoder(6);
             encode_loss_fwd_bwd(enc);
             [enc endEncoding];
             encode_lpips(ctx->_currentCB);
 
-            // Stage 5: rast_bwd
-            enc = make_profiled_encoder(4);
+            // Stage 8: rast_bwd
+            enc = make_profiled_encoder(7);
             encode_rast_bwd(enc);
             [enc endEncoding];
 
-            // Stage 6: proj_sh_bwd + Adam
-            enc = make_profiled_encoder(5);
+            // Stage 9: proj_sh_bwd + Adam
+            enc = make_profiled_encoder(8);
             encode_proj_sh_bwd_adam(enc);
             [enc endEncoding];
 
-            // Stage 7: grad_stats
-            enc = make_profiled_encoder(6);
+            // Stage 10: grad_stats
+            enc = make_profiled_encoder(9);
             encode_grad_stats(enc);
             [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
             encode_pup_hessian(enc);
@@ -2246,7 +2427,7 @@ std::tuple<MTensor, float> msplat_train_step(
                     uint64_t start = samples[i * 2].timestamp;
                     uint64_t end = samples[i * 2 + 1].timestamp;
                     if (start == MTLCounterErrorValue || end == MTLCounterErrorValue) continue;
-                    // stage_idx 0-7 maps to g_train_stage_names[1-8] (skip blit_zero)
+                    // Sample slots map to g_train_stage_names[1...] (skip blit_zero).
                     g_stage_times[i + 1].push_back((double)(end - start) * ticksToMs);
                 }
                 g_stage_report_count++;
