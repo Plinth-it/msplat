@@ -605,7 +605,7 @@ kernel void nd_rasterize_forward_kernel(
     constant uint3& tile_bounds,
     constant uint3& img_size,
     constant uint& channels,
-    constant int* tile_bins, // int2
+    device int* tile_bins, // int2
     constant float* packed_xy_opac, // float3: (x, y, sigmoid(opacity))
     constant float* packed_conic,   // float3
     constant float* packed_rgb,     // float3: raw SH (NOT clamped)
@@ -631,8 +631,9 @@ kernel void nd_rasterize_forward_kernel(
 
     const bool inside = (i < (int)img_size.y && j < (int)img_size.x);
 
-    // which gaussians to look through in this tile
-    int2 range = read_packed_int2(tile_bins, tile_id);
+    // Which gaussians to look through in this tile. Keep a local copy before
+    // narrowing tile_bins.y for the backward pass.
+    int2 range = int2(tile_bins[2 * tile_id], tile_bins[2 * tile_id + 1]);
     const int num_batches = (range.y - range.x + RAST_BLOCK_SIZE - 1) / RAST_BLOCK_SIZE;
 
     // threadgroup shared memory for batch loading
@@ -645,6 +646,12 @@ kernel void nd_rasterize_forward_kernel(
     float3 pix_out = {0.f, 0.f, 0.f};
     int last_contributor = range.x - 1;
     bool done = false;
+    threadgroup atomic_int max_useful_isect;
+
+    if (tr == 0) {
+        atomic_store_explicit(&max_useful_isect, range.x, memory_order_relaxed);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
 
     for (int b = 0; b < num_batches; ++b) {
         // sync before loading next batch
@@ -710,12 +717,19 @@ kernel void nd_rasterize_forward_kernel(
     if (inside) {
         final_Ts[pix_id] = T;
         final_index[pix_id] = last_contributor;
+        if (last_contributor >= range.x) {
+            atomic_fetch_max_explicit(&max_useful_isect, last_contributor + 1, memory_order_relaxed);
+        }
         // Fused clamp_max(output, 1.0) — saturate clamps to [0,1]
         float3 bg = {background[0], background[1], background[2]};
         float3 final_rgb = saturate(fma(bg, T, pix_out));
         out_img[CHANNELS * pix_id + 0] = final_rgb.x;
         out_img[CHANNELS * pix_id + 1] = final_rgb.y;
         out_img[CHANNELS * pix_id + 2] = final_rgb.z;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tr == 0) {
+        write_packed_int2y(tile_bins, tile_id, atomic_load_explicit(&max_useful_isect, memory_order_relaxed));
     }
 }
 

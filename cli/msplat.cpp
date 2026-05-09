@@ -14,6 +14,7 @@
 #include <vector>
 #include <memory>
 #include <atomic>
+#include <cstdlib>
 #include <CLI/CLI.hpp>
 #include "model.hpp"
 #include "input_data.hpp"
@@ -96,6 +97,8 @@ static std::string formatProgressLine(size_t step, int totalSteps, size_t comple
 
 struct FinalPsnrResult {
     double psnr = 0.0;
+    double ssim = 0.0;
+    double l1 = 0.0;
     size_t views = 0;
 };
 
@@ -129,10 +132,14 @@ static FinalPsnrResult computeTrainPsnr(Model &model, std::vector<Camera> &cams,
         MTensor gtCpu = cam.getGPUImage(downscale, evalBg).cpu();
         quantizeRenderedForEval(rgbCpu);
         result.psnr += psnr(rgbCpu, gtCpu);
+        result.ssim += ssim_eval(rgbCpu, gtCpu);
+        result.l1 += l1_loss(rgbCpu, gtCpu);
         result.views++;
     }
     if (result.views > 0) {
         result.psnr /= static_cast<double>(result.views);
+        result.ssim /= static_cast<double>(result.views);
+        result.l1 /= static_cast<double>(result.views);
     }
     return result;
 }
@@ -545,6 +552,12 @@ int main(int argc, char *argv[]) {
     float lpipsLossWeight = 0.0f;
     app.add_option("--lpips-loss-weight", lpipsLossWeight, "LPIPS perceptual loss weight")
         ->check(CLI::Range(0.0f, 100.0f));
+    std::string backwardRasterizer = "auto";
+    auto *backwardRasterizerOption = app.add_option(
+        "--backward-rasterizer",
+        backwardRasterizer,
+        "Training backward rasterizer: auto, pixel, persplat, or brush")
+        ->check(CLI::IsMember({"auto", "pixel", "perpixel", "chunked", "persplat", "brush"}));
     float auxLossTime = 0.8f;
     app.add_option("--aux-loss-time", auxLossTime, "Brush compatibility option; accepted but currently unused")
         ->check(CLI::Range(0.0f, 1.0f));
@@ -641,6 +654,9 @@ int main(int argc, char *argv[]) {
 
     if (normalizeCrs) keepCrs = false;
     if (stopScreenSizeAtOption->count() == 0) stopScreenSizeAt = growthStopIter;
+    if (backwardRasterizerOption->count() > 0) {
+        setenv("MSPLAT_BACKWARD_RASTERIZER", backwardRasterizer.c_str(), 1);
+    }
     if (shDegreeIntervalOption->count() == 0) {
         shDegreeInterval = (shWarmupIters > 0 && shDegree > 0) ? shWarmupIters / shDegree : 0;
     }
@@ -1107,6 +1123,10 @@ int main(int argc, char *argv[]) {
                       << "  (" << trainPsnr.views << " views, "
                       << formatDuration(finalPsnrSeconds)
                       << ", not included in runtime)" << std::endl;
+            std::cout << "  train SSIM:      " << std::fixed << std::setprecision(4)
+                      << trainPsnr.ssim << std::endl;
+            std::cout << "  train L1:        " << std::fixed << std::setprecision(5)
+                      << trainPsnr.l1 << std::endl;
         }
 
         cleanup_msplat_metal();

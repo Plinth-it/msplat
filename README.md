@@ -64,8 +64,10 @@ training path C++/Metal-first:
 - The Metal training path has additional robustness and performance work:
   invalid geometry/quaternion guards, cutoff handling in chunked raster
   backward, per-tile overflow warnings, a higher tile element cap, fused SH
-  backward plus Adam, fused SSIM vertical-forward/horizontal-backward, and an
-  L1-only loss fast path when `--ssim-weight 0.0`.
+  backward plus Adam, fused SSIM vertical-forward/horizontal-backward, an
+  L1-only loss fast path when `--ssim-weight 0.0`, and an opt-in
+  Brush-style per-splat backward rasterizer exposed with
+  `--backward-rasterizer persplat`.
 - Swift, C, and Python APIs expose the expanded training config surface,
   initial point counts, render mode support, checkpoint/load helpers, and
   stronger error propagation.
@@ -271,6 +273,11 @@ SH capacity and warmup are controlled with `--sh-degree`,
 `--sh-warmup-iters`, and `--sh-degree-interval`. The default is degree 3 with
 a 5000-step warmup. Use `--sh-degree 2` for a smaller/faster view-dependent
 color model, or `--sh-degree 0` for DC-only color.
+
+The training backward rasterizer defaults to `auto`, which currently keeps the
+stable per-pixel path. Use `--backward-rasterizer persplat` or
+`--backward-rasterizer brush` to opt into the Brush-style per-splat diagonal
+replay path for benchmarking.
 
 ### Build from source
 

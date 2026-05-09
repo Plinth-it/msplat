@@ -245,6 +245,7 @@ def test_native_cli_exposes_quality_presets():
     assert "fast, default, brush" in result.stdout
     assert "--image-prefetch-workers" in result.stdout
     assert "--no-log-image-loading" in result.stdout
+    assert "--backward-rasterizer" in result.stdout
 
 
 def test_metal_uses_dynamic_global_intersections():
@@ -273,10 +274,12 @@ def test_metal_exposes_brush_style_persplat_backward():
     assert "rasterize_backward_persplat_kernel_cpso" in host_source
     assert 'load(@"rasterize_backward_persplat_kernel")' in host_source
     assert "MSPLAT_BACKWARD_RASTERIZER" in host_source
+    assert "--backward-rasterizer" in (repo_root / "cli" / "msplat.cpp").read_text(encoding="utf-8")
     assert "rasterize_backward_persplat_kernel" in shader_source
     assert "SPLAT_BATCH" in shader_source
     assert "pix_state" in shader_source
     assert "diagonal" in shader_source.lower()
+    assert "max_useful_isect" in shader_source
 
 
 def test_native_cli_can_log_image_loading():
