@@ -1350,6 +1350,191 @@ kernel void rasterize_backward_kernel(
     }
 }
 
+// Brush-style per-splat backward rasterization. One workgroup owns one 16x16
+// tile and one SIMD group owns up to 32 splats at a time. Pixel state is walked
+// in forward order with diagonal scheduling so each thread accumulates one
+// splat's full tile gradient in registers before issuing atomics.
+kernel void rasterize_backward_persplat_kernel(
+    constant uint3& tile_bounds,
+    constant uint2& img_size,
+    constant int32_t* gaussian_ids_sorted,
+    constant int* tile_bins,
+    constant float* packed_xy_opac,
+    constant float* packed_conic,
+    constant float* packed_rgb,
+    constant float* packed_opacity_comp,
+    constant float* background,
+    constant float* out_img,
+    constant float* final_Ts,
+    constant float* v_output,
+    device atomic_float* v_xy,
+    device atomic_float* v_conic,
+    device atomic_float* v_rgb,
+    device atomic_float* v_opacity,
+    device atomic_float* v_refine,
+    constant uint* gt_packed,
+    constant uint& use_alpha_loss,
+    constant float& alpha_loss_grad_scale,
+    uint3 blockIdx [[threadgroup_position_in_grid]],
+    uint thread_rank [[thread_index_in_threadgroup]]
+) {
+    constexpr uint SPLAT_BATCH = 32;
+    constexpr uint TILE_PIXELS = BLOCK_SIZE;
+
+    uint tile_id = blockIdx.y * tile_bounds.x + blockIdx.x;
+    if (blockIdx.x >= tile_bounds.x || blockIdx.y >= tile_bounds.y) {
+        return;
+    }
+
+    uint2 tile_origin = uint2(blockIdx.x * BLOCK_X, blockIdx.y * BLOCK_Y);
+    float3 bg = float3(background[0], background[1], background[2]);
+
+    threadgroup float4 pix_state[TILE_PIXELS];
+    threadgroup float3 pix_v_out[TILE_PIXELS];
+    threadgroup float pix_alpha_tail[TILE_PIXELS];
+    threadgroup float pix_inv_final_alpha[TILE_PIXELS];
+    threadgroup int range_start = 0;
+    threadgroup int range_end = 0;
+
+    for (uint pix_rank = thread_rank; pix_rank < TILE_PIXELS; pix_rank += SPLAT_BATCH) {
+        uint2 local_xy = uint2(pix_rank % BLOCK_X, pix_rank / BLOCK_X);
+        uint2 pix_loc = tile_origin + local_xy;
+        bool inside = pix_loc.x < img_size.x && pix_loc.y < img_size.y;
+        if (inside) {
+            uint pix_id = pix_loc.y * img_size.x + pix_loc.x;
+            float T_final = final_Ts[pix_id];
+            float3 final_rgb = read_packed_float3(out_img, (int)pix_id);
+            float3 v_out = read_packed_float3(v_output, (int)pix_id);
+            float target_alpha = packed_gt_alpha(gt_packed, pix_id);
+            float alpha_loss_grad = (use_alpha_loss != 0)
+                ? alpha_loss_grad_scale * (((1.0f - T_final) > target_alpha) ? 1.0f
+                    : (((1.0f - T_final) < target_alpha) ? -1.0f : 0.0f))
+                : 0.0f;
+
+            pix_state[pix_rank] = float4(final_rgb - T_final * bg, 1.0f);
+            pix_v_out[pix_rank] = v_out;
+            pix_alpha_tail[pix_rank] = T_final * (alpha_loss_grad - dot(bg, v_out));
+            pix_inv_final_alpha[pix_rank] = 1.0f / max(1.0f - T_final, 1e-5f);
+        } else {
+            pix_state[pix_rank] = float4(0.0f);
+            pix_v_out[pix_rank] = float3(0.0f);
+            pix_alpha_tail[pix_rank] = 0.0f;
+            pix_inv_final_alpha[pix_rank] = 0.0f;
+        }
+    }
+
+    if (thread_rank == 0) {
+        int2 range = read_packed_int2(tile_bins, (int)tile_id);
+        range_start = range.x;
+        range_end = range.y;
+    }
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint num_splats_in_tile = (uint)max(0, range_end - range_start);
+    uint rounds = (num_splats_in_tile + SPLAT_BATCH - 1) / SPLAT_BATCH;
+
+    for (uint batch_idx = 0; batch_idx < rounds; ++batch_idx) {
+        uint splat_offset = batch_idx * SPLAT_BATCH + thread_rank;
+        bool splat_active = splat_offset < num_splats_in_tile;
+        int sorted_idx = range_start + (int)splat_offset;
+        int32_t gaussian_id = 0;
+        float3 xy_opac = float3(0.0f);
+        float3 conic = float3(0.0f);
+        float3 raw_rgb = float3(0.0f);
+        float opacity_comp = 1.0f;
+
+        if (splat_active) {
+            gaussian_id = gaussian_ids_sorted[sorted_idx];
+            xy_opac = read_packed_float3(packed_xy_opac, sorted_idx);
+            conic = read_packed_float3(packed_conic, sorted_idx);
+            raw_rgb = read_packed_float3(packed_rgb, sorted_idx);
+            opacity_comp = packed_opacity_comp[sorted_idx];
+        }
+
+        uint num_splats_this_batch = min(SPLAT_BATCH, num_splats_in_tile - batch_idx * SPLAT_BATCH);
+        uint total_iters = num_splats_this_batch + TILE_PIXELS - 1;
+        float2 v_xy_acc = float2(0.0f);
+        float3 v_conic_acc = float3(0.0f);
+        float3 v_rgb_acc = float3(0.0f);
+        float v_opacity_acc = 0.0f;
+        float v_refine_acc = 0.0f;
+        float3 rgb = max(raw_rgb + 0.5f, 0.0f);
+
+        for (uint iter = 0; iter < total_iters; ++iter) {
+            bool active_iter = splat_active
+                && iter >= thread_rank
+                && (iter - thread_rank) < TILE_PIXELS;
+            if (active_iter) {
+                uint pix_rank = iter - thread_rank;
+                float4 state = pix_state[pix_rank];
+                if (state.w > 1e-4f) {
+                    uint2 local_xy = uint2(pix_rank % BLOCK_X, pix_rank / BLOCK_X);
+                    uint2 pix_loc = tile_origin + local_xy;
+                    float2 delta = float2(xy_opac.x - (float)pix_loc.x,
+                                          xy_opac.y - (float)pix_loc.y);
+                    float sigma = fma(0.5f,
+                        fma(conic.x, delta.x * delta.x, conic.z * delta.y * delta.y),
+                        conic.y * delta.x * delta.y);
+                    if (sigma >= 0.0f && sigma < 5.55f) {
+                        float alpha = min(0.999f, xy_opac.z * opacity_comp * exp(-sigma));
+                        if (alpha >= 1.0f / 255.0f) {
+                            float next_T = state.w * (1.0f - alpha);
+                            if (next_T <= 1e-4f) {
+                                pix_state[pix_rank] = float4(state.xyz, 0.0f);
+                            } else {
+                                float vis = alpha * state.w;
+                                float3 new_remain = state.xyz - vis * rgb;
+                                float3 v_out = pix_v_out[pix_rank];
+
+                                v_rgb_acc += vis * v_out;
+
+                                float ra = 1.0f / (1.0f - alpha);
+                                float v_alpha = dot(state.w * rgb - new_remain * ra, v_out)
+                                    + pix_alpha_tail[pix_rank] * ra;
+                                float v_sigma = -alpha * v_alpha;
+
+                                float2 v_xy_local = v_sigma * float2(
+                                    fma(conic.x, delta.x, conic.y * delta.y),
+                                    fma(conic.y, delta.x, conic.z * delta.y));
+                                v_xy_acc += v_xy_local;
+                                v_conic_acc += (0.5f * v_sigma) * float3(
+                                    delta.x * delta.x,
+                                    delta.x * delta.y,
+                                    delta.y * delta.y);
+                                v_opacity_acc += -v_sigma * (1.0f - xy_opac.z);
+                                v_refine_acc += length(v_xy_local * float2((float)img_size.x, (float)img_size.y))
+                                    * pix_inv_final_alpha[pix_rank];
+
+                                pix_state[pix_rank] = float4(new_remain, next_T);
+                            }
+                        }
+                    }
+                }
+            }
+            simdgroup_barrier(mem_flags::mem_threadgroup);
+        }
+
+        if (splat_active) {
+            if (raw_rgb.x + 0.5f >= 0.0f) {
+                atomic_fetch_add_explicit(v_rgb + 3 * gaussian_id + 0, v_rgb_acc.x, memory_order_relaxed);
+            }
+            if (raw_rgb.y + 0.5f >= 0.0f) {
+                atomic_fetch_add_explicit(v_rgb + 3 * gaussian_id + 1, v_rgb_acc.y, memory_order_relaxed);
+            }
+            if (raw_rgb.z + 0.5f >= 0.0f) {
+                atomic_fetch_add_explicit(v_rgb + 3 * gaussian_id + 2, v_rgb_acc.z, memory_order_relaxed);
+            }
+            atomic_fetch_add_explicit(v_conic + 3 * gaussian_id + 0, v_conic_acc.x, memory_order_relaxed);
+            atomic_fetch_add_explicit(v_conic + 3 * gaussian_id + 1, v_conic_acc.y, memory_order_relaxed);
+            atomic_fetch_add_explicit(v_conic + 3 * gaussian_id + 2, v_conic_acc.z, memory_order_relaxed);
+            atomic_fetch_add_explicit(v_xy + 2 * gaussian_id + 0, v_xy_acc.x, memory_order_relaxed);
+            atomic_fetch_add_explicit(v_xy + 2 * gaussian_id + 1, v_xy_acc.y, memory_order_relaxed);
+            atomic_fetch_add_explicit(v_opacity + gaussian_id, v_opacity_acc, memory_order_relaxed);
+            atomic_fetch_add_explicit(v_refine + gaussian_id, v_refine_acc, memory_order_relaxed);
+        }
+    }
+}
+
 kernel void nd_rasterize_backward_kernel(
     constant uint3& tile_bounds,
     constant uint3& img_size,

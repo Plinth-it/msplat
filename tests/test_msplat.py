@@ -265,6 +265,20 @@ def test_metal_uses_dynamic_global_intersections():
     assert "packed_opacity_comp[idx] = opacity_comp[g_id]" in shader_source
 
 
+def test_metal_exposes_brush_style_persplat_backward():
+    repo_root = Path(__file__).resolve().parents[1]
+    host_source = (repo_root / "core" / "metal" / "msplat_metal.mm").read_text(encoding="utf-8")
+    shader_source = (repo_root / "core" / "metal" / "msplat_metal.metal").read_text(encoding="utf-8")
+
+    assert "rasterize_backward_persplat_kernel_cpso" in host_source
+    assert 'load(@"rasterize_backward_persplat_kernel")' in host_source
+    assert "MSPLAT_BACKWARD_RASTERIZER" in host_source
+    assert "rasterize_backward_persplat_kernel" in shader_source
+    assert "SPLAT_BATCH" in shader_source
+    assert "pix_state" in shader_source
+    assert "diagonal" in shader_source.lower()
+
+
 def test_native_cli_can_log_image_loading():
     if not NATIVE_CLI.exists():
         pytest.skip("native CLI is not built")

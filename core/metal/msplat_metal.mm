@@ -165,6 +165,7 @@ struct MetalContext {
     id<MTLComputePipelineState> rasterize_forward_merge_kernel_cpso;
     id<MTLComputePipelineState> compute_chunk_prefix_suffix_kernel_cpso;
     id<MTLComputePipelineState> rasterize_backward_chunked_kernel_cpso;
+    id<MTLComputePipelineState> rasterize_backward_persplat_kernel_cpso;
     id<MTLComputePipelineState> rasterize_backward_kernel_cpso;
     // Separable SSIM loss kernels
     id<MTLComputePipelineState> ssim_h_fwd_kernel_cpso;
@@ -315,6 +316,7 @@ MetalContext* init_msplat_metal_context() {
     ctx->rasterize_forward_merge_kernel_cpso      = load(@"rasterize_forward_merge_kernel");
     ctx->compute_chunk_prefix_suffix_kernel_cpso  = load(@"compute_chunk_prefix_suffix_kernel");
     ctx->rasterize_backward_chunked_kernel_cpso   = load(@"rasterize_backward_chunked_kernel");
+    ctx->rasterize_backward_persplat_kernel_cpso  = load(@"rasterize_backward_persplat_kernel");
     ctx->rasterize_backward_kernel_cpso           = load(@"rasterize_backward_kernel");
     // Separable SSIM loss
     ctx->ssim_h_fwd_kernel_cpso                   = load(@"ssim_h_fwd_kernel");
@@ -1041,6 +1043,25 @@ static bool should_use_dynamic_intersections(unsigned img_width, unsigned img_he
     return std::max(img_width, img_height) > 2560 || num_tiles > 25000;
 }
 
+static bool should_use_persplat_backward(unsigned img_width, unsigned img_height, int num_tiles) {
+    const char *mode = std::getenv("MSPLAT_BACKWARD_RASTERIZER");
+    (void)img_width;
+    (void)img_height;
+    (void)num_tiles;
+    if (!mode || std::strcmp(mode, "auto") == 0) return false;
+    if (std::strcmp(mode, "persplat") == 0 || std::strcmp(mode, "brush") == 0) return true;
+    if (std::strcmp(mode, "pixel") == 0 || std::strcmp(mode, "perpixel") == 0
+        || std::strcmp(mode, "chunked") == 0) {
+        return false;
+    }
+    static bool warned = false;
+    if (!warned) {
+        fprintf(stderr, "WARNING: unknown MSPLAT_BACKWARD_RASTERIZER=%s; using auto.\n", mode);
+        warned = true;
+    }
+    return false;
+}
+
 // Internal forward pipeline — used by both msplat_render and msplat_train_step.
 // When compute_loss=false, gt/window2d/ssim_weight are ignored.
 static void forward_pipeline(
@@ -1714,6 +1735,7 @@ std::tuple<MTensor, float> msplat_train_step(
     constexpr uint32_t CHUNK_SIZE = 512;
     uint32_t bwd_K_max = K_max;
     constexpr uint32_t BWD_CHUNK_SIZE = 512;
+    bool use_persplat_backward = should_use_persplat_backward(img_width, img_height, num_tiles);
 
     // ========================== FORWARD ENCODE LAMBDAS ==========================
 
@@ -2084,6 +2106,25 @@ std::tuple<MTensor, float> msplat_train_step(
     };
 
     auto encode_rast_bwd = [&](id<MTLComputeCommandEncoder> enc) {
+        if (use_persplat_backward) {
+            [enc setComputePipelineState:ctx->rasterize_backward_persplat_kernel_cpso];
+            [enc setBytes:rast_tb.data() length:sizeof(rast_tb) atIndex:0];
+            [enc setBytes:rast_isz.data() length:sizeof(rast_isz) atIndex:1];
+            ENC_BUF(enc, gaussian_ids, 2); ENC_BUF(enc, tile_bins, 3);
+            ENC_BUF(enc, packed_xy_opac, 4); ENC_BUF(enc, packed_conic, 5);
+            ENC_BUF(enc, packed_rgb, 6);
+            ENC_BUF(enc, packed_opacity_comp, 7);
+            ENC_BUF(enc, background, 8); ENC_BUF(enc, out_img, 9);
+            ENC_BUF(enc, final_Ts, 10); ENC_BUF(enc, v_rendered, 11);
+            ENC_BUF(enc, v_xy, 12); ENC_BUF(enc, v_conic, 13);
+            ENC_BUF(enc, v_colors_rast, 14); ENC_BUF(enc, v_opacity, 15);
+            ENC_BUF(enc, v_refine, 16);
+            ENC_BUF(enc, gt_packed, 17); ENC_SCALAR(enc, use_alpha_loss_u32, 18);
+            ENC_SCALAR(enc, alpha_loss_grad_scale, 19);
+            [enc dispatchThreadgroups:MTLSizeMake(rast_tb[0], rast_tb[1], 1)
+                 threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+            return;
+        }
         if (bwd_K_max <= 1) {
             // Monolithic
             MTLSize num_tg = MTLSizeMake((img_width+RAST_BLOCK_X-1)/RAST_BLOCK_X, (img_height+RAST_BLOCK_Y-1)/RAST_BLOCK_Y, 1);
