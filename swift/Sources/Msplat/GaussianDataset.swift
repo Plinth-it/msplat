@@ -38,13 +38,25 @@ public class GaussianDataset {
     }
 
     /// Number of training cameras.
-    public var numTrain: Int { Int(msplat_dataset_num_train(handle)) }
+    public var numTrain: Int {
+        let count = Int(msplat_dataset_num_train(handle))
+        msplatRequireSuccess()
+        return count
+    }
 
     /// Number of test cameras (0 if evalMode was false).
-    public var numTest: Int { Int(msplat_dataset_num_test(handle)) }
+    public var numTest: Int {
+        let count = Int(msplat_dataset_num_test(handle))
+        msplatRequireSuccess()
+        return count
+    }
 
     /// Number of finite point-cloud points loaded for initialization.
-    public var initialPointCount: Int { Int(msplat_dataset_initial_point_count(handle)) }
+    public var initialPointCount: Int {
+        let count = Int(msplat_dataset_initial_point_count(handle))
+        msplatRequireSuccess()
+        return count
+    }
 
     /// Get the camera-to-world pose (4x4 row-major, OpenGL convention) for a training camera.
     public func cameraPose(at index: Int) -> [Float] {
@@ -52,6 +64,7 @@ public class GaussianDataset {
         pose.withUnsafeMutableBufferPointer { ptr in
             msplat_dataset_camera_pose(handle, Int32(index), ptr.baseAddress!)
         }
+        msplatRequireSuccess()
         return pose
     }
 }
@@ -61,4 +74,11 @@ func msplatLastError() -> String {
         return "msplat operation failed"
     }
     return String(cString: error)
+}
+
+func msplatRequireSuccess() {
+    guard let error = msplat_last_error(), error.pointee != 0 else {
+        return
+    }
+    preconditionFailure(String(cString: error))
 }

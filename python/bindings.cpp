@@ -135,6 +135,23 @@ public:
     }
 };
 
+static Camera camera_with_pose(const Camera &reference, const float *cam_to_world) {
+    Camera cam;
+    cam.width = reference.width;
+    cam.height = reference.height;
+    cam.fx = reference.fx;
+    cam.fy = reference.fy;
+    cam.cx = reference.cx;
+    cam.cy = reference.cy;
+    cam.k1 = reference.k1;
+    cam.k2 = reference.k2;
+    cam.k3 = reference.k3;
+    cam.p1 = reference.p1;
+    cam.p2 = reference.p2;
+    memcpy(cam.camToWorld, cam_to_world, 16 * sizeof(float));
+    return cam;
+}
+
 // ── GaussianTrainer ─────────────────────────────────────────────────────────
 
 class GaussianTrainer {
@@ -315,12 +332,9 @@ public:
         if (ref_cam_idx < 0 || ref_cam_idx >= (int)dataset_ptr->train_cams.size())
             throw std::runtime_error("ref_cam_idx out of range");
 
-        Camera cam = dataset_ptr->train_cams[ref_cam_idx];
-        memcpy(cam.camToWorld, cam_to_world.data(), 16 * sizeof(float));
-        cam.cachedViewMat = MTensor();
-        cam.cachedProjViewMat = MTensor();
-        cam.ensureImageLoaded();
-
+        Camera &reference = dataset_ptr->train_cams[ref_cam_idx];
+        reference.ensureImageLoaded();
+        Camera cam = camera_with_pose(reference, cam_to_world.data());
         MTensor rgb = model->render(cam, current_step);
         msplat_gpu_sync();
         MTensor rgb_cpu = rgb.cpu();

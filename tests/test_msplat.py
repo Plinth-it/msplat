@@ -828,6 +828,25 @@ def test_render():
 
 
 @pytest.mark.skipif(not HAS_GARDEN, reason="garden dataset not found")
+def test_render_from_pose():
+    """Pose render uses reference intrinsics without copying the full camera payload."""
+    from msplat import TrainingConfig, Dataset, GaussianTrainer
+
+    ds = Dataset(GARDEN, downscale_factor=4.0)
+    cfg = TrainingConfig(iterations=1, num_downscales=0)
+    trainer = GaussianTrainer(ds, cfg)
+    pose = ds.camera_pose(0)
+
+    img = trainer.render_from_pose(pose, ref_cam_idx=0)
+
+    assert isinstance(img, np.ndarray)
+    assert img.dtype == np.float32
+    assert img.ndim == 3
+    assert img.shape[2] == 3
+    assert img.shape[0] > 0 and img.shape[1] > 0
+
+
+@pytest.mark.skipif(not HAS_GARDEN, reason="garden dataset not found")
 def test_train_one_step_with_mip_splatting():
     """MIP splatting path trains and renders without invalid pixels."""
     from msplat import TrainingConfig, Dataset, GaussianTrainer

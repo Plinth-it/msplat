@@ -4,14 +4,14 @@ import MsplatCore
 public struct TrainingConfig {
     public var iterations: Int32 = 30_000
     public var shDegree: Int32 = 3
-    public var shDegreeInterval: Int32 = 1
+    public var shDegreeInterval: Int32 = 0
     public var ssimWeight: Float = 0.2
     public var numDownscales: Int32 = 0
     public var resolutionSchedule: Int32 = 3_000
     public var refineEvery: Int32 = 200
     public var warmupLength: Int32 = 0
     public var resetAlphaEvery: Int32 = 0
-    public var densifyGradThresh: Float = 0.0020
+    public var densifyGradThresh: Float = 0.0025
     public var densifySizeThresh: Float = 0.01
     public var stopScreenSizeAt: Int32 = 15_000
     public var growthStopIter: Int32 = 15_000

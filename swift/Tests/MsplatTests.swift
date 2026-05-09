@@ -15,13 +15,13 @@ final class MsplatTests: XCTestCase {
         let config = TrainingConfig()
         XCTAssertEqual(config.iterations, 30_000)
         XCTAssertEqual(config.shDegree, 3)
-        XCTAssertEqual(config.shDegreeInterval, 1)
+        XCTAssertEqual(config.shDegreeInterval, 0)
         XCTAssertEqual(config.ssimWeight, 0.2, accuracy: 0.001)
         XCTAssertEqual(config.numDownscales, 0)
         XCTAssertEqual(config.refineEvery, 200)
         XCTAssertEqual(config.warmupLength, 0)
         XCTAssertEqual(config.resetAlphaEvery, 0)
-        XCTAssertEqual(config.densifyGradThresh, 0.0020, accuracy: 0.00001)
+        XCTAssertEqual(config.densifyGradThresh, 0.0025, accuracy: 0.00001)
         XCTAssertEqual(config.stopScreenSizeAt, 15_000)
         XCTAssertEqual(config.splitScreenSize, 0.25, accuracy: 0.00001)
         XCTAssertEqual(config.lrMean, 0.00002, accuracy: 0.0000001)
@@ -137,6 +137,31 @@ final class MsplatTests: XCTestCase {
         XCTAssertGreaterThan(rendered.width, 0)
         XCTAssertGreaterThan(rendered.height, 0)
         XCTAssertEqual(rendered.pixels.count, rendered.width * rendered.height * 3)
+    }
+
+    func testRenderFromPoseToBufferDimensionQuery() throws {
+        let dataset = GaussianDataset(
+            path: Self.gardenPath,
+            downscaleFactor: 4.0
+        )
+        var config = TrainingConfig()
+        config.iterations = 1
+        config.numDownscales = 0
+
+        let trainer = GaussianTrainer(dataset: dataset, config: config)
+        let pose = dataset.cameraPose(at: 0)
+        var width: Int32 = 0
+        var height: Int32 = 0
+
+        trainer.renderFromPoseToBuffer(
+            camToWorld: pose,
+            rgba: nil,
+            width: &width,
+            height: &height
+        )
+
+        XCTAssertGreaterThan(width, 0)
+        XCTAssertGreaterThan(height, 0)
     }
 
     func testExportPly() throws {

@@ -23,23 +23,29 @@ public class GaussianTrainer {
     /// Run one training step.
     @discardableResult
     public func step() -> TrainingStats {
-        TrainingStats(from: msplat_trainer_step(handle))
+        let stats = TrainingStats(from: msplat_trainer_step(handle))
+        msplatRequireSuccess()
+        return stats
     }
 
     /// Train for all remaining iterations (blocking, no progress callbacks).
     /// For progress reporting, use `step()` in a loop instead.
     public func train() {
         msplat_trainer_train(handle)
+        msplatRequireSuccess()
     }
 
     /// Evaluate on held-out test views.
     public func evaluate() -> EvalMetrics {
-        EvalMetrics(from: msplat_trainer_evaluate(handle))
+        let metrics = EvalMetrics(from: msplat_trainer_evaluate(handle))
+        msplatRequireSuccess()
+        return metrics
     }
 
     /// Render a camera view as RGB float32 pixel data.
     public func render(cameraIndex: Int, useTest: Bool = false) -> PixelData {
         let buf = msplat_trainer_render(handle, Int32(cameraIndex), useTest)
+        msplatRequireSuccess()
         let count = Int(buf.width) * Int(buf.height) * 3
         let data = Array(UnsafeBufferPointer(start: buf.data, count: count))
         free(buf.data)
@@ -53,6 +59,7 @@ public class GaussianTrainer {
         let buf = camToWorld.withUnsafeBufferPointer { ptr in
             msplat_trainer_render_pose(handle, ptr.baseAddress!, Int32(refCameraIndex))
         }
+        msplatRequireSuccess()
         let count = Int(buf.width) * Int(buf.height) * 3
         let data = Array(UnsafeBufferPointer(start: buf.data, count: count))
         free(buf.data)
@@ -72,50 +79,68 @@ public class GaussianTrainer {
             msplat_trainer_render_pose_to_buffer(handle, ptr.baseAddress!, Int32(refCameraIndex),
                                                  rgba, &width, &height)
         }
+        msplatRequireSuccess()
     }
 
     /// Export scene as PLY.
     public func exportPly(to path: String) {
         msplat_trainer_export_ply(handle, path)
+        msplatRequireSuccess()
     }
 
     /// Export an importance-ranked LOD PLY with at most `targetCount` Gaussians.
     public func exportLodPly(to path: String, targetCount: Int32) {
         msplat_trainer_export_lod_ply(handle, path, targetCount)
+        msplatRequireSuccess()
     }
 
     /// Decimate the active model in memory to at most `targetCount` Gaussians.
     public func decimateToLod(targetCount: Int32) {
         msplat_trainer_decimate_to_lod(handle, targetCount)
+        msplatRequireSuccess()
     }
 
     /// Export scene as .splat.
     public func exportSplat(to path: String) {
         msplat_trainer_export_splat(handle, path)
+        msplatRequireSuccess()
     }
 
     /// Load scene from a trained PLY. Returns the saved iteration.
     @discardableResult
     public func loadPly(from path: String) -> Int {
-        Int(msplat_trainer_load_ply(handle, path))
+        let iteration = Int(msplat_trainer_load_ply(handle, path))
+        msplatRequireSuccess()
+        return iteration
     }
 
     /// Save full training state for resume.
     public func saveCheckpoint(to path: String) {
         msplat_trainer_save_checkpoint(handle, path)
+        msplatRequireSuccess()
     }
 
     /// Load checkpoint and resume training. Returns the saved iteration.
     @discardableResult
     public func loadCheckpoint(from path: String) -> Int {
-        Int(msplat_trainer_load_checkpoint(handle, path))
+        let iteration = Int(msplat_trainer_load_checkpoint(handle, path))
+        msplatRequireSuccess()
+        return iteration
     }
 
     /// Current number of gaussians.
-    public var splatCount: Int { Int(msplat_trainer_splat_count(handle)) }
+    public var splatCount: Int {
+        let count = Int(msplat_trainer_splat_count(handle))
+        msplatRequireSuccess()
+        return count
+    }
 
     /// Current training iteration.
-    public var iteration: Int { Int(msplat_trainer_iteration(handle)) }
+    public var iteration: Int {
+        let iteration = Int(msplat_trainer_iteration(handle))
+        msplatRequireSuccess()
+        return iteration
+    }
 }
 
 /// RGB float32 pixel data from a render.
@@ -128,10 +153,12 @@ public struct PixelData {
 /// Synchronize the GPU (wait for all commands to complete).
 public func msplatSync() {
     msplat_sync()
+    msplatRequireSuccess()
 }
 
 /// Release cached GPU resources. Called automatically when GaussianTrainer is deallocated.
 /// Only needed if you want to free GPU memory early in a long-running process.
 public func msplatCleanup() {
     msplat_cleanup()
+    msplatRequireSuccess()
 }

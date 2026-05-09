@@ -103,6 +103,23 @@ struct Trainer::Impl {
     }
 };
 
+static Camera cameraWithPose(const Camera& reference, const float camToWorld[16]) {
+    Camera cam;
+    cam.width = reference.width;
+    cam.height = reference.height;
+    cam.fx = reference.fx;
+    cam.fy = reference.fy;
+    cam.cx = reference.cx;
+    cam.cy = reference.cy;
+    cam.k1 = reference.k1;
+    cam.k2 = reference.k2;
+    cam.k3 = reference.k3;
+    cam.p1 = reference.p1;
+    cam.p2 = reference.p2;
+    memcpy(cam.camToWorld, camToWorld, 16 * sizeof(float));
+    return cam;
+}
+
 Trainer::Trainer(Dataset& dataset, const Config& config)
     : impl(std::make_unique<Impl>())
 {
@@ -235,13 +252,9 @@ PixelBuffer Trainer::renderFromPose(const float camToWorld[16], int refCameraInd
     if (refCameraIndex < 0 || refCameraIndex >= (int)cams.size())
         return {};
 
-    Camera cam = cams[refCameraIndex];  // copy intrinsics
-    memcpy(cam.camToWorld, camToWorld, 16 * sizeof(float));
-    // Invalidate cached matrices so prepareCam recomputes from the new pose
-    cam.cachedViewMat = MTensor();
-    cam.cachedProjViewMat = MTensor();
-    cam.ensureImageLoaded();
-
+    Camera& reference = cams[refCameraIndex];
+    reference.ensureImageLoaded();
+    Camera cam = cameraWithPose(reference, camToWorld);
     MTensor rgb = impl->model->render(cam, impl->currentStep);
     msplat_gpu_sync();
     MTensor rgbCpu = rgb.cpu();
@@ -257,22 +270,27 @@ void Trainer::renderFromPoseToBuffer(const float camToWorld[16], int refCameraIn
                                   uint8_t* outRGBA, int* outWidth, int* outHeight) {
     auto& cams = impl->ds->trainCams;
     if (refCameraIndex < 0 || refCameraIndex >= (int)cams.size()) {
-        *outWidth = 0; *outHeight = 0; return;
+        if (outWidth) *outWidth = 0;
+        if (outHeight) *outHeight = 0;
+        return;
     }
 
-    Camera cam = cams[refCameraIndex];
-    memcpy(cam.camToWorld, camToWorld, 16 * sizeof(float));
-    cam.cachedViewMat = MTensor();
-    cam.cachedProjViewMat = MTensor();
-    cam.ensureImageLoaded();
+    Camera& reference = cams[refCameraIndex];
+    reference.ensureImageLoaded();
+    int downscale = impl->model->getDownscaleFactor(impl->currentStep);
+    int queryWidth = static_cast<int>(reference.width / static_cast<float>(downscale));
+    int queryHeight = static_cast<int>(reference.height / static_cast<float>(downscale));
+    if (outWidth) *outWidth = queryWidth;
+    if (outHeight) *outHeight = queryHeight;
+    if (!outRGBA) return;
 
+    Camera cam = cameraWithPose(reference, camToWorld);
     MTensor rgb = impl->model->render(cam, impl->currentStep);
     msplat_gpu_sync();
 
     int h = (int)rgb.size(0), w = (int)rgb.size(1);
-    *outWidth = w;
-    *outHeight = h;
-    if (!outRGBA) return;
+    if (outWidth) *outWidth = w;
+    if (outHeight) *outHeight = h;
 
     // Read directly from GPU tensor (unified memory on Apple Silicon)
     const float* src = (const float*)rgb.data_ptr();
@@ -350,6 +368,31 @@ static void setLastError(const char* error) {
     g_last_error = error;
 }
 
+template <typename T, typename F>
+static T callCatching(T fallback, const char* unknownError, F&& f) {
+    try {
+        clearLastError();
+        return f();
+    } catch (const std::exception& error) {
+        setLastError(error);
+    } catch (...) {
+        setLastError(unknownError);
+    }
+    return fallback;
+}
+
+template <typename F>
+static void callCatchingVoid(const char* unknownError, F&& f) {
+    try {
+        clearLastError();
+        f();
+    } catch (const std::exception& error) {
+        setLastError(error);
+    } catch (...) {
+        setLastError(unknownError);
+    }
+}
+
 static msplat::Config configFromC(MsplatConfig c) {
     msplat::Config cfg;
     cfg.iterations = c.iterations;
@@ -396,6 +439,9 @@ MsplatDataset msplat_dataset_create(const char* path, float downscaleFactor,
                                      bool evalMode, int testEvery) {
     try {
         clearLastError();
+        if (!path) {
+            throw std::runtime_error("msplat dataset path is null");
+        }
         auto* ds = new msplat::Dataset(std::string(path), downscaleFactor, evalMode, testEvery);
         return static_cast<MsplatDataset>(ds);
     } catch (const std::exception& error) {
@@ -412,27 +458,46 @@ void msplat_dataset_destroy(MsplatDataset ds) {
 }
 
 int msplat_dataset_num_train(MsplatDataset ds) {
-    return static_cast<msplat::Dataset*>(ds)->numTrain();
+    return callCatching<int>(0, "unknown msplat dataset count error", [&]() {
+        if (!ds) throw std::runtime_error("msplat dataset handle is null");
+        return static_cast<msplat::Dataset*>(ds)->numTrain();
+    });
 }
 
 int msplat_dataset_num_test(MsplatDataset ds) {
-    return static_cast<msplat::Dataset*>(ds)->numTest();
+    return callCatching<int>(0, "unknown msplat dataset count error", [&]() {
+        if (!ds) throw std::runtime_error("msplat dataset handle is null");
+        return static_cast<msplat::Dataset*>(ds)->numTest();
+    });
 }
 
 int msplat_dataset_initial_point_count(MsplatDataset ds) {
-    return ds ? static_cast<msplat::Dataset*>(ds)->initialPointCount() : 0;
+    return callCatching<int>(0, "unknown msplat dataset point-count error", [&]() {
+        if (!ds) throw std::runtime_error("msplat dataset handle is null");
+        return static_cast<msplat::Dataset*>(ds)->initialPointCount();
+    });
 }
 
 bool msplat_dataset_camera_has_alpha(MsplatDataset ds, int cameraIndex) {
-    return static_cast<msplat::Dataset*>(ds)->cameraHasAlpha(cameraIndex);
+    return callCatching<bool>(false, "unknown msplat dataset alpha query error", [&]() {
+        if (!ds) throw std::runtime_error("msplat dataset handle is null");
+        return static_cast<msplat::Dataset*>(ds)->cameraHasAlpha(cameraIndex);
+    });
 }
 
 bool msplat_dataset_camera_has_mask(MsplatDataset ds, int cameraIndex) {
-    return static_cast<msplat::Dataset*>(ds)->cameraHasMask(cameraIndex);
+    return callCatching<bool>(false, "unknown msplat dataset mask query error", [&]() {
+        if (!ds) throw std::runtime_error("msplat dataset handle is null");
+        return static_cast<msplat::Dataset*>(ds)->cameraHasMask(cameraIndex);
+    });
 }
 
 void msplat_dataset_camera_pose(MsplatDataset ds, int cameraIndex, float camToWorld[16]) {
-    static_cast<msplat::Dataset*>(ds)->cameraPose(cameraIndex, camToWorld);
+    callCatchingVoid("unknown msplat dataset pose query error", [&]() {
+        if (!ds) throw std::runtime_error("msplat dataset handle is null");
+        if (!camToWorld) throw std::runtime_error("msplat camera pose output is null");
+        static_cast<msplat::Dataset*>(ds)->cameraPose(cameraIndex, camToWorld);
+    });
 }
 
 MsplatTrainer msplat_trainer_create(MsplatDataset ds, MsplatConfig config) {
@@ -459,85 +524,138 @@ void msplat_trainer_destroy(MsplatTrainer t) {
 }
 
 MsplatStats msplat_trainer_step(MsplatTrainer t) {
-    auto stats = static_cast<msplat::Trainer*>(t)->step();
-    return MsplatStats{stats.iteration, stats.splatCount, stats.msPerStep};
+    return callCatching<MsplatStats>({}, "unknown msplat trainer step error", [&]() {
+        if (!t) throw std::runtime_error("msplat trainer handle is null");
+        auto stats = static_cast<msplat::Trainer*>(t)->step();
+        return MsplatStats{stats.iteration, stats.splatCount, stats.msPerStep};
+    });
 }
 
 void msplat_trainer_train(MsplatTrainer t) {
-    static_cast<msplat::Trainer*>(t)->train(0);
+    callCatchingVoid("unknown msplat trainer train error", [&]() {
+        if (!t) throw std::runtime_error("msplat trainer handle is null");
+        static_cast<msplat::Trainer*>(t)->train(0);
+    });
 }
 
 MsplatEvalMetrics msplat_trainer_evaluate(MsplatTrainer t) {
-    auto m = static_cast<msplat::Trainer*>(t)->evaluate();
-    return MsplatEvalMetrics{m.psnr, m.ssim, m.l1, m.numTest, m.numGaussians};
+    return callCatching<MsplatEvalMetrics>({}, "unknown msplat trainer evaluate error", [&]() {
+        if (!t) throw std::runtime_error("msplat trainer handle is null");
+        auto m = static_cast<msplat::Trainer*>(t)->evaluate();
+        return MsplatEvalMetrics{m.psnr, m.ssim, m.l1, m.numTest, m.numGaussians};
+    });
 }
 
 MsplatPixelBuffer msplat_trainer_render(MsplatTrainer t, int cameraIndex, bool useTest) {
-    auto buf = static_cast<msplat::Trainer*>(t)->render(cameraIndex, useTest);
-    MsplatPixelBuffer result{buf.data, buf.width, buf.height};
-    buf.data = nullptr; // Transfer ownership to caller
-    return result;
+    return callCatching<MsplatPixelBuffer>({}, "unknown msplat trainer render error", [&]() {
+        if (!t) throw std::runtime_error("msplat trainer handle is null");
+        auto buf = static_cast<msplat::Trainer*>(t)->render(cameraIndex, useTest);
+        MsplatPixelBuffer result{buf.data, buf.width, buf.height};
+        buf.data = nullptr; // Transfer ownership to caller
+        return result;
+    });
 }
 
 MsplatPixelBuffer msplat_trainer_render_pose(MsplatTrainer t, const float camToWorld[16], int refCameraIndex) {
-    auto buf = static_cast<msplat::Trainer*>(t)->renderFromPose(camToWorld, refCameraIndex);
-    MsplatPixelBuffer result{buf.data, buf.width, buf.height};
-    buf.data = nullptr;
-    return result;
+    return callCatching<MsplatPixelBuffer>({}, "unknown msplat trainer pose render error", [&]() {
+        if (!t) throw std::runtime_error("msplat trainer handle is null");
+        if (!camToWorld) throw std::runtime_error("msplat render pose input is null");
+        auto buf = static_cast<msplat::Trainer*>(t)->renderFromPose(camToWorld, refCameraIndex);
+        MsplatPixelBuffer result{buf.data, buf.width, buf.height};
+        buf.data = nullptr;
+        return result;
+    });
 }
 
 void msplat_trainer_render_pose_to_buffer(MsplatTrainer t, const float camToWorld[16],
                                       int refCameraIndex, uint8_t* outRGBA,
                                       int* outWidth, int* outHeight) {
-    static_cast<msplat::Trainer*>(t)->renderFromPoseToBuffer(
-        camToWorld, refCameraIndex, outRGBA, outWidth, outHeight);
+    callCatchingVoid("unknown msplat trainer pose buffer render error", [&]() {
+        if (!t) throw std::runtime_error("msplat trainer handle is null");
+        if (!camToWorld) throw std::runtime_error("msplat render pose input is null");
+        static_cast<msplat::Trainer*>(t)->renderFromPoseToBuffer(
+            camToWorld, refCameraIndex, outRGBA, outWidth, outHeight);
+    });
 }
 
 void msplat_trainer_export_ply(MsplatTrainer t, const char* path) {
-    static_cast<msplat::Trainer*>(t)->exportPly(std::string(path));
+    callCatchingVoid("unknown msplat trainer PLY export error", [&]() {
+        if (!t) throw std::runtime_error("msplat trainer handle is null");
+        if (!path) throw std::runtime_error("msplat PLY export path is null");
+        static_cast<msplat::Trainer*>(t)->exportPly(std::string(path));
+    });
 }
 
 void msplat_trainer_export_lod_ply(MsplatTrainer t, const char* path, int targetCount) {
-    static_cast<msplat::Trainer*>(t)->exportLodPly(std::string(path), targetCount);
+    callCatchingVoid("unknown msplat trainer LOD PLY export error", [&]() {
+        if (!t) throw std::runtime_error("msplat trainer handle is null");
+        if (!path) throw std::runtime_error("msplat LOD PLY export path is null");
+        static_cast<msplat::Trainer*>(t)->exportLodPly(std::string(path), targetCount);
+    });
 }
 
 void msplat_trainer_decimate_to_lod(MsplatTrainer t, int targetCount) {
-    static_cast<msplat::Trainer*>(t)->decimateToLod(targetCount);
+    callCatchingVoid("unknown msplat trainer LOD decimation error", [&]() {
+        if (!t) throw std::runtime_error("msplat trainer handle is null");
+        static_cast<msplat::Trainer*>(t)->decimateToLod(targetCount);
+    });
 }
 
 void msplat_trainer_export_splat(MsplatTrainer t, const char* path) {
-    static_cast<msplat::Trainer*>(t)->exportSplat(std::string(path));
+    callCatchingVoid("unknown msplat trainer splat export error", [&]() {
+        if (!t) throw std::runtime_error("msplat trainer handle is null");
+        if (!path) throw std::runtime_error("msplat splat export path is null");
+        static_cast<msplat::Trainer*>(t)->exportSplat(std::string(path));
+    });
 }
 
 int msplat_trainer_load_ply(MsplatTrainer t, const char* path) {
-    return static_cast<msplat::Trainer*>(t)->loadPly(std::string(path));
+    return callCatching<int>(-1, "unknown msplat trainer PLY load error", [&]() {
+        if (!t) throw std::runtime_error("msplat trainer handle is null");
+        if (!path) throw std::runtime_error("msplat PLY load path is null");
+        return static_cast<msplat::Trainer*>(t)->loadPly(std::string(path));
+    });
 }
 
 void msplat_trainer_save_checkpoint(MsplatTrainer t, const char* path) {
-    static_cast<msplat::Trainer*>(t)->saveCheckpoint(std::string(path));
+    callCatchingVoid("unknown msplat trainer checkpoint save error", [&]() {
+        if (!t) throw std::runtime_error("msplat trainer handle is null");
+        if (!path) throw std::runtime_error("msplat checkpoint save path is null");
+        static_cast<msplat::Trainer*>(t)->saveCheckpoint(std::string(path));
+    });
 }
 
 int msplat_trainer_load_checkpoint(MsplatTrainer t, const char* path) {
-    return static_cast<msplat::Trainer*>(t)->loadCheckpoint(std::string(path));
+    return callCatching<int>(-1, "unknown msplat trainer checkpoint load error", [&]() {
+        if (!t) throw std::runtime_error("msplat trainer handle is null");
+        if (!path) throw std::runtime_error("msplat checkpoint load path is null");
+        return static_cast<msplat::Trainer*>(t)->loadCheckpoint(std::string(path));
+    });
 }
 
 int msplat_trainer_splat_count(MsplatTrainer t) {
-    return static_cast<msplat::Trainer*>(t)->splatCount();
+    return callCatching<int>(0, "unknown msplat trainer splat-count error", [&]() {
+        if (!t) throw std::runtime_error("msplat trainer handle is null");
+        return static_cast<msplat::Trainer*>(t)->splatCount();
+    });
 }
 
 int msplat_trainer_iteration(MsplatTrainer t) {
-    return static_cast<msplat::Trainer*>(t)->iteration();
+    return callCatching<int>(0, "unknown msplat trainer iteration error", [&]() {
+        if (!t) throw std::runtime_error("msplat trainer handle is null");
+        return static_cast<msplat::Trainer*>(t)->iteration();
+    });
 }
 
 const char* msplat_last_error(void) { return g_last_error.c_str(); }
 void msplat_sync(void) {
-    try {
-        clearLastError();
+    callCatchingVoid("unknown msplat sync error", []() {
         msplat::sync();
-    } catch (const std::exception& error) {
-        setLastError(error);
-    } catch (...) {
-        setLastError("unknown msplat sync error");
-    }
+    });
 }
-void msplat_cleanup(void) { msplat::cleanup(); }
+
+void msplat_cleanup(void) {
+    callCatchingVoid("unknown msplat cleanup error", []() {
+        msplat::cleanup();
+    });
+}
