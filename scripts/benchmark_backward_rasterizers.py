@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+"""Run a stage-profile A/B for backward rasterizer modes."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Compare msplat backward rasterizer modes with stage profiling."
+    )
+    parser.add_argument("dataset", type=Path, help="Dataset path accepted by ./build/msplat")
+    parser.add_argument("--binary", type=Path, default=Path("build/msplat"))
+    parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--iters", type=int, default=120)
+    parser.add_argument("--debug-interval", type=int)
+    parser.add_argument(
+        "--modes",
+        nargs="+",
+        default=["pixel", "persplat"],
+        choices=["pixel", "perpixel", "chunked", "persplat", "brush"],
+    )
+    args, extra_args = parser.parse_known_args()
+    args.msplat_args = clean_extra_args(extra_args)
+    return args
+
+
+def clean_extra_args(args: list[str]) -> list[str]:
+    if args and args[0] == "--":
+        return args[1:]
+    return args
+
+
+def parse_float(pattern: str, text: str) -> float | None:
+    match = re.search(pattern, text, re.MULTILINE)
+    return float(match.group(1)) if match else None
+
+
+def parse_int(pattern: str, text: str) -> int | None:
+    match = re.search(pattern, text, re.MULTILINE)
+    return int(match.group(1)) if match else None
+
+
+def parse_metrics(log_text: str) -> dict[str, object]:
+    benchmark = re.search(
+        r"=== Benchmark .*?mean:\s+([0-9.]+) ms/iter\s+median:\s+([0-9.]+) ms/iter",
+        log_text,
+        re.DOTALL,
+    )
+    tile_ranges = re.search(
+        r"tile splats: avg ([0-9.]+) -> ([0-9.]+), median ([0-9.]+) -> ([0-9.]+), max ([0-9.]+) -> ([0-9.]+)",
+        log_text,
+    )
+    replay = re.search(
+        r"persplat replay estimate: active_pairs ([0-9.]+)M/sample, diagonal_steps ([0-9.]+)M/sample, tightened_skip ([0-9.]+)M/sample",
+        log_text,
+    )
+
+    return {
+        "iter_mean_ms": float(benchmark.group(1)) if benchmark else None,
+        "iter_median_ms": float(benchmark.group(2)) if benchmark else None,
+        "rast_bwd_median_ms": parse_float(r"^\s*rast_bwd\s+median=([0-9.]+)ms", log_text),
+        "rast_bwd_mean_ms": parse_float(r"^\s*rast_bwd\s+median=[0-9.]+ms\s+mean=([0-9.]+)ms", log_text),
+        "psnr": parse_float(r"train PSNR:\s+([0-9.]+)", log_text),
+        "ssim": parse_float(r"train SSIM:\s+([0-9.]+)", log_text),
+        "l1": parse_float(r"train L1:\s+([0-9.]+)", log_text),
+        "splats": parse_int(r"Progress:\s+100\.0%.*?\s+([0-9]+)\s+gaussians", log_text),
+        "tile_avg_before": float(tile_ranges.group(1)) if tile_ranges else None,
+        "tile_avg_after": float(tile_ranges.group(2)) if tile_ranges else None,
+        "tile_median_before": float(tile_ranges.group(3)) if tile_ranges else None,
+        "tile_median_after": float(tile_ranges.group(4)) if tile_ranges else None,
+        "replay_active_m": float(replay.group(1)) if replay else None,
+        "replay_diagonal_m": float(replay.group(2)) if replay else None,
+        "replay_skip_m": float(replay.group(3)) if replay else None,
+    }
+
+
+def fmt(value: object, digits: int = 3) -> str:
+    if value is None:
+        return "-"
+    if isinstance(value, float):
+        return f"{value:.{digits}f}"
+    return str(value)
+
+
+def run_mode(args: argparse.Namespace, mode: str, output_dir: Path, extra_args: list[str]) -> dict[str, object]:
+    mode_dir = output_dir / mode
+    mode_dir.mkdir(parents=True, exist_ok=True)
+    log_path = mode_dir / "run.log"
+    output_path = mode_dir / "out.ply"
+
+    env = os.environ.copy()
+    env["BENCHMARK"] = "1"
+    env["PROFILE_STAGES"] = "1"
+    env["MSPLAT_BACKWARD_DEBUG"] = "1"
+    env["MSPLAT_BACKWARD_DEBUG_INTERVAL"] = str(args.debug_interval or args.iters)
+
+    cmd = [
+        str(args.binary),
+        str(args.dataset),
+        "--output",
+        str(output_path),
+        "--total-train-iters",
+        str(args.iters),
+        "--backward-rasterizer",
+        mode,
+        *extra_args,
+    ]
+    result = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
+    log_path.write_text(result.stdout, encoding="utf-8")
+    if result.returncode != 0:
+        print(result.stdout)
+        raise SystemExit(result.returncode)
+
+    metrics = parse_metrics(result.stdout)
+    metrics["mode"] = mode
+    metrics["log"] = log_path
+    return metrics
+
+
+def print_table(results: list[dict[str, object]], output_dir: Path) -> None:
+    print(f"Logs: {output_dir}")
+    print()
+    print("| mode | iter median ms | rast_bwd median ms | PSNR | SSIM | L1 | splats | tile avg | replay active M |")
+    print("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
+    for row in results:
+        tile_avg = "-"
+        if row["tile_avg_before"] is not None and row["tile_avg_after"] is not None:
+            tile_avg = f"{fmt(row['tile_avg_before'], 1)}->{fmt(row['tile_avg_after'], 1)}"
+        print(
+            "| {mode} | {iter_ms} | {bwd_ms} | {psnr} | {ssim} | {l1} | {splats} | {tile_avg} | {replay} |".format(
+                mode=row["mode"],
+                iter_ms=fmt(row["iter_median_ms"]),
+                bwd_ms=fmt(row["rast_bwd_median_ms"]),
+                psnr=fmt(row["psnr"], 2),
+                ssim=fmt(row["ssim"], 4),
+                l1=fmt(row["l1"], 5),
+                splats=fmt(row["splats"], 0),
+                tile_avg=tile_avg,
+                replay=fmt(row["replay_active_m"], 1),
+            )
+        )
+
+
+def main() -> int:
+    args = parse_args()
+    extra_args = args.msplat_args
+    output_dir = args.output_dir or Path(tempfile.mkdtemp(prefix="msplat_backward_ab."))
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    results = [run_mode(args, mode, output_dir, extra_args) for mode in args.modes]
+    print_table(results, output_dir)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

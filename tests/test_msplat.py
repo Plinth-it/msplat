@@ -285,6 +285,20 @@ def test_metal_exposes_brush_style_persplat_backward():
     assert "max_useful_isect" in shader_source
 
 
+def test_backward_rasterizer_benchmark_script_wires_profile_ab():
+    repo_root = Path(__file__).resolve().parents[1]
+    script = (repo_root / "scripts" / "benchmark_backward_rasterizers.py").read_text(encoding="utf-8")
+
+    assert "BENCHMARK" in script
+    assert "PROFILE_STAGES" in script
+    assert "MSPLAT_BACKWARD_DEBUG" in script
+    assert '"pixel", "persplat"' in script
+    assert "--backward-rasterizer" in script
+    assert "rast_bwd" in script
+    assert "train PSNR" in script
+    assert "train SSIM" in script
+
+
 def test_native_cli_can_log_image_loading():
     if not NATIVE_CLI.exists():
         pytest.skip("native CLI is not built")
