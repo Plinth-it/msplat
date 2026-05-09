@@ -1414,12 +1414,24 @@ kernel void rasterize_backward_persplat_kernel(
     uint2 tile_origin = uint2(blockIdx.x * BLOCK_X, blockIdx.y * BLOCK_Y);
     float3 bg = float3(background[0], background[1], background[2]);
 
-    threadgroup float4 pix_state[TILE_PIXELS];
-    threadgroup float3 pix_v_out[TILE_PIXELS];
-    threadgroup float pix_alpha_tail[TILE_PIXELS];
-    threadgroup float pix_inv_final_alpha[TILE_PIXELS];
+    threadgroup half4 pix_state[TILE_PIXELS];
+    threadgroup half4 pix_v_out_tail[TILE_PIXELS];
+    threadgroup half pix_inv_final_alpha[TILE_PIXELS];
     threadgroup int range_start = 0;
     threadgroup int range_end = 0;
+
+    if (thread_rank == 0) {
+        int2 range = read_packed_int2(tile_bins, (int)tile_id);
+        range_start = range.x;
+        range_end = range.y;
+    }
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint num_splats_in_tile = (uint)max(0, range_end - range_start);
+    if (num_splats_in_tile == 0) {
+        return;
+    }
+    uint rounds = (num_splats_in_tile + SPLAT_BATCH - 1) / SPLAT_BATCH;
 
     for (uint pix_rank = thread_rank; pix_rank < TILE_PIXELS; pix_rank += SPLAT_BATCH) {
         uint2 local_xy = uint2(pix_rank % BLOCK_X, pix_rank / BLOCK_X);
@@ -1436,27 +1448,17 @@ kernel void rasterize_backward_persplat_kernel(
                     : (((1.0f - T_final) < target_alpha) ? -1.0f : 0.0f))
                 : 0.0f;
 
-            pix_state[pix_rank] = float4(final_rgb - T_final * bg, 1.0f);
-            pix_v_out[pix_rank] = v_out;
-            pix_alpha_tail[pix_rank] = T_final * (alpha_loss_grad - dot(bg, v_out));
-            pix_inv_final_alpha[pix_rank] = 1.0f / max(1.0f - T_final, 1e-5f);
+            pix_state[pix_rank] = half4(float4(final_rgb - T_final * bg, 1.0f));
+            pix_v_out_tail[pix_rank] = half4(float4(v_out, T_final * (alpha_loss_grad - dot(bg, v_out))));
+            pix_inv_final_alpha[pix_rank] = half(1.0f / max(1.0f - T_final, 1e-5f));
         } else {
-            pix_state[pix_rank] = float4(0.0f);
-            pix_v_out[pix_rank] = float3(0.0f);
-            pix_alpha_tail[pix_rank] = 0.0f;
-            pix_inv_final_alpha[pix_rank] = 0.0f;
+            pix_state[pix_rank] = half4(0.0h);
+            pix_v_out_tail[pix_rank] = half4(0.0h);
+            pix_inv_final_alpha[pix_rank] = 0.0h;
         }
     }
 
-    if (thread_rank == 0) {
-        int2 range = read_packed_int2(tile_bins, (int)tile_id);
-        range_start = range.x;
-        range_end = range.y;
-    }
     simdgroup_barrier(mem_flags::mem_threadgroup);
-
-    uint num_splats_in_tile = (uint)max(0, range_end - range_start);
-    uint rounds = (num_splats_in_tile + SPLAT_BATCH - 1) / SPLAT_BATCH;
 
     for (uint batch_idx = 0; batch_idx < rounds; ++batch_idx) {
         uint splat_offset = batch_idx * SPLAT_BATCH + thread_rank;
@@ -1491,7 +1493,7 @@ kernel void rasterize_backward_persplat_kernel(
                 && (iter - thread_rank) < TILE_PIXELS;
             if (active_iter) {
                 uint pix_rank = iter - thread_rank;
-                float4 state = pix_state[pix_rank];
+                float4 state = float4(pix_state[pix_rank]);
                 if (state.w > 1e-4f) {
                     uint2 local_xy = uint2(pix_rank % BLOCK_X, pix_rank / BLOCK_X);
                     uint2 pix_loc = tile_origin + local_xy;
@@ -1505,17 +1507,18 @@ kernel void rasterize_backward_persplat_kernel(
                         if (alpha >= 1.0f / 255.0f) {
                             float next_T = state.w * (1.0f - alpha);
                             if (next_T <= 1e-4f) {
-                                pix_state[pix_rank] = float4(state.xyz, 0.0f);
+                                pix_state[pix_rank] = half4(float4(state.xyz, 0.0f));
                             } else {
                                 float vis = alpha * state.w;
                                 float3 new_remain = state.xyz - vis * rgb;
-                                float3 v_out = pix_v_out[pix_rank];
+                                float4 v_out_tail = float4(pix_v_out_tail[pix_rank]);
+                                float3 v_out = v_out_tail.xyz;
 
                                 v_rgb_acc += vis * v_out;
 
                                 float ra = 1.0f / (1.0f - alpha);
                                 float v_alpha = dot(state.w * rgb - new_remain * ra, v_out)
-                                    + pix_alpha_tail[pix_rank] * ra;
+                                    + v_out_tail.w * ra;
                                 float v_sigma = -alpha * v_alpha;
 
                                 float2 v_xy_local = v_sigma * float2(
@@ -1528,9 +1531,9 @@ kernel void rasterize_backward_persplat_kernel(
                                     delta.y * delta.y);
                                 v_opacity_acc += -v_sigma * (1.0f - xy_opac.z);
                                 v_refine_acc += length(v_xy_local * float2((float)img_size.x, (float)img_size.y))
-                                    * pix_inv_final_alpha[pix_rank];
+                                    * float(pix_inv_final_alpha[pix_rank]);
 
-                                pix_state[pix_rank] = float4(new_remain, next_T);
+                                pix_state[pix_rank] = half4(float4(new_remain, next_T));
                             }
                         }
                     }
