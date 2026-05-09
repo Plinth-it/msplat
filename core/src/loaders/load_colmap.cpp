@@ -163,7 +163,7 @@ static std::string findColmapImagePath(const fs::path &root, const fs::path &ima
 
     std::vector<fs::path> matches;
     fs::path direct = imageDir / namePath;
-    if (fs::exists(direct)) matches.push_back(direct);
+    if (fs::exists(direct)) return direct.string();
 
     for (const auto &entry : fs::recursive_directory_iterator(root)) {
         if (!entry.is_regular_file()) continue;

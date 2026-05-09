@@ -509,6 +509,16 @@ def test_load_dataset_no_eval():
     assert ds.num_test == 0
 
 
+def test_dataset_rejects_invalid_eval_split_period():
+    from msplat import Dataset
+
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_minimal_nerfstudio_dataset(tmp, alpha=False)
+
+        with pytest.raises(ValueError, match="test_every must be at least 2"):
+            Dataset(tmp, eval_mode=True, test_every=0)
+
+
 def test_dataset_detects_transparent_png_alpha():
     from msplat import Dataset
 
@@ -743,8 +753,31 @@ def test_reduce_second_moment_one_step():
 
         stats = trainer.step()
 
+    assert stats.iteration == 1
+    assert stats.splat_count == 1
+
+
+def test_tiny_image_safe_with_zero_schedule_and_progressive_downscale():
+    from msplat import Dataset, GaussianTrainer, TrainingConfig
+
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_minimal_nerfstudio_dataset(tmp, alpha=False)
+        ds = Dataset(tmp)
+        cfg = TrainingConfig(
+            iterations=1,
+            num_downscales=2,
+            resolution_schedule=0,
+            refine_every=0,
+            ssim_weight=0.0,
+        )
+        trainer = GaussianTrainer(ds, cfg)
+
+        stats = trainer.step()
+        img = trainer.render(0)
+
         assert stats.iteration == 1
-        assert stats.splat_count == 1
+        assert img.shape[0] >= 1
+        assert img.shape[1] >= 1
 
 
 # ── Training tests ───────────────────────────────────────────────────────────

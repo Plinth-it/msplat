@@ -20,6 +20,7 @@
 #include <utility>
 #include <deque>
 #include <cstdlib>
+#include <stdexcept>
 #if !defined(_WIN32)
 #include <sys/ioctl.h>
 #include <unistd.h>
@@ -482,8 +483,8 @@ Image Camera::getImage(int downscaleFactor) {
     auto it = imagePyramids.find(downscaleFactor);
     if (it != imagePyramids.end()) return it->second;
 
-    int newW = image.width / downscaleFactor;
-    int newH = image.height / downscaleFactor;
+    int newW = std::max(1, image.width / downscaleFactor);
+    int newH = std::max(1, image.height / downscaleFactor);
     Image scaled = resizeArea(image, newW, newH);
     imagePyramids[downscaleFactor] = scaled;
     return scaled;
@@ -496,8 +497,8 @@ Image Camera::getMaskImage(int downscaleFactor) {
     auto it = maskPyramids.find(downscaleFactor);
     if (it != maskPyramids.end()) return it->second;
 
-    int newW = maskImage.width / downscaleFactor;
-    int newH = maskImage.height / downscaleFactor;
+    int newW = std::max(1, maskImage.width / downscaleFactor);
+    int newH = std::max(1, maskImage.height / downscaleFactor);
     Image scaled = resizeArea(maskImage, newW, newH);
     maskPyramids[downscaleFactor] = scaled;
     return scaled;
@@ -514,7 +515,6 @@ MTensor& Camera::getGPUImage(int downscaleFactor) {
 }
 
 MTensor& Camera::getGPUImage(int downscaleFactor, const float background[3]) {
-    Image img = getImage(downscaleFactor);
     if (background == nullptr) return getGPUImage(downscaleFactor);
 
     std::array<float, 3> bg = {background[0], background[1], background[2]};
@@ -522,6 +522,7 @@ MTensor& Camera::getGPUImage(int downscaleFactor, const float background[3]) {
         return getGPUImage(downscaleFactor);
     }
 
+    Image img = getImage(downscaleFactor);
     Image mask;
     const bool useExplicitMaskAlpha = !maskImage.empty();
     const bool useImageAlpha = img.hasAlpha();
@@ -883,6 +884,12 @@ std::tuple<std::vector<Camera>, Camera*> InputData::getCameras(bool validate, co
 
 std::tuple<std::vector<Camera>, std::vector<Camera>> InputData::splitTrainTest(int testEvery) {
     if (!evalCameras.empty()) return {cameras, evalCameras};
+    if (testEvery < 2) {
+        throw std::invalid_argument("test_every must be at least 2");
+    }
+    if (cameras.empty()) {
+        throw std::runtime_error("Cannot split an empty camera set");
+    }
 
     std::vector<Camera> train, test;
     for (int i = 0; i < (int)cameras.size(); i++) {

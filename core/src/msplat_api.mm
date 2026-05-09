@@ -278,8 +278,8 @@ void Trainer::renderFromPoseToBuffer(const float camToWorld[16], int refCameraIn
     Camera& reference = cams[refCameraIndex];
     reference.ensureImageLoaded();
     int downscale = impl->model->getDownscaleFactor(impl->currentStep);
-    int queryWidth = static_cast<int>(reference.width / static_cast<float>(downscale));
-    int queryHeight = static_cast<int>(reference.height / static_cast<float>(downscale));
+    int queryWidth = std::max(1, static_cast<int>(reference.width / static_cast<float>(downscale)));
+    int queryHeight = std::max(1, static_cast<int>(reference.height / static_cast<float>(downscale)));
     if (outWidth) *outWidth = queryWidth;
     if (outHeight) *outHeight = queryHeight;
     if (!outRGBA) return;

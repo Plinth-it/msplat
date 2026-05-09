@@ -213,9 +213,12 @@ Model::Model(const InputData &inputData, int numCameras,
     uint32_t randomSeed,
     const float* bgColor,
     bool renderMip)
-    : numCameras(numCameras), numDownscales(numDownscales), resolutionSchedule(resolutionSchedule),
+    : numCameras(numCameras), numDownscales(std::max(numDownscales, 0)),
+      resolutionSchedule(std::max(resolutionSchedule, 1)),
       shDegree(shDegree), shDegreeInterval(shDegreeInterval),
-      refineEvery(refineEvery), warmupLength(warmupLength), resetAlphaEvery(resetAlphaEvery),
+      refineEvery(std::max(refineEvery, 1)),
+      warmupLength(std::max(warmupLength, 0)),
+      resetAlphaEvery(std::max(resetAlphaEvery, 0)),
       stopSplitAt(std::max(growthStopIter, 0)),
       maxSplats(std::max(maxSplats, 1)),
       growthSelectFraction(std::clamp(growthSelectFraction, 0.0f, 1.0f)),
@@ -1159,8 +1162,8 @@ Model::CamSetup Model::prepareCam(Camera& cam, int step, int forcedDownscale) {
     CamSetup s;
     s.fx = cam.fx / sf; s.fy = cam.fy / sf;
     s.cx = cam.cx / sf; s.cy = cam.cy / sf;
-    s.height = static_cast<int>(cam.height / sf);
-    s.width = static_cast<int>(cam.width / sf);
+    s.height = std::max(1, static_cast<int>(cam.height / sf));
+    s.width = std::max(1, static_cast<int>(cam.width / sf));
 
     float fovX = 2.0f * std::atan(s.width / (2.0f * s.fx));
     float fovY = 2.0f * std::atan(s.height / (2.0f * s.fy));
