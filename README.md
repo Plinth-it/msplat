@@ -277,7 +277,10 @@ color model, or `--sh-degree 0` for DC-only color.
 The training backward rasterizer defaults to `auto`, which currently keeps the
 stable per-pixel path. Use `--backward-rasterizer persplat` or
 `--backward-rasterizer brush` to opt into the Brush-style per-splat diagonal
-replay path for benchmarking.
+replay path for benchmarking. Set `PROFILE_STAGES=1` to compare stage timings
+and `MSPLAT_BACKWARD_DEBUG=1` to print debug-only range/replay counters every
+100 completed training steps. Use `MSPLAT_BACKWARD_DEBUG_INTERVAL=N` to change
+that report interval.
 
 ### Build from source
 

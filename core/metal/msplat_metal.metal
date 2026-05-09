@@ -64,6 +64,17 @@ inline float packed_gt_effective(
     return gt;
 }
 
+kernel void copy_int_buffer_kernel(
+    constant uint &count [[buffer(0)]],
+    constant int *src [[buffer(1)]],
+    device int *dst [[buffer(2)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx < count) {
+        dst[idx] = src[idx];
+    }
+}
+
 inline uint num_sh_bases(const uint degree) {
     if (degree == 0)
         return 1;

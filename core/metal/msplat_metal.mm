@@ -1,6 +1,7 @@
 #import "bindings.h"
 #define BLOCK_X 16
 #define BLOCK_Y 16
+#define BLOCK_SIZE (BLOCK_X * BLOCK_Y)
 
 #import <Foundation/Foundation.h>
 
@@ -14,9 +15,11 @@
 #import <functional>
 #import <array>
 #import <algorithm>
+#import <cstdint>
 #import <mutex>
 #import <memory>
 #import <string>
+#import <vector>
 #import <cstring>
 #import <fstream>
 #import <cstdlib>
@@ -141,6 +144,7 @@ struct MetalContext {
     // Forward pipeline kernels
     id<MTLComputePipelineState> project_and_sh_forward_kernel_cpso;
     id<MTLComputePipelineState> nd_rasterize_forward_kernel_cpso;
+    id<MTLComputePipelineState> copy_int_buffer_kernel_cpso;
     // Brush-style dynamic intersection sorting
     id<MTLComputePipelineState> map_gaussian_to_intersects_kernel_cpso;
     id<MTLComputePipelineState> get_tile_bin_edges_kernel_cpso;
@@ -292,6 +296,7 @@ MetalContext* init_msplat_metal_context() {
     // Forward pipeline
     ctx->project_and_sh_forward_kernel_cpso       = load(@"project_and_sh_forward_kernel");
     ctx->nd_rasterize_forward_kernel_cpso         = load(@"nd_rasterize_forward_kernel");
+    ctx->copy_int_buffer_kernel_cpso              = load(@"copy_int_buffer_kernel");
     // Brush-style dynamic intersection sorting
     ctx->map_gaussian_to_intersects_kernel_cpso   = load(@"map_gaussian_to_intersects_kernel");
     ctx->get_tile_bin_edges_kernel_cpso           = load(@"get_tile_bin_edges_kernel");
@@ -525,6 +530,7 @@ struct FusedTensorCache {
     MTensor loss_intermediates;
     MTensor ssim_h_buf;
     MTensor tile_bins, loss_sum;
+    MTensor debug_tile_bins_before_raster;
     MTensor lpips_rendered_nchw, lpips_gt_nchw, lpips_grad_nchw, lpips_loss;
 
     // Tile-local sorting buffers
@@ -655,6 +661,12 @@ struct FusedTensorCache {
         }
         if (!overflow_flag.defined()) {
             overflow_flag = mtensor_empty(dev, {1}, DType::Int32);
+        }
+    }
+
+    void ensure_backward_debug(int nt, id<MTLDevice> dev) {
+        if (!debug_tile_bins_before_raster.defined() || debug_tile_bins_before_raster.size(0) != nt) {
+            debug_tile_bins_before_raster = mtensor_empty(dev, {nt, 2}, DType::Int32);
         }
     }
 
@@ -1060,6 +1072,163 @@ static bool should_use_persplat_backward(unsigned img_width, unsigned img_height
         warned = true;
     }
     return false;
+}
+
+static bool should_collect_backward_debug() {
+    static bool checked = false;
+    static bool enabled = false;
+    if (!checked) {
+        enabled = std::getenv("MSPLAT_BACKWARD_DEBUG") != nullptr;
+        checked = true;
+    }
+    return enabled;
+}
+
+static int backward_debug_report_interval() {
+    static bool checked = false;
+    static int interval = 100;
+    if (!checked) {
+        if (const char *env = std::getenv("MSPLAT_BACKWARD_DEBUG_INTERVAL")) {
+            interval = std::max(1, std::atoi(env));
+        }
+        checked = true;
+    }
+    return interval;
+}
+
+struct BackwardDebugSample {
+    double pre_avg = 0.0;
+    double post_avg = 0.0;
+    double pre_median = 0.0;
+    double post_median = 0.0;
+    int pre_max = 0;
+    int post_max = 0;
+    uint64_t replay_active_pairs = 0;
+    uint64_t replay_diagonal_steps = 0;
+    uint64_t tightened_pairs_skipped = 0;
+    uint64_t saturated_pixels = 0;
+};
+
+struct BackwardDebugAccum {
+    uint64_t samples = 0;
+    double pre_avg_sum = 0.0;
+    double post_avg_sum = 0.0;
+    double pre_median_sum = 0.0;
+    double post_median_sum = 0.0;
+    double pre_max_sum = 0.0;
+    double post_max_sum = 0.0;
+    uint64_t replay_active_pairs = 0;
+    uint64_t replay_diagonal_steps = 0;
+    uint64_t tightened_pairs_skipped = 0;
+    uint64_t saturated_pixels = 0;
+};
+
+static std::mutex g_backward_debug_mutex;
+static BackwardDebugAccum g_backward_debug_accum;
+
+static double median_from_sorted(const std::vector<int> &values) {
+    if (values.empty()) return 0.0;
+    size_t mid = values.size() / 2;
+    if ((values.size() & 1u) != 0u) return (double)values[mid];
+    return 0.5 * ((double)values[mid - 1] + (double)values[mid]);
+}
+
+static BackwardDebugSample make_backward_debug_sample(
+    const int32_t *pre_bins,
+    const int32_t *post_bins,
+    const float *final_Ts,
+    int tile_bounds_x,
+    int tile_bounds_y,
+    int img_width,
+    int img_height
+) {
+    BackwardDebugSample sample;
+    const int num_tiles = tile_bounds_x * tile_bounds_y;
+    std::vector<int> pre_lengths;
+    std::vector<int> post_lengths;
+    pre_lengths.reserve(num_tiles);
+    post_lengths.reserve(num_tiles);
+
+    uint64_t pre_sum = 0;
+    uint64_t post_sum = 0;
+
+    for (int tile_id = 0; tile_id < num_tiles; ++tile_id) {
+        int start = pre_bins[2 * tile_id];
+        int pre_end = std::max(start, pre_bins[2 * tile_id + 1]);
+        int post_end = std::max(start, post_bins[2 * tile_id + 1]);
+        int pre_len = std::max(0, pre_end - start);
+        int post_len = std::max(0, post_end - start);
+        int tile_x = tile_id % tile_bounds_x;
+        int tile_y = tile_id / tile_bounds_x;
+        int pixels_x = std::max(0, std::min(BLOCK_X, img_width - tile_x * BLOCK_X));
+        int pixels_y = std::max(0, std::min(BLOCK_Y, img_height - tile_y * BLOCK_Y));
+        uint64_t pixels = (uint64_t)pixels_x * (uint64_t)pixels_y;
+
+        pre_lengths.push_back(pre_len);
+        post_lengths.push_back(post_len);
+        pre_sum += (uint64_t)pre_len;
+        post_sum += (uint64_t)post_len;
+        sample.pre_max = std::max(sample.pre_max, pre_len);
+        sample.post_max = std::max(sample.post_max, post_len);
+        sample.replay_active_pairs += (uint64_t)post_len * pixels;
+        sample.tightened_pairs_skipped += (uint64_t)std::max(0, pre_len - post_len) * pixels;
+        for (int offset = 0; offset < post_len; offset += BLOCK_SIZE) {
+            int batch = std::min(BLOCK_SIZE, post_len - offset);
+            sample.replay_diagonal_steps += (uint64_t)(batch + BLOCK_SIZE - 1);
+        }
+    }
+
+    std::sort(pre_lengths.begin(), pre_lengths.end());
+    std::sort(post_lengths.begin(), post_lengths.end());
+    if (num_tiles > 0) {
+        sample.pre_avg = (double)pre_sum / (double)num_tiles;
+        sample.post_avg = (double)post_sum / (double)num_tiles;
+    }
+    sample.pre_median = median_from_sorted(pre_lengths);
+    sample.post_median = median_from_sorted(post_lengths);
+
+    const uint64_t num_pixels = (uint64_t)img_width * (uint64_t)img_height;
+    for (uint64_t i = 0; i < num_pixels; ++i) {
+        if (final_Ts[i] <= 1e-4f) {
+            sample.saturated_pixels++;
+        }
+    }
+    return sample;
+}
+
+static void record_backward_debug_sample(const BackwardDebugSample &sample, bool persplat_enabled) {
+    std::lock_guard<std::mutex> lock(g_backward_debug_mutex);
+    auto &acc = g_backward_debug_accum;
+    acc.samples++;
+    acc.pre_avg_sum += sample.pre_avg;
+    acc.post_avg_sum += sample.post_avg;
+    acc.pre_median_sum += sample.pre_median;
+    acc.post_median_sum += sample.post_median;
+    acc.pre_max_sum += sample.pre_max;
+    acc.post_max_sum += sample.post_max;
+    acc.replay_active_pairs += sample.replay_active_pairs;
+    acc.replay_diagonal_steps += sample.replay_diagonal_steps;
+    acc.tightened_pairs_skipped += sample.tightened_pairs_skipped;
+    acc.saturated_pixels += sample.saturated_pixels;
+
+    int interval = backward_debug_report_interval();
+    if ((acc.samples % (uint64_t)interval) != 0u) return;
+
+    double n = (double)acc.samples;
+    fprintf(stderr,
+            "\n  === Backward Raster Debug (n=%llu, mode=%s) ===\n"
+            "  tile splats: avg %.1f -> %.1f, median %.1f -> %.1f, max %.1f -> %.1f\n"
+            "  persplat replay estimate: active_pairs %.1fM/sample, diagonal_steps %.1fM/sample, tightened_skip %.1fM/sample\n"
+            "  saturated pixels: %.1f/sample\n",
+            (unsigned long long)acc.samples,
+            persplat_enabled ? "persplat" : "pixel",
+            acc.pre_avg_sum / n, acc.post_avg_sum / n,
+            acc.pre_median_sum / n, acc.post_median_sum / n,
+            acc.pre_max_sum / n, acc.post_max_sum / n,
+            ((double)acc.replay_active_pairs / n) / 1e6,
+            ((double)acc.replay_diagonal_steps / n) / 1e6,
+            ((double)acc.tightened_pairs_skipped / n) / 1e6,
+            (double)acc.saturated_pixels / n);
 }
 
 // Internal forward pipeline — used by both msplat_render and msplat_train_step.
@@ -1657,6 +1826,10 @@ std::tuple<MTensor, float> msplat_train_step(
                             ssim_weight > 0.0f, lpips_loss_weight > 0.0f,
                             !use_dynamic_intersections, use_dynamic_u32_keys, ctx->device);
     g_tcache.ensure_backward(num_points, features_rest_bases, ctx->device);
+    bool collect_backward_debug = should_collect_backward_debug();
+    if (collect_backward_debug) {
+        g_tcache.ensure_backward_debug(num_tiles, ctx->device);
+    }
 
     MTensor &xys = g_tcache.xys;
     MTensor &depths = g_tcache.depths;
@@ -1675,6 +1848,7 @@ std::tuple<MTensor, float> msplat_train_step(
     MTensor &isect_ids_u32_tmp = g_tcache.isect_ids_u32_tmp;
     MTensor &radix_counts = g_tcache.radix_counts;
     MTensor &tile_bins = g_tcache.tile_bins;
+    MTensor &debug_tile_bins_before_raster = g_tcache.debug_tile_bins_before_raster;
     MTensor &loss_sum = g_tcache.loss_sum;
     MTensor &packed_xy_opac = g_tcache.packed_xy_opac;
     MTensor &packed_conic = g_tcache.packed_conic;
@@ -1738,6 +1912,16 @@ std::tuple<MTensor, float> msplat_train_step(
     bool use_persplat_backward = should_use_persplat_backward(img_width, img_height, num_tiles);
 
     // ========================== FORWARD ENCODE LAMBDAS ==========================
+
+    auto encode_copy_debug_tile_bins = [&](id<MTLComputeCommandEncoder> enc) {
+        if (!collect_backward_debug) return;
+        uint32_t count = (uint32_t)(num_tiles * 2);
+        [enc setComputePipelineState:ctx->copy_int_buffer_kernel_cpso];
+        ENC_SCALAR(enc, count, 0);
+        ENC_BUF(enc, tile_bins, 1);
+        ENC_BUF(enc, debug_tile_bins_before_raster, 2);
+        [enc dispatchThreads:MTLSizeMake(count, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    };
 
     auto encode_proj_sh = [&](id<MTLComputeCommandEncoder> enc) {
         NSUInteger tpg = MIN(ctx->project_and_sh_forward_kernel_cpso.maxTotalThreadsPerThreadgroup, (NSUInteger)num_points);
@@ -2350,12 +2534,15 @@ std::tuple<MTensor, float> msplat_train_step(
     }
     bwd_K_max = K_max;
 
+    id<MTLCommandBuffer> debug_command_buffer = nil;
+
     if (g_profile_stages && ctx->counterSamplingAvailable) {
         // Per-stage profiling: separate encoders on the SAME command buffer,
         // each with start/end timestamp sampling via the pass descriptor.
         // Metal handles inter-encoder resource hazard tracking automatically.
         id<MTLCommandBuffer> command_buffer = ctx->getCommandBuffer();
         assert(command_buffer && "Failed to retrieve command buffer reference");
+        debug_command_buffer = command_buffer;
 
         id<MTLCounterSampleBuffer> csb = ctx->counterSampleBuffer;
         double ticksToMs = ctx->ticksToMs;
@@ -2430,6 +2617,10 @@ std::tuple<MTensor, float> msplat_train_step(
 
             // Stage 6: rast_fwd
             enc = make_profiled_encoder(5);
+            encode_copy_debug_tile_bins(enc);
+            if (collect_backward_debug) {
+                [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+            }
             encode_rast_fwd(enc);
             [enc endEncoding];
 
@@ -2499,6 +2690,7 @@ std::tuple<MTensor, float> msplat_train_step(
         // Production: single encoder for everything
         id<MTLCommandBuffer> command_buffer = ctx->getCommandBuffer();
         assert(command_buffer && "Failed to retrieve command buffer reference");
+        debug_command_buffer = command_buffer;
 
         dispatch_sync(ctx->d_queue, ^(){
             do_blit_zero(command_buffer);
@@ -2521,6 +2713,10 @@ std::tuple<MTensor, float> msplat_train_step(
                 encode_prefix_map_fixed(enc);
             }
             [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+            encode_copy_debug_tile_bins(enc);
+            if (collect_backward_debug) {
+                [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+            }
             encode_rast_fwd(enc);
             [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
             // --- Fused loss forward + backward ---
@@ -2544,6 +2740,37 @@ std::tuple<MTensor, float> msplat_train_step(
 
             [enc endEncoding];
         });
+    }
+
+    if (collect_backward_debug && debug_command_buffer) {
+        id<MTLBuffer> pre_bins_buffer = debug_tile_bins_before_raster.buffer();
+        id<MTLBuffer> post_bins_buffer = tile_bins.buffer();
+        id<MTLBuffer> final_Ts_buffer = final_Ts.buffer();
+        [pre_bins_buffer retain];
+        [post_bins_buffer retain];
+        [final_Ts_buffer retain];
+        int debug_tile_bounds_x = (int)rast_tb[0];
+        int debug_tile_bounds_y = (int)rast_tb[1];
+        int debug_img_width = (int)img_width;
+        int debug_img_height = (int)img_height;
+        bool debug_persplat_enabled = use_persplat_backward;
+        [debug_command_buffer addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+            @autoreleasepool {
+                if (cb.status == MTLCommandBufferStatusCompleted) {
+                    const int32_t *pre_bins = static_cast<const int32_t *>([pre_bins_buffer contents]);
+                    const int32_t *post_bins = static_cast<const int32_t *>([post_bins_buffer contents]);
+                    const float *final_Ts_ptr = static_cast<const float *>([final_Ts_buffer contents]);
+                    BackwardDebugSample sample = make_backward_debug_sample(
+                        pre_bins, post_bins, final_Ts_ptr,
+                        debug_tile_bounds_x, debug_tile_bounds_y,
+                        debug_img_width, debug_img_height);
+                    record_backward_debug_sample(sample, debug_persplat_enabled);
+                }
+                [pre_bins_buffer release];
+                [post_bins_buffer release];
+                [final_Ts_buffer release];
+            }
+        }];
     }
 
     // Callers currently use the returned radii only. Reading loss_sum here would

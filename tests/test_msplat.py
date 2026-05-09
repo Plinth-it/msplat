@@ -274,8 +274,11 @@ def test_metal_exposes_brush_style_persplat_backward():
     assert "rasterize_backward_persplat_kernel_cpso" in host_source
     assert 'load(@"rasterize_backward_persplat_kernel")' in host_source
     assert "MSPLAT_BACKWARD_RASTERIZER" in host_source
+    assert "MSPLAT_BACKWARD_DEBUG" in host_source
+    assert "copy_int_buffer_kernel_cpso" in host_source
     assert "--backward-rasterizer" in (repo_root / "cli" / "msplat.cpp").read_text(encoding="utf-8")
     assert "rasterize_backward_persplat_kernel" in shader_source
+    assert "copy_int_buffer_kernel" in shader_source
     assert "SPLAT_BATCH" in shader_source
     assert "pix_state" in shader_source
     assert "diagonal" in shader_source.lower()
