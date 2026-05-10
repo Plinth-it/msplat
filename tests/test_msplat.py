@@ -310,6 +310,19 @@ def test_metal_exposes_brush_style_persplat_backward():
     assert "max_useful_isect" in shader_source
 
 
+def test_persplat_backward_scales_loss_gradient_before_half_pack():
+    repo_root = Path(__file__).resolve().parents[1]
+    shader_source = (repo_root / "core" / "metal" / "msplat_metal.metal").read_text(encoding="utf-8")
+    start = shader_source.index("kernel void rasterize_backward_persplat_kernel")
+    end = shader_source.index("kernel void nd_rasterize_backward_kernel", start)
+    body = shader_source[start:end]
+
+    assert "threadgroup half4 pix_v_out_tail" in body
+    assert "pix_v_out_tail_scale" in body
+    assert "inv_pix_v_out_tail_scale" in body
+    assert "float4(pix_v_out_tail[pix_rank]) * inv_pix_v_out_tail_scale" in body
+
+
 def test_backward_rasterizer_benchmark_script_wires_profile_ab():
     repo_root = Path(__file__).resolve().parents[1]
     script = (repo_root / "scripts" / "benchmark_backward_rasterizers.py").read_text(encoding="utf-8")

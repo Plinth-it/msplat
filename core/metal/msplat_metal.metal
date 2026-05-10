@@ -1413,6 +1413,8 @@ kernel void rasterize_backward_persplat_kernel(
 
     uint2 tile_origin = uint2(blockIdx.x * BLOCK_X, blockIdx.y * BLOCK_Y);
     float3 bg = float3(background[0], background[1], background[2]);
+    float pix_v_out_tail_scale = max(1.0f, float(img_size.x) * float(img_size.y));
+    float inv_pix_v_out_tail_scale = 1.0f / pix_v_out_tail_scale;
 
     threadgroup half4 pix_state[TILE_PIXELS];
     threadgroup half4 pix_v_out_tail[TILE_PIXELS];
@@ -1449,7 +1451,8 @@ kernel void rasterize_backward_persplat_kernel(
                 : 0.0f;
 
             pix_state[pix_rank] = half4(float4(final_rgb - T_final * bg, 1.0f));
-            pix_v_out_tail[pix_rank] = half4(float4(v_out, T_final * (alpha_loss_grad - dot(bg, v_out))));
+            pix_v_out_tail[pix_rank] = half4(float4(v_out, T_final * (alpha_loss_grad - dot(bg, v_out)))
+                * pix_v_out_tail_scale);
             pix_inv_final_alpha[pix_rank] = half(1.0f / max(1.0f - T_final, 1e-5f));
         } else {
             pix_state[pix_rank] = half4(0.0h);
@@ -1511,7 +1514,7 @@ kernel void rasterize_backward_persplat_kernel(
                             } else {
                                 float vis = alpha * state.w;
                                 float3 new_remain = state.xyz - vis * rgb;
-                                float4 v_out_tail = float4(pix_v_out_tail[pix_rank]);
+                                float4 v_out_tail = float4(pix_v_out_tail[pix_rank]) * inv_pix_v_out_tail_scale;
                                 float3 v_out = v_out_tail.xyz;
 
                                 v_rgb_acc += vis * v_out;
