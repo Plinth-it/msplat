@@ -245,6 +245,8 @@ def test_native_cli_exposes_quality_presets():
     assert "fast, default, brush" in result.stdout
     assert "--image-prefetch-workers" in result.stdout
     assert "--no-log-image-loading" in result.stdout
+    assert "--final-quality" in result.stdout
+    assert "--no-final-quality" in result.stdout
     assert "--backward-rasterizer" in result.stdout
 
 
@@ -433,6 +435,99 @@ def test_native_cli_can_disable_default_image_loading_log():
     combined_output = result.stdout + result.stderr
     assert b"image cache" not in combined_output
     assert b"prepared target image.png" not in combined_output
+
+
+def test_native_cli_can_skip_final_quality_pass():
+    if not NATIVE_CLI.exists():
+        pytest.skip("native CLI is not built")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_minimal_colmap_text_dataset(tmp)
+
+        result = subprocess.run(
+            [
+                str(NATIVE_CLI),
+                tmp,
+                "--output", os.path.join(tmp, "out.ply"),
+                "--total-train-iters", "1",
+                "--num-downscales", "0",
+                "--ssim-weight", "0.0",
+                "--progress-every", "1",
+                "--save-every", "-1",
+                "--no-log-image-loading",
+                "--no-final-quality",
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+    combined_output = result.stdout + result.stderr
+    assert b"=== Timings ===" in combined_output
+    assert b"Saved " in combined_output
+    assert b"=== Final Quality ===" not in combined_output
+    assert b"train PSNR" not in combined_output
+
+
+def test_native_cli_skips_final_quality_by_default():
+    if not NATIVE_CLI.exists():
+        pytest.skip("native CLI is not built")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_minimal_colmap_text_dataset(tmp)
+
+        result = subprocess.run(
+            [
+                str(NATIVE_CLI),
+                tmp,
+                "--output", os.path.join(tmp, "out.ply"),
+                "--total-train-iters", "1",
+                "--num-downscales", "0",
+                "--ssim-weight", "0.0",
+                "--progress-every", "1",
+                "--save-every", "-1",
+                "--no-log-image-loading",
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+    combined_output = result.stdout + result.stderr
+    assert b"=== Timings ===" in combined_output
+    assert b"Saved " in combined_output
+    assert b"=== Final Quality ===" not in combined_output
+    assert b"train PSNR" not in combined_output
+
+
+def test_native_cli_can_enable_final_quality_pass():
+    if not NATIVE_CLI.exists():
+        pytest.skip("native CLI is not built")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_minimal_colmap_text_dataset(tmp)
+
+        result = subprocess.run(
+            [
+                str(NATIVE_CLI),
+                tmp,
+                "--output", os.path.join(tmp, "out.ply"),
+                "--total-train-iters", "1",
+                "--num-downscales", "0",
+                "--ssim-weight", "0.0",
+                "--progress-every", "1",
+                "--save-every", "-1",
+                "--no-log-image-loading",
+                "--final-quality",
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+    combined_output = result.stdout + result.stderr
+    assert b"=== Final Quality ===" in combined_output
+    assert b"train PSNR" in combined_output
 
 
 def test_native_cli_clamps_image_loading_status_to_terminal_width():

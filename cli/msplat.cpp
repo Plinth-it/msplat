@@ -188,6 +188,7 @@ static const std::unordered_map<std::string, std::string>& optionCanonicalNames(
         {"--val", "val"}, {"--val-image", "val-image"}, {"--val-render", "val-render"},
         {"--eval", "eval"}, {"--test-every", "test-every"}, {"--eval-split-every", "eval-split-every"},
         {"--eval-every", "eval-every"}, {"--eval-save-to-disk", "eval-save-to-disk"},
+        {"--final-quality", "final-quality"}, {"--no-final-quality", "final-quality"},
         {"-n", "total-train-iters"}, {"--num-iters", "total-train-iters"}, {"--total-train-iters", "total-train-iters"},
         {"-d", "downscale-factor"}, {"--downscale-factor", "downscale-factor"},
         {"--quality", "quality"},
@@ -235,7 +236,7 @@ static std::string canonicalOptionKey(const std::string &token) {
 
 static int optionValueCount(const std::string &key) {
     static const std::unordered_set<std::string> flags = {
-        "val", "eval", "eval-save-to-disk", "reduce-second-moment",
+        "val", "eval", "eval-save-to-disk", "final-quality", "reduce-second-moment",
         "keep-crs", "normalize-crs", "render-mip", "rerun-enabled",
     };
     if (key.empty() || flags.count(key) > 0) return 0;
@@ -469,6 +470,12 @@ int main(int argc, char *argv[]) {
         ->check(CLI::Range(0, 1000000));
     bool evalSaveToDisk = false;
     app.add_flag("--eval-save-to-disk", evalSaveToDisk, "Save periodic eval renders under export path");
+    bool finalQualityRequested = false;
+    bool skipFinalQualityRequested = false;
+    app.add_flag("--final-quality", finalQualityRequested,
+                 "Compute final train-quality metrics after saving output");
+    app.add_flag("--no-final-quality", skipFinalQualityRequested,
+                 "Skip final train-quality metrics after saving output (default)");
 
     // Training hyperparameters
     int numIters = 30000;
@@ -1111,22 +1118,24 @@ int main(int argc, char *argv[]) {
         std::cout << "  finalize/export: " << formatDuration(finalizationSeconds) << std::endl;
         std::cout << "  total runtime:   " << formatDuration(totalSeconds) << std::endl;
 
-        const auto finalPsnrStart = CliClock::now();
-        const float finalEvalBg[3] = {0.0f, 0.0f, 0.0f};
-        FinalPsnrResult trainPsnr = computeTrainPsnr(model, cams, numIters, finalEvalBg);
-        const double finalPsnrSeconds = secondsBetween(finalPsnrStart, CliClock::now());
-        clearImageLoadingStatusLine();
-        if (trainPsnr.views > 0) {
-            std::cout << "\n=== Final Quality ===" << std::endl;
-            std::cout << "  train PSNR:      " << std::fixed << std::setprecision(2)
-                      << trainPsnr.psnr << " dB"
-                      << "  (" << trainPsnr.views << " views, "
-                      << formatDuration(finalPsnrSeconds)
-                      << ", not included in runtime)" << std::endl;
-            std::cout << "  train SSIM:      " << std::fixed << std::setprecision(4)
-                      << trainPsnr.ssim << std::endl;
-            std::cout << "  train L1:        " << std::fixed << std::setprecision(5)
-                      << trainPsnr.l1 << std::endl;
+        if (finalQualityRequested && !skipFinalQualityRequested) {
+            const auto finalPsnrStart = CliClock::now();
+            const float finalEvalBg[3] = {0.0f, 0.0f, 0.0f};
+            FinalPsnrResult trainPsnr = computeTrainPsnr(model, cams, numIters, finalEvalBg);
+            const double finalPsnrSeconds = secondsBetween(finalPsnrStart, CliClock::now());
+            clearImageLoadingStatusLine();
+            if (trainPsnr.views > 0) {
+                std::cout << "\n=== Final Quality ===" << std::endl;
+                std::cout << "  train PSNR:      " << std::fixed << std::setprecision(2)
+                          << trainPsnr.psnr << " dB"
+                          << "  (" << trainPsnr.views << " views, "
+                          << formatDuration(finalPsnrSeconds)
+                          << ", not included in runtime)" << std::endl;
+                std::cout << "  train SSIM:      " << std::fixed << std::setprecision(4)
+                          << trainPsnr.ssim << std::endl;
+                std::cout << "  train L1:        " << std::fixed << std::setprecision(5)
+                          << trainPsnr.l1 << std::endl;
+            }
         }
 
         cleanup_msplat_metal();
