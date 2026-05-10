@@ -5,6 +5,8 @@ import numpy as np
 import tempfile
 import os
 import json
+import gc
+import sys
 import struct
 import zlib
 import binascii
@@ -14,6 +16,17 @@ from pathlib import Path
 GARDEN = os.path.join(os.path.dirname(__file__), "..", "datasets", "mipnerf360", "garden")
 HAS_GARDEN = os.path.isdir(GARDEN)
 NATIVE_CLI = Path(__file__).resolve().parents[1] / "build" / "msplat"
+
+
+@pytest.fixture(autouse=True)
+def _release_msplat_gpu_cache_after_test():
+    yield
+    gc.collect()
+    msplat = sys.modules.get("msplat")
+    if msplat is None:
+        return
+    msplat.sync()
+    msplat._cleanup_raw()
 
 
 def _png_chunk(kind, data):
