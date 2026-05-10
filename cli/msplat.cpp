@@ -974,7 +974,7 @@ int main(int argc, char *argv[]) {
             bool has_stage_data = false;
             for (int i = 0; i < n_stages; i++) if (!stage_times[i].empty()) { has_stage_data = true; break; }
             if (has_stage_data) {
-                std::cout << "\n  --- Per-stage GPU time (Metal timestamp counters) ---\n";
+                std::cout << "\n  --- Per-stage GPU time (synchronized command buffers) ---\n";
                 double total_med = 0;
                 for (int i = 0; i < n_stages; i++) {
                     if (stage_times[i].empty()) continue;

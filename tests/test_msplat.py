@@ -266,6 +266,28 @@ def test_metal_uses_dynamic_global_intersections():
     assert "packed_opacity_comp[idx] = opacity_comp[g_id]" in shader_source
 
 
+def test_tile_bin_edges_close_last_tile_transition():
+    repo_root = Path(__file__).resolve().parents[1]
+    shader_source = (repo_root / "core" / "metal" / "msplat_metal.metal").read_text(encoding="utf-8")
+
+    def kernel_body(name):
+        body = shader_source.split(f"kernel void {name}", 1)[1]
+        stops = [pos for token in ("\nkernel void ", "\ninline ")
+                 if (pos := body.find(token)) >= 0]
+        return body[:min(stops)] if stops else body
+
+    for name in ("get_tile_bin_edges_kernel", "get_tile_bin_edges_u32_kernel"):
+        body = kernel_body(name)
+        transition = body.index("prev_tile_idx != cur_tile_idx")
+        final_end = body.index("idx == num_intersects - 1")
+
+        assert "idx == 0 || idx == num_intersects - 1" not in body
+        assert "write_packed_int2x(tile_bins, cur_tile_idx" in body
+        assert "write_packed_int2y(tile_bins, prev_tile_idx, idx)" in body
+        assert "write_packed_int2y(tile_bins, cur_tile_idx, num_intersects)" in body
+        assert transition < final_end
+
+
 def test_metal_exposes_brush_style_persplat_backward():
     repo_root = Path(__file__).resolve().parents[1]
     host_source = (repo_root / "core" / "metal" / "msplat_metal.mm").read_text(encoding="utf-8")
@@ -297,6 +319,15 @@ def test_backward_rasterizer_benchmark_script_wires_profile_ab():
     assert "rast_bwd" in script
     assert "train PSNR" in script
     assert "train SSIM" in script
+
+
+def test_stage_profiler_uses_synchronized_command_buffers():
+    repo_root = Path(__file__).resolve().parents[1]
+    host_source = (repo_root / "core" / "metal" / "msplat_metal.mm").read_text(encoding="utf-8")
+
+    assert "run_profiled_stage" in host_source
+    assert "PROFILE_STAGES: synchronized command-buffer profiling enabled" in host_source
+    assert "stage_cb.GPUEndTime - stage_cb.GPUStartTime" in host_source
 
 
 def test_native_cli_can_log_image_loading():

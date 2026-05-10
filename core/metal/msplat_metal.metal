@@ -1080,20 +1080,21 @@ kernel void get_tile_bin_edges_kernel(
     uint num_intersects = min(capacity, (uint)cum_tiles_hit[num_points - 1]);
     if (idx >= num_intersects)
         return;
-    // save the indices where the tile_id changes
+    // Save the indices where the tile_id changes. The final element still has
+    // to run the transition case; otherwise a last-element tile change leaves
+    // the previous tile open and the final tile without a start offset.
     int32_t cur_tile_idx = (int32_t)(((uint64_t)isect_ids_sorted[idx]) >> 32);
-    if (idx == 0 || idx == num_intersects - 1) {
-        if (idx == 0)
-            write_packed_int2x(tile_bins, cur_tile_idx, 0);
-        if (idx == num_intersects - 1)
-            write_packed_int2y(tile_bins, cur_tile_idx, num_intersects);
-        return;
+    if (idx == 0) {
+        write_packed_int2x(tile_bins, cur_tile_idx, 0);
+    } else {
+        int32_t prev_tile_idx = (int32_t)(((uint64_t)isect_ids_sorted[idx - 1]) >> 32);
+        if (prev_tile_idx != cur_tile_idx) {
+            write_packed_int2y(tile_bins, prev_tile_idx, idx);
+            write_packed_int2x(tile_bins, cur_tile_idx, idx);
+        }
     }
-    int32_t prev_tile_idx = (int32_t)(((uint64_t)isect_ids_sorted[idx - 1]) >> 32);
-    if (prev_tile_idx != cur_tile_idx) {
-        write_packed_int2y(tile_bins, prev_tile_idx, idx);
-        write_packed_int2x(tile_bins, cur_tile_idx, idx);
-        return;
+    if (idx == num_intersects - 1) {
+        write_packed_int2y(tile_bins, cur_tile_idx, num_intersects);
     }
 }
 
@@ -1109,18 +1110,17 @@ kernel void get_tile_bin_edges_u32_kernel(
     if (idx >= num_intersects)
         return;
     int32_t cur_tile_idx = (int32_t)(isect_ids_sorted[idx] >> 16);
-    if (idx == 0 || idx == num_intersects - 1) {
-        if (idx == 0)
-            write_packed_int2x(tile_bins, cur_tile_idx, 0);
-        if (idx == num_intersects - 1)
-            write_packed_int2y(tile_bins, cur_tile_idx, num_intersects);
-        return;
+    if (idx == 0) {
+        write_packed_int2x(tile_bins, cur_tile_idx, 0);
+    } else {
+        int32_t prev_tile_idx = (int32_t)(isect_ids_sorted[idx - 1] >> 16);
+        if (prev_tile_idx != cur_tile_idx) {
+            write_packed_int2y(tile_bins, prev_tile_idx, idx);
+            write_packed_int2x(tile_bins, cur_tile_idx, idx);
+        }
     }
-    int32_t prev_tile_idx = (int32_t)(isect_ids_sorted[idx - 1] >> 16);
-    if (prev_tile_idx != cur_tile_idx) {
-        write_packed_int2y(tile_bins, prev_tile_idx, idx);
-        write_packed_int2x(tile_bins, cur_tile_idx, idx);
-        return;
+    if (idx == num_intersects - 1) {
+        write_packed_int2y(tile_bins, cur_tile_idx, num_intersects);
     }
 }
 

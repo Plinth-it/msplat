@@ -24,11 +24,10 @@
 #import <fstream>
 #import <cstdlib>
 #import <stdexcept>
-#import <mach/mach_time.h>
 
 // GPU profiling infrastructure.
 // PROFILE_GPU=1: per-CB total GPU time via completion handlers.
-// PROFILE_STAGES=1: per-stage GPU time via Metal timestamp counters + separate encoders.
+// PROFILE_STAGES=1: per-stage GPU time via synchronized command buffers.
 static bool g_gpu_timing_enabled = false;
 static bool g_gpu_timing_checked = false;
 static std::mutex g_gpu_timing_mutex;
@@ -50,6 +49,16 @@ static std::mutex g_stage_timing_mutex;
 // Per-stage accumulated times (ms), indexed by stage
 static std::vector<double> g_stage_times[N_TRAIN_STAGES];
 static int g_stage_report_count = 0;
+
+static int stage_profile_report_interval() {
+    static int interval = [] {
+        const char *env = std::getenv("PROFILE_STAGES_REPORT_EVERY");
+        if (!env) return 50;
+        int parsed = std::atoi(env);
+        return parsed > 0 ? parsed : 50;
+    }();
+    return interval;
+}
 
 struct MetalContext {
     id<MTLDevice>       device;
@@ -87,58 +96,6 @@ struct MetalContext {
             [_currentCB release];
             _currentCB = nil;
         }
-    }
-
-    // Per-stage GPU timestamp profiling (Metal counter sample buffer)
-    id<MTLCounterSampleBuffer> counterSampleBuffer;
-    bool counterSamplingAvailable = false;
-    double ticksToMs = 0.0;  // conversion factor from GPU ticks to milliseconds
-
-    void initCounterSampling() {
-        // Need 2 samples per stage (start + end)
-        NSUInteger sampleCount = N_TRAIN_STAGES * 2;
-
-        // Find timestamp counter set
-        id<MTLCounterSet> timestampSet = nil;
-        for (id<MTLCounterSet> cs in device.counterSets) {
-            if ([[cs name] isEqualToString:MTLCommonCounterSetTimestamp]) {
-                timestampSet = cs;
-                break;
-            }
-        }
-        if (!timestampSet) {
-            fprintf(stderr, "PROFILE_STAGES: MTLCommonCounterSetTimestamp not available\n");
-            return;
-        }
-
-        // Check if stage boundary sampling is supported (guaranteed on Apple Silicon)
-        if (![device supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary]) {
-            fprintf(stderr, "PROFILE_STAGES: AtStageBoundary sampling not supported\n");
-            return;
-        }
-
-        MTLCounterSampleBufferDescriptor *desc = [MTLCounterSampleBufferDescriptor new];
-        desc.counterSet = timestampSet;
-        desc.sampleCount = sampleCount;
-        desc.storageMode = MTLStorageModeShared;
-        desc.label = @"msplat stage profiling";
-
-        NSError *error = nil;
-        counterSampleBuffer = [device newCounterSampleBufferWithDescriptor:desc error:&error];
-        if (!counterSampleBuffer) {
-            fprintf(stderr, "PROFILE_STAGES: Failed to create counter sample buffer: %s\n",
-                    error.localizedDescription.UTF8String);
-            return;
-        }
-
-        // Compute ticks-to-ms conversion (Apple Silicon: mach_absolute_time units)
-        mach_timebase_info_data_t tb;
-        mach_timebase_info(&tb);
-        ticksToMs = (double)tb.numer / (double)tb.denom / 1e6;
-
-        counterSamplingAvailable = true;
-        fprintf(stderr, "PROFILE_STAGES: GPU timestamp profiling enabled (%lu sample slots)\n",
-                (unsigned long)sampleCount);
     }
 
     // Forward pipeline kernels
@@ -365,14 +322,13 @@ MetalContext* init_msplat_metal_context() {
         return NULL;
     }
 
-    // Initialize counter sampling if PROFILE_STAGES is set
-    ctx->counterSampleBuffer = nil;
-    ctx->counterSamplingAvailable = false;
-    ctx->ticksToMs = 0.0;
+    // PROFILE_STAGES deliberately uses synchronized command buffers. This is
+    // slower than production dispatch, but GPUEndTime/GPUStartTime gives stable
+    // per-stage timings without timestamp counter unit ambiguity.
     if (std::getenv("PROFILE_STAGES")) {
         g_profile_stages = true;
         g_profile_stages_checked = true;
-        ctx->initCounterSampling();
+        fprintf(stderr, "PROFILE_STAGES: synchronized command-buffer profiling enabled\n");
     }
 
     return ctx;
@@ -2536,48 +2492,41 @@ std::tuple<MTensor, float> msplat_train_step(
 
     id<MTLCommandBuffer> debug_command_buffer = nil;
 
-    if (g_profile_stages && ctx->counterSamplingAvailable) {
-        // Per-stage profiling: separate encoders on the SAME command buffer,
-        // each with start/end timestamp sampling via the pass descriptor.
-        // Metal handles inter-encoder resource hazard tracking automatically.
-        id<MTLCommandBuffer> command_buffer = ctx->getCommandBuffer();
-        assert(command_buffer && "Failed to retrieve command buffer reference");
-        debug_command_buffer = command_buffer;
-
-        id<MTLCounterSampleBuffer> csb = ctx->counterSampleBuffer;
-        double ticksToMs = ctx->ticksToMs;
-
-        // Encode each stage in its own encoder with timestamp bookends
-        typedef void (^encode_fn_t)(id<MTLComputeCommandEncoder>);
-        struct StageInfo {
-            const char* name;
-            bool isBlit;  // true = blit encoder, false = compute encoder
+    if (g_profile_stages) {
+        auto record_stage_time = [&](int stage_idx, double ms) {
+            if (stage_idx < 0 || stage_idx >= N_TRAIN_STAGES || ms < 0.0) return;
+            std::lock_guard<std::mutex> lock(g_stage_timing_mutex);
+            g_stage_times[stage_idx].push_back(ms);
         };
 
-        dispatch_sync(ctx->d_queue, ^(){
-            // Stage 0: blit_zero (use blit encoder, no timestamp — blit pass descriptors
-            // don't support counter sampling the same way, so we just wrap it)
-            // Use a compute pass with start/end timestamps for the blit stage
-            // Actually, blit must use blit encoder. We'll measure it via a dummy compute
-            // encoder with timestamps before and after.
+        auto run_profiled_stage = [&](int stage_idx, const std::function<void(MPSCommandBuffer *)> &encode_stage) {
+            __block double gpu_ms = 0.0;
+            dispatch_sync(ctx->d_queue, ^(){
+                MPSCommandBuffer *stage_cb = [MPSCommandBuffer commandBufferFromCommandQueue:ctx->queue];
+                [stage_cb retain];
+                encode_stage(stage_cb);
+                [stage_cb commit];
+                [stage_cb waitUntilCompleted];
+                gpu_ms = (stage_cb.GPUEndTime - stage_cb.GPUStartTime) * 1000.0;
+                [stage_cb release];
+            });
+            record_stage_time(stage_idx, gpu_ms);
+        };
 
-            // -- Blit zero (no direct timestamp, included in first compute stage overhead) --
-            do_blit_zero(command_buffer);
+        auto run_profiled_compute_stage = [&](int stage_idx, const std::function<void(id<MTLComputeCommandEncoder>)> &encode_stage) {
+            run_profiled_stage(stage_idx, [&](MPSCommandBuffer *stage_cb) {
+                id<MTLComputeCommandEncoder> enc = [stage_cb computeCommandEncoder];
+                assert(enc && "Failed to create compute command encoder");
+                encode_stage(enc);
+                [enc endEncoding];
+            });
+        };
 
-            // Stage encoders with timestamps. Blit zero is not sampled directly;
-            // sampled encoder slots 0..9 map to g_train_stage_names[1..10].
-            auto make_profiled_encoder = [&](int stage_idx) -> id<MTLComputeCommandEncoder> {
-                MTLComputePassDescriptor *passDesc = [MTLComputePassDescriptor computePassDescriptor];
-                passDesc.sampleBufferAttachments[0].sampleBuffer = csb;
-                passDesc.sampleBufferAttachments[0].startOfEncoderSampleIndex = stage_idx * 2;
-                passDesc.sampleBufferAttachments[0].endOfEncoderSampleIndex = stage_idx * 2 + 1;
-                return [command_buffer computeCommandEncoderWithDescriptor:passDesc];
-            };
+        run_profiled_stage(0, [&](MPSCommandBuffer *stage_cb) {
+            do_blit_zero(stage_cb);
+        });
 
-            id<MTLComputeCommandEncoder> enc;
-
-            // Stage 1: projection + intersection count prefix
-            enc = make_profiled_encoder(0);
+        run_profiled_compute_stage(1, [&](id<MTLComputeCommandEncoder> enc) {
             if (!use_dynamic_intersections || !did_dynamic_count_prepass) {
                 encode_proj_sh(enc);
                 if (use_dynamic_intersections) {
@@ -2585,107 +2534,93 @@ std::tuple<MTensor, float> msplat_train_step(
                     encode_count_prefix(enc);
                 }
             }
-            [enc endEncoding];
+        });
 
-            // Stage 2-5: dynamic intersection map/sort/edge/pack.
-            // The fixed path keeps its fused per-tile sort+pack in the map slot.
-            enc = make_profiled_encoder(1);
+        run_profiled_compute_stage(2, [&](id<MTLComputeCommandEncoder> enc) {
             if (use_dynamic_intersections) {
                 encode_map_dynamic(enc);
             } else {
                 encode_prefix_map_fixed(enc);
             }
-            [enc endEncoding];
+        });
 
-            enc = make_profiled_encoder(2);
-            if (use_dynamic_intersections) {
-                encode_radix_dynamic(enc);
-            }
-            [enc endEncoding];
+        run_profiled_compute_stage(3, [&](id<MTLComputeCommandEncoder> enc) {
+            if (use_dynamic_intersections) encode_radix_dynamic(enc);
+        });
 
-            enc = make_profiled_encoder(3);
-            if (use_dynamic_intersections) {
-                encode_tile_edges_dynamic(enc);
-            }
-            [enc endEncoding];
+        run_profiled_compute_stage(4, [&](id<MTLComputeCommandEncoder> enc) {
+            if (use_dynamic_intersections) encode_tile_edges_dynamic(enc);
+        });
 
-            enc = make_profiled_encoder(4);
-            if (use_dynamic_intersections) {
-                encode_pack_dynamic(enc);
-            }
-            [enc endEncoding];
+        run_profiled_compute_stage(5, [&](id<MTLComputeCommandEncoder> enc) {
+            if (use_dynamic_intersections) encode_pack_dynamic(enc);
+        });
 
-            // Stage 6: rast_fwd
-            enc = make_profiled_encoder(5);
+        run_profiled_compute_stage(6, [&](id<MTLComputeCommandEncoder> enc) {
             encode_copy_debug_tile_bins(enc);
             if (collect_backward_debug) {
                 [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
             }
             encode_rast_fwd(enc);
-            [enc endEncoding];
+        });
 
-            // Stage 7: loss_fwd_bwd (fused)
-            enc = make_profiled_encoder(6);
+        run_profiled_stage(7, [&](MPSCommandBuffer *stage_cb) {
+            id<MTLComputeCommandEncoder> enc = [stage_cb computeCommandEncoder];
+            assert(enc && "Failed to create compute command encoder");
             encode_loss_fwd_bwd(enc);
             [enc endEncoding];
-            encode_lpips(ctx->_currentCB);
+            encode_lpips(stage_cb);
+        });
 
-            // Stage 8: rast_bwd
-            enc = make_profiled_encoder(7);
+        run_profiled_compute_stage(8, [&](id<MTLComputeCommandEncoder> enc) {
             encode_rast_bwd(enc);
-            [enc endEncoding];
+        });
 
-            // Stage 9: proj_sh_bwd + Adam
-            enc = make_profiled_encoder(8);
+        run_profiled_compute_stage(9, [&](id<MTLComputeCommandEncoder> enc) {
             encode_proj_sh_bwd_adam(enc);
-            [enc endEncoding];
+        });
 
-            // Stage 10: grad_stats
-            enc = make_profiled_encoder(9);
+        run_profiled_compute_stage(10, [&](id<MTLComputeCommandEncoder> enc) {
             encode_grad_stats(enc);
             [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
             encode_pup_hessian(enc);
-            [enc endEncoding];
         });
 
-        // Add completion handler to read timestamps after GPU finishes
-        [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> cb) {
-            @autoreleasepool {
-                NSData *data = [csb resolveCounterRange:NSMakeRange(0, (N_TRAIN_STAGES - 1) * 2)];
-                if (!data) return;
-                const MTLCounterResultTimestamp *samples =
-                    (const MTLCounterResultTimestamp *)[data bytes];
+        if (collect_backward_debug) {
+            id<MTLBuffer> pre_bins_buffer = debug_tile_bins_before_raster.buffer();
+            id<MTLBuffer> post_bins_buffer = tile_bins.buffer();
+            id<MTLBuffer> final_Ts_buffer = final_Ts.buffer();
+            const int32_t *pre_bins = static_cast<const int32_t *>([pre_bins_buffer contents]);
+            const int32_t *post_bins = static_cast<const int32_t *>([post_bins_buffer contents]);
+            const float *final_Ts_ptr = static_cast<const float *>([final_Ts_buffer contents]);
+            BackwardDebugSample sample = make_backward_debug_sample(
+                pre_bins, post_bins, final_Ts_ptr,
+                (int)rast_tb[0], (int)rast_tb[1], (int)img_width, (int)img_height);
+            record_backward_debug_sample(sample, use_persplat_backward);
+        }
 
-                std::lock_guard<std::mutex> lock(g_stage_timing_mutex);
-                for (int i = 0; i < N_TRAIN_STAGES - 1; i++) {
-                    uint64_t start = samples[i * 2].timestamp;
-                    uint64_t end = samples[i * 2 + 1].timestamp;
-                    if (start == MTLCounterErrorValue || end == MTLCounterErrorValue) continue;
-                    // Sample slots map to g_train_stage_names[1...] (skip blit_zero).
-                    g_stage_times[i + 1].push_back((double)(end - start) * ticksToMs);
+        {
+            std::lock_guard<std::mutex> lock(g_stage_timing_mutex);
+            g_stage_report_count++;
+            int report_every = stage_profile_report_interval();
+            if (g_stage_report_count % report_every == 0) {
+                fprintf(stderr, "\n  === GPU Stage Profile (n=%d) ===\n", g_stage_report_count);
+                double total_median = 0;
+                for (int i = 0; i < N_TRAIN_STAGES; i++) {
+                    auto &v = g_stage_times[i];
+                    if (v.empty()) continue;
+                    auto sorted = v;
+                    std::sort(sorted.begin(), sorted.end());
+                    double med = sorted[sorted.size() / 2];
+                    double sum = 0;
+                    for (auto x : sorted) sum += x;
+                    total_median += med;
+                    fprintf(stderr, "  %-20s median=%.3fms  mean=%.3fms\n",
+                            g_train_stage_names[i], med, sum / sorted.size());
                 }
-                g_stage_report_count++;
-
-                if (g_stage_report_count % 500 == 0) {
-                    fprintf(stderr, "\n  === GPU Stage Profile (n=%d) ===\n", g_stage_report_count);
-                    double total_median = 0;
-                    for (int i = 1; i < N_TRAIN_STAGES; i++) {
-                        auto &v = g_stage_times[i];
-                        if (v.empty()) continue;
-                        auto sorted = v;
-                        std::sort(sorted.begin(), sorted.end());
-                        double med = sorted[sorted.size() / 2];
-                        double sum = 0;
-                        for (auto x : sorted) sum += x;
-                        total_median += med;
-                        fprintf(stderr, "  %-20s median=%.3fms  mean=%.3fms\n",
-                                g_train_stage_names[i], med, sum / sorted.size());
-                    }
-                    fprintf(stderr, "  %-20s %.3fms\n", "TOTAL (sum medians)", total_median);
-                }
+                fprintf(stderr, "  %-20s %.3fms\n", "TOTAL (sum medians)", total_median);
             }
-        }];
-
+        }
     } else {
         // Production: single encoder for everything
         id<MTLCommandBuffer> command_buffer = ctx->getCommandBuffer();
