@@ -755,6 +755,7 @@ def test_training_config_mutable():
 # ── Dataset tests ────────────────────────────────────────────────────────────
 
 
+@pytest.mark.gpu
 @pytest.mark.skipif(not HAS_GARDEN, reason="garden dataset not found")
 def test_load_dataset():
     from msplat import Dataset
@@ -765,6 +766,7 @@ def test_load_dataset():
     assert ds.num_train + ds.num_test > 100
 
 
+@pytest.mark.gpu
 @pytest.mark.skipif(not HAS_GARDEN, reason="garden dataset not found")
 def test_load_dataset_no_eval():
     from msplat import Dataset
@@ -980,6 +982,7 @@ def test_train_one_step_with_transparent_alpha():
         assert stats.splat_count == 1
 
 
+@pytest.mark.gpu
 @pytest.mark.skipif(not HAS_GARDEN, reason="garden fixture not available")
 def test_lpips_loss_weight_runs_one_step():
     from msplat import Dataset, GaussianTrainer, TrainingConfig
@@ -1048,6 +1051,7 @@ def test_tiny_image_safe_with_zero_schedule_and_progressive_downscale():
 # ── Training tests ───────────────────────────────────────────────────────────
 
 
+@pytest.mark.gpu
 @pytest.mark.skipif(not HAS_GARDEN, reason="garden dataset not found")
 def test_train_short():
     """Train 50 steps at 4x downscale — verify it runs without error."""
@@ -1065,6 +1069,8 @@ def test_train_short():
     assert steps_seen == [10, 20, 30, 40, 50]
 
 
+@pytest.mark.gpu_heavy
+@pytest.mark.gpu
 @pytest.mark.skipif(not HAS_GARDEN, reason="garden dataset not found")
 def test_default_refine_grows_after_warmup():
     """Default refine settings should grow garden after the strict warmup gate."""
@@ -1082,6 +1088,7 @@ def test_default_refine_grows_after_warmup():
     assert trainer.splat_count > initial_count
 
 
+@pytest.mark.gpu
 @pytest.mark.skipif(not HAS_GARDEN, reason="garden dataset not found")
 def test_step_by_step():
     """Manual step loop works."""
@@ -1102,6 +1109,7 @@ def test_step_by_step():
 # ── Render tests ─────────────────────────────────────────────────────────────
 
 
+@pytest.mark.gpu
 @pytest.mark.skipif(not HAS_GARDEN, reason="garden dataset not found")
 def test_render():
     """Render produces valid image array."""
@@ -1125,6 +1133,7 @@ def test_render():
     assert img.max() <= 1.5
 
 
+@pytest.mark.gpu
 @pytest.mark.skipif(not HAS_GARDEN, reason="garden dataset not found")
 def test_render_from_pose():
     """Pose render uses reference intrinsics without copying the full camera payload."""
@@ -1144,6 +1153,7 @@ def test_render_from_pose():
     assert img.shape[0] > 0 and img.shape[1] > 0
 
 
+@pytest.mark.gpu
 @pytest.mark.skipif(not HAS_GARDEN, reason="garden dataset not found")
 def test_train_one_step_with_mip_splatting():
     """MIP splatting path trains and renders without invalid pixels."""
@@ -1164,6 +1174,7 @@ def test_train_one_step_with_mip_splatting():
 # ── Export tests ─────────────────────────────────────────────────────────────
 
 
+@pytest.mark.gpu
 @pytest.mark.skipif(not HAS_GARDEN, reason="garden dataset not found")
 def test_export_ply():
     """PLY export creates a valid file."""
@@ -1191,6 +1202,7 @@ def test_export_ply():
         os.unlink(path)
 
 
+@pytest.mark.gpu
 @pytest.mark.skipif(not HAS_GARDEN, reason="garden dataset not found")
 def test_export_ply_persists_mip_render_mode():
     """PLY export records mip render mode like Brush."""
@@ -1211,6 +1223,7 @@ def test_export_ply_persists_mip_render_mode():
         os.unlink(path)
 
 
+@pytest.mark.gpu
 @pytest.mark.skipif(not HAS_GARDEN, reason="garden dataset not found")
 def test_load_ply_restores_step_and_mip_render_mode():
     """PLY import restores saved iteration and render mode metadata."""
@@ -1247,6 +1260,7 @@ def test_load_ply_restores_step_and_mip_render_mode():
         os.unlink(dst_path)
 
 
+@pytest.mark.gpu
 @pytest.mark.skipif(not HAS_GARDEN, reason="garden dataset not found")
 def test_load_ply_accepts_brush_property_order():
     """Gaussian PLY import follows property names, not msplat's export order."""
@@ -1301,6 +1315,7 @@ def test_load_ply_accepts_brush_property_order():
         os.unlink(dst_path)
 
 
+@pytest.mark.gpu
 @pytest.mark.skipif(not HAS_GARDEN, reason="garden dataset not found")
 def test_refine_prunes_near_zero_quaternions():
     """Refine pruning matches Brush's render-time near-zero quaternion cull."""
@@ -1353,6 +1368,7 @@ def test_refine_prunes_near_zero_quaternions():
         os.unlink(out_path)
 
 
+@pytest.mark.gpu
 @pytest.mark.skipif(not HAS_GARDEN, reason="garden dataset not found")
 def test_export_lod_ply():
     """LOD PLY export writes an importance-ranked subset."""
@@ -1376,6 +1392,7 @@ def test_export_lod_ply():
         os.unlink(path)
 
 
+@pytest.mark.gpu
 @pytest.mark.skipif(not HAS_GARDEN, reason="garden dataset not found")
 def test_decimate_to_lod_can_continue_training():
     """In-memory LOD decimation updates the active model and keeps it trainable."""
@@ -1402,6 +1419,7 @@ def test_decimate_to_lod_can_continue_training():
         os.unlink(path)
 
 
+@pytest.mark.gpu
 @pytest.mark.skipif(not HAS_GARDEN, reason="garden dataset not found")
 def test_lod_refine_step_accepts_forced_downscale():
     """Python LOD refinement can train at a caller-selected image downscale."""
@@ -1419,6 +1437,7 @@ def test_lod_refine_step_accepts_forced_downscale():
     assert stats.splat_count == 128
 
 
+@pytest.mark.gpu
 @pytest.mark.skipif(not HAS_GARDEN, reason="garden dataset not found")
 def test_export_splat():
     """Splat export creates a valid file."""
@@ -1446,6 +1465,8 @@ def test_export_splat():
 # ── Eval tests ───────────────────────────────────────────────────────────────
 
 
+@pytest.mark.gpu_heavy
+@pytest.mark.gpu
 @pytest.mark.skipif(not HAS_GARDEN, reason="garden dataset not found")
 def test_evaluate():
     """Evaluation returns valid metrics dict."""
@@ -1471,6 +1492,8 @@ def test_evaluate():
 # ── Checkpoint tests ────────────────────────────────────────────────────────
 
 
+@pytest.mark.gpu_heavy
+@pytest.mark.gpu
 @pytest.mark.skipif(not HAS_GARDEN, reason="garden dataset not found")
 def test_checkpoint_save_load():
     """Save checkpoint, load it, verify state is preserved."""
@@ -1505,6 +1528,8 @@ def test_checkpoint_save_load():
         os.unlink(ckpt_path)
 
 
+@pytest.mark.gpu_heavy
+@pytest.mark.gpu
 @pytest.mark.skipif(not HAS_GARDEN, reason="garden dataset not found")
 def test_checkpoint_resume_training():
     """Train 50 → save → load → train 50 more. Verify it completes."""
@@ -1539,6 +1564,7 @@ def test_checkpoint_resume_training():
         os.unlink(ckpt_path)
 
 
+@pytest.mark.gpu
 @pytest.mark.skipif(not HAS_GARDEN, reason="garden dataset not found")
 def test_checkpoint_persists_scale_lr_schedule():
     """Checkpoint format stores custom scale LR schedule values for resume."""

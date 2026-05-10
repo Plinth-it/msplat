@@ -37,3 +37,9 @@ msplat-train = "msplat.cli:main"
 cmake.build-type = "Release"
 cmake.args = ["-DMSPLAT_BUILD_PYTHON=ON"]
 wheel.packages = ["python/msplat"]
+
+[tool.pytest.ini_options]
+markers = [
+    "gpu: requires the Garden fixture and/or nontrivial Metal GPU work",
+    "gpu_heavy: longer GPU tests intended for explicit stress verification",
+]

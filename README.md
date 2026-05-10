@@ -123,6 +123,30 @@ running the SSIM convolution pipeline. This preserves training dynamics for
 
 ## Installation & Usage
 
+### Development tests
+
+Use the quick tier for normal edit/verify loops; it keeps source checks, CLI
+smoke coverage, and tiny synthetic training in one lightweight pass:
+
+```bash
+python3 -m pytest tests/test_msplat.py -m "not gpu" -q
+```
+
+Garden-backed GPU tests are split so longer stress cases do not run by
+accident:
+
+```bash
+python3 -m pytest tests/test_msplat.py -m "gpu and not gpu_heavy" -q
+python3 -m pytest tests/test_msplat.py -m "gpu_heavy" -q
+```
+
+After native binding or Metal resource changes, refresh the editable Python
+extension before judging pytest results:
+
+```bash
+python3 -m pip install -e .
+```
+
 ### Python
 
 ```bash

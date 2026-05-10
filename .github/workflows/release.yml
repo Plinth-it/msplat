@@ -94,7 +94,7 @@ jobs:
           uv venv .test-venv --python ${{ matrix.python }}
           WHEEL=$(ls dist/*.whl)
           uv pip install --python .test-venv/bin/python "${WHEEL}" pytest
-          .test-venv/bin/python -m pytest tests/ -x -v
+          .test-venv/bin/python -m pytest tests/ -m "not gpu" -x -v
 
       - uses: actions/upload-artifact@v4
         with:
