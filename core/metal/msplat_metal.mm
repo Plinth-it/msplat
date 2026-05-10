@@ -1013,10 +1013,9 @@ static bool should_use_dynamic_intersections(unsigned img_width, unsigned img_he
 
 static bool should_use_persplat_backward(unsigned img_width, unsigned img_height, int num_tiles) {
     const char *mode = std::getenv("MSPLAT_BACKWARD_RASTERIZER");
-    (void)img_width;
-    (void)img_height;
-    (void)num_tiles;
-    if (!mode || std::strcmp(mode, "auto") == 0) return false;
+    if (!mode || std::strcmp(mode, "auto") == 0) {
+        return std::max(img_width, img_height) > 2560 || num_tiles > 25000;
+    }
     if (std::strcmp(mode, "persplat") == 0 || std::strcmp(mode, "brush") == 0) return true;
     if (std::strcmp(mode, "pixel") == 0 || std::strcmp(mode, "perpixel") == 0
         || std::strcmp(mode, "chunked") == 0) {

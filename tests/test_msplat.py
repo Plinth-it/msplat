@@ -293,6 +293,7 @@ def test_metal_exposes_brush_style_persplat_backward():
     host_source = (repo_root / "core" / "metal" / "msplat_metal.mm").read_text(encoding="utf-8")
     shader_source = (repo_root / "core" / "metal" / "msplat_metal.metal").read_text(encoding="utf-8")
 
+    assert "return std::max(img_width, img_height) > 2560 || num_tiles > 25000;" in host_source
     assert "rasterize_backward_persplat_kernel_cpso" in host_source
     assert 'load(@"rasterize_backward_persplat_kernel")' in host_source
     assert "MSPLAT_BACKWARD_RASTERIZER" in host_source
@@ -319,6 +320,17 @@ def test_backward_rasterizer_benchmark_script_wires_profile_ab():
     assert "rast_bwd" in script
     assert "train PSNR" in script
     assert "train SSIM" in script
+
+
+def test_backward_rasterizer_benchmark_script_supports_production_ab():
+    repo_root = Path(__file__).resolve().parents[1]
+    script = (repo_root / "scripts" / "benchmark_backward_rasterizers.py").read_text(encoding="utf-8")
+
+    assert "--no-profile-stages" in script
+    assert "--no-debug" in script
+    assert "PROFILE_STAGES_REPORT_EVERY" in script
+    assert "parse_duration" in script
+    assert "training_ips" in script
 
 
 def test_stage_profiler_uses_synchronized_command_buffers():

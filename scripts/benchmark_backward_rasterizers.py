@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a stage-profile A/B for backward rasterizer modes."""
+"""Run throughput and stage-profile A/Bs for backward rasterizer modes."""
 
 from __future__ import annotations
 
@@ -14,13 +14,44 @@ from pathlib import Path
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Compare msplat backward rasterizer modes with stage profiling."
+        description="Compare msplat backward rasterizer modes."
     )
     parser.add_argument("dataset", type=Path, help="Dataset path accepted by ./build/msplat")
     parser.add_argument("--binary", type=Path, default=Path("build/msplat"))
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--iters", type=int, default=120)
     parser.add_argument("--debug-interval", type=int)
+    parser.add_argument(
+        "--profile-stages",
+        dest="profile_stages",
+        action="store_true",
+        default=True,
+        help="Enable synchronized per-stage GPU profiling (default).",
+    )
+    parser.add_argument(
+        "--no-profile-stages",
+        dest="profile_stages",
+        action="store_false",
+        help="Disable per-stage profiling for production throughput measurements.",
+    )
+    parser.add_argument(
+        "--stage-report-every",
+        type=int,
+        help="PROFILE_STAGES_REPORT_EVERY value when stage profiling is enabled.",
+    )
+    parser.add_argument(
+        "--debug",
+        dest="debug",
+        action="store_true",
+        default=True,
+        help="Enable backward raster debug counters (default).",
+    )
+    parser.add_argument(
+        "--no-debug",
+        dest="debug",
+        action="store_false",
+        help="Disable backward raster debug counters for production throughput measurements.",
+    )
     parser.add_argument(
         "--modes",
         nargs="+",
@@ -48,11 +79,23 @@ def parse_int(pattern: str, text: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def parse_duration(text: str) -> float | None:
+    if match := re.fullmatch(r"([0-9.]+) s", text):
+        return float(match.group(1))
+    if match := re.fullmatch(r"([0-9]+)m ([0-9.]+)s", text):
+        return int(match.group(1)) * 60.0 + float(match.group(2))
+    return None
+
+
 def parse_metrics(log_text: str) -> dict[str, object]:
     benchmark = re.search(
         r"=== Benchmark .*?mean:\s+([0-9.]+) ms/iter\s+median:\s+([0-9.]+) ms/iter",
         log_text,
         re.DOTALL,
+    )
+    training = re.search(
+        r"training loop:\s+(.+?)\s+\(([0-9]+) steps,\s+([0-9.]+) it/s\)",
+        log_text,
     )
     tile_ranges = re.search(
         r"tile splats: avg ([0-9.]+) -> ([0-9.]+), median ([0-9.]+) -> ([0-9.]+), max ([0-9.]+) -> ([0-9.]+)",
@@ -66,6 +109,9 @@ def parse_metrics(log_text: str) -> dict[str, object]:
     return {
         "iter_mean_ms": float(benchmark.group(1)) if benchmark else None,
         "iter_median_ms": float(benchmark.group(2)) if benchmark else None,
+        "training_seconds": parse_duration(training.group(1).strip()) if training else None,
+        "training_steps": int(training.group(2)) if training else None,
+        "training_ips": float(training.group(3)) if training else None,
         "rast_bwd_median_ms": parse_float(r"^\s*rast_bwd\s+median=([0-9.]+)ms", log_text),
         "rast_bwd_mean_ms": parse_float(r"^\s*rast_bwd\s+median=[0-9.]+ms\s+mean=([0-9.]+)ms", log_text),
         "psnr": parse_float(r"train PSNR:\s+([0-9.]+)", log_text),
@@ -98,9 +144,19 @@ def run_mode(args: argparse.Namespace, mode: str, output_dir: Path, extra_args: 
 
     env = os.environ.copy()
     env["BENCHMARK"] = "1"
-    env["PROFILE_STAGES"] = "1"
-    env["MSPLAT_BACKWARD_DEBUG"] = "1"
-    env["MSPLAT_BACKWARD_DEBUG_INTERVAL"] = str(args.debug_interval or args.iters)
+    if args.profile_stages:
+        env["PROFILE_STAGES"] = "1"
+        if args.stage_report_every:
+            env["PROFILE_STAGES_REPORT_EVERY"] = str(args.stage_report_every)
+    else:
+        env.pop("PROFILE_STAGES", None)
+        env.pop("PROFILE_STAGES_REPORT_EVERY", None)
+    if args.debug:
+        env["MSPLAT_BACKWARD_DEBUG"] = "1"
+        env["MSPLAT_BACKWARD_DEBUG_INTERVAL"] = str(args.debug_interval or args.iters)
+    else:
+        env.pop("MSPLAT_BACKWARD_DEBUG", None)
+        env.pop("MSPLAT_BACKWARD_DEBUG_INTERVAL", None)
 
     cmd = [
         str(args.binary),
@@ -128,15 +184,17 @@ def run_mode(args: argparse.Namespace, mode: str, output_dir: Path, extra_args: 
 def print_table(results: list[dict[str, object]], output_dir: Path) -> None:
     print(f"Logs: {output_dir}")
     print()
-    print("| mode | iter median ms | rast_bwd median ms | PSNR | SSIM | L1 | splats | tile avg | replay active M |")
-    print("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
+    print("| mode | train it/s | train s | iter median ms | rast_bwd median ms | PSNR | SSIM | L1 | splats | tile avg | replay active M |")
+    print("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
     for row in results:
         tile_avg = "-"
         if row["tile_avg_before"] is not None and row["tile_avg_after"] is not None:
             tile_avg = f"{fmt(row['tile_avg_before'], 1)}->{fmt(row['tile_avg_after'], 1)}"
         print(
-            "| {mode} | {iter_ms} | {bwd_ms} | {psnr} | {ssim} | {l1} | {splats} | {tile_avg} | {replay} |".format(
+            "| {mode} | {ips} | {train_s} | {iter_ms} | {bwd_ms} | {psnr} | {ssim} | {l1} | {splats} | {tile_avg} | {replay} |".format(
                 mode=row["mode"],
+                ips=fmt(row["training_ips"], 2),
+                train_s=fmt(row["training_seconds"], 2),
                 iter_ms=fmt(row["iter_median_ms"]),
                 bwd_ms=fmt(row["rast_bwd_median_ms"]),
                 psnr=fmt(row["psnr"], 2),
