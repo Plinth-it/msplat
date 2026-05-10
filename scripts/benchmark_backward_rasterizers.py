@@ -55,8 +55,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--modes",
         nargs="+",
-        default=["pixel", "persplat"],
-        choices=["pixel", "perpixel", "chunked", "persplat", "brush"],
+        default=["auto", "pixel", "persplat"],
+        choices=["auto", "pixel", "perpixel", "chunked", "persplat", "brush"],
+    )
+    parser.add_argument(
+        "--quality-metrics",
+        "--final-quality",
+        dest="quality_metrics",
+        action="store_true",
+        default=False,
+        help="Pass --final-quality to msplat so the table includes final train metrics.",
+    )
+    parser.add_argument(
+        "--no-quality-metrics",
+        "--no-final-quality",
+        dest="quality_metrics",
+        action="store_false",
+        help="Do not request final train metrics from msplat (default).",
     )
     args, extra_args = parser.parse_known_args()
     args.msplat_args = clean_extra_args(extra_args)
@@ -141,6 +156,9 @@ def run_mode(args: argparse.Namespace, mode: str, output_dir: Path, extra_args: 
     mode_dir.mkdir(parents=True, exist_ok=True)
     log_path = mode_dir / "run.log"
     output_path = mode_dir / "out.ply"
+    quality_args = []
+    if args.quality_metrics and not has_final_quality_arg(extra_args):
+        quality_args.append("--final-quality")
 
     env = os.environ.copy()
     env["BENCHMARK"] = "1"
@@ -167,6 +185,7 @@ def run_mode(args: argparse.Namespace, mode: str, output_dir: Path, extra_args: 
         str(args.iters),
         "--backward-rasterizer",
         mode,
+        *quality_args,
         *extra_args,
     ]
     result = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
@@ -179,6 +198,10 @@ def run_mode(args: argparse.Namespace, mode: str, output_dir: Path, extra_args: 
     metrics["mode"] = mode
     metrics["log"] = log_path
     return metrics
+
+
+def has_final_quality_arg(args: list[str]) -> bool:
+    return any(arg in {"--final-quality", "--no-final-quality"} for arg in args)
 
 
 def print_table(results: list[dict[str, object]], output_dir: Path) -> None:

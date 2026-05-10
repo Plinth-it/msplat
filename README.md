@@ -65,9 +65,10 @@ training path C++/Metal-first:
   invalid geometry/quaternion guards, cutoff handling in chunked raster
   backward, per-tile overflow warnings, a higher tile element cap, fused SH
   backward plus Adam, fused SSIM vertical-forward/horizontal-backward, an
-  L1-only loss fast path when `--ssim-weight 0.0`, and an opt-in
-  Brush-style per-splat backward rasterizer exposed with
-  `--backward-rasterizer persplat`.
+  L1-only loss fast path when `--ssim-weight 0.0`, and an auto-selected
+  Brush-style per-splat backward rasterizer for large renders. Use
+  `--backward-rasterizer pixel` or `--backward-rasterizer persplat` to force a
+  specific path.
 - Swift, C, and Python APIs expose the expanded training config surface,
   initial point counts, render mode support, checkpoint/load helpers, and
   stronger error propagation.
@@ -274,13 +275,21 @@ SH capacity and warmup are controlled with `--sh-degree`,
 a 5000-step warmup. Use `--sh-degree 2` for a smaller/faster view-dependent
 color model, or `--sh-degree 0` for DC-only color.
 
-The training backward rasterizer defaults to `auto`, which currently keeps the
-stable per-pixel path. Use `--backward-rasterizer persplat` or
-`--backward-rasterizer brush` to opt into the Brush-style per-splat diagonal
-replay path for benchmarking. Set `PROFILE_STAGES=1` to compare stage timings
-and `MSPLAT_BACKWARD_DEBUG=1` to print debug-only range/replay counters every
-100 completed training steps. Use `MSPLAT_BACKWARD_DEBUG_INTERVAL=N` to change
-that report interval.
+The training backward rasterizer defaults to `auto`, which uses the stable
+per-pixel path on smaller renders and the Brush-style per-splat diagonal replay
+path on large/full-resolution renders. Use `--backward-rasterizer pixel`,
+`--backward-rasterizer persplat`, or `--backward-rasterizer brush` to force a
+specific path for benchmarking. The final train-quality pass is skipped by
+default; pass `--final-quality` when you want final train PSNR/SSIM/L1 after
+export.
+
+Use `scripts/benchmark_backward_rasterizers.py` for controlled A/B runs. It can
+compare `auto`, `pixel`, and `persplat` directly, and `--quality-metrics` passes
+`--final-quality` through to the CLI so the output table includes final train
+metrics. Set `PROFILE_STAGES=1` to compare stage timings and
+`MSPLAT_BACKWARD_DEBUG=1` to print debug-only range/replay counters every 100
+completed training steps. Use `MSPLAT_BACKWARD_DEBUG_INTERVAL=N` to change that
+report interval.
 
 ### Build from source
 

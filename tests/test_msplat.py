@@ -317,8 +317,10 @@ def test_backward_rasterizer_benchmark_script_wires_profile_ab():
     assert "BENCHMARK" in script
     assert "PROFILE_STAGES" in script
     assert "MSPLAT_BACKWARD_DEBUG" in script
-    assert '"pixel", "persplat"' in script
+    assert '"auto", "pixel", "persplat"' in script
     assert "--backward-rasterizer" in script
+    assert "--quality-metrics" in script
+    assert "--final-quality" in script
     assert "rast_bwd" in script
     assert "train PSNR" in script
     assert "train SSIM" in script
@@ -333,6 +335,71 @@ def test_backward_rasterizer_benchmark_script_supports_production_ab():
     assert "PROFILE_STAGES_REPORT_EVERY" in script
     assert "parse_duration" in script
     assert "training_ips" in script
+
+
+def test_backward_rasterizer_benchmark_script_supports_auto_quality_metrics():
+    repo_root = Path(__file__).resolve().parents[1]
+    script = repo_root / "scripts" / "benchmark_backward_rasterizers.py"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        fake_binary = tmp_path / "fake_msplat.py"
+        fake_binary.write_text(
+            """#!/usr/bin/env python3
+import json
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+output = Path(args[args.index("--output") + 1])
+output.parent.mkdir(parents=True, exist_ok=True)
+(output.parent / "argv.json").write_text(json.dumps(args), encoding="utf-8")
+print("=== Benchmark fake ===")
+print("mean: 1.0 ms/iter")
+print("median: 1.0 ms/iter")
+print("Progress: 100.0% (1/1)  10 gaussians  1.0 it/s")
+print("  training loop: 1.0 s (1 steps, 1.0 it/s)")
+print("  rast_bwd median=0.5ms mean=0.6ms")
+print("  train PSNR:      30.00 dB")
+print("  train SSIM:      0.9000")
+print("  train L1:        0.01000")
+""",
+            encoding="utf-8",
+        )
+        os.chmod(fake_binary, 0o755)
+        output_dir = tmp_path / "bench"
+
+        result = subprocess.run(
+            [
+                "python3",
+                str(script),
+                "/tmp/dataset",
+                "--binary",
+                str(fake_binary),
+                "--output-dir",
+                str(output_dir),
+                "--modes",
+                "auto",
+                "--quality-metrics",
+                "--",
+                "--alpha-mode",
+                "transparent",
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        launched_args = json.loads((output_dir / "auto" / "argv.json").read_text(encoding="utf-8"))
+
+    mode_index = launched_args.index("--backward-rasterizer") + 1
+    assert launched_args[mode_index] == "auto"
+    assert "--final-quality" in launched_args
+    assert "--quality-metrics" not in launched_args
+    assert "--alpha-mode" in launched_args
+    assert "auto" in result.stdout
+    assert "30.00" in result.stdout
 
 
 def test_stage_profiler_uses_synchronized_command_buffers():
