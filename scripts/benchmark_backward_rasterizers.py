@@ -188,13 +188,30 @@ def run_mode(args: argparse.Namespace, mode: str, output_dir: Path, extra_args: 
         *quality_args,
         *extra_args,
     ]
-    result = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
-    log_path.write_text(result.stdout, encoding="utf-8")
-    if result.returncode != 0:
-        print(result.stdout)
-        raise SystemExit(result.returncode)
+    print(f"\n=== Running {mode} ===", flush=True)
+    process = subprocess.Popen(
+        cmd,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        env=env,
+        bufsize=1,
+    )
+    output_chunks: list[str] = []
+    assert process.stdout is not None
+    while True:
+        chunk = process.stdout.read(1)
+        if chunk == "":
+            break
+        output_chunks.append(chunk)
+        print(chunk, end="", flush=True)
+    returncode = process.wait()
+    log_text = "".join(output_chunks)
+    log_path.write_text(log_text, encoding="utf-8")
+    if returncode != 0:
+        raise SystemExit(returncode)
 
-    metrics = parse_metrics(result.stdout)
+    metrics = parse_metrics(log_text)
     metrics["mode"] = mode
     metrics["log"] = log_path
     return metrics
