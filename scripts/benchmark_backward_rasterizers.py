@@ -59,6 +59,12 @@ def parse_args() -> argparse.Namespace:
         choices=["auto", "pixel", "perpixel", "chunked", "persplat", "brush"],
     )
     parser.add_argument(
+        "--raster-backward-specialization",
+        choices=["off", "on", "both"],
+        default="off",
+        help="A/B the opt-in MSPLAT_ENABLE_RASTER_BACKWARD_SPECIALIZATION hook.",
+    )
+    parser.add_argument(
         "--quality-metrics",
         "--final-quality",
         dest="quality_metrics",
@@ -158,8 +164,15 @@ def fmt(value: object, digits: int = 3) -> str:
     return str(value)
 
 
-def run_mode(args: argparse.Namespace, mode: str, output_dir: Path, extra_args: list[str]) -> dict[str, object]:
-    mode_dir = output_dir / mode
+def run_mode(
+    args: argparse.Namespace,
+    mode: str,
+    raster_specialization: bool,
+    output_dir: Path,
+    extra_args: list[str],
+) -> dict[str, object]:
+    run_name = f"{mode}-rb-spec" if raster_specialization else mode
+    mode_dir = output_dir / run_name
     mode_dir.mkdir(parents=True, exist_ok=True)
     log_path = mode_dir / "run.log"
     output_path = mode_dir / "out.ply"
@@ -182,6 +195,10 @@ def run_mode(args: argparse.Namespace, mode: str, output_dir: Path, extra_args: 
     else:
         env.pop("MSPLAT_BACKWARD_DEBUG", None)
         env.pop("MSPLAT_BACKWARD_DEBUG_INTERVAL", None)
+    if raster_specialization:
+        env["MSPLAT_ENABLE_RASTER_BACKWARD_SPECIALIZATION"] = "1"
+    else:
+        env.pop("MSPLAT_ENABLE_RASTER_BACKWARD_SPECIALIZATION", None)
 
     cmd = [
         str(args.binary),
@@ -195,7 +212,8 @@ def run_mode(args: argparse.Namespace, mode: str, output_dir: Path, extra_args: 
         *quality_args,
         *extra_args,
     ]
-    print(f"\n=== Running {mode} ===", flush=True)
+    specialization_label = " + raster-backward specialization" if raster_specialization else ""
+    print(f"\n=== Running {mode}{specialization_label} ===", flush=True)
     process = subprocess.Popen(
         cmd,
         text=True,
@@ -219,9 +237,15 @@ def run_mode(args: argparse.Namespace, mode: str, output_dir: Path, extra_args: 
         raise SystemExit(returncode)
 
     metrics = parse_metrics(log_text)
-    metrics["mode"] = mode
+    metrics["mode"] = run_name
     metrics["log"] = log_path
     return metrics
+
+
+def raster_specialization_variants(value: str) -> list[bool]:
+    if value == "both":
+        return [False, True]
+    return [value == "on"]
 
 
 def has_final_quality_arg(args: list[str]) -> bool:
@@ -262,7 +286,11 @@ def main() -> int:
     output_dir = args.output_dir or Path(tempfile.mkdtemp(prefix="msplat_backward_ab."))
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    results = [run_mode(args, mode, output_dir, extra_args) for mode in args.modes]
+    results = [
+        run_mode(args, mode, raster_specialization, output_dir, extra_args)
+        for mode in args.modes
+        for raster_specialization in raster_specialization_variants(args.raster_backward_specialization)
+    ]
     print_table(results, output_dir)
     return 0
 

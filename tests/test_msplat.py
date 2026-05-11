@@ -512,6 +512,9 @@ def test_backward_rasterizer_benchmark_script_supports_production_ab():
 
     assert "--no-profile-stages" in script
     assert "--no-debug" in script
+    assert "--raster-backward-specialization" in script
+    assert "MSPLAT_ENABLE_RASTER_BACKWARD_SPECIALIZATION" in script
+    assert "raster_specialization_variants" in script
     assert "PROFILE_STAGES_REPORT_EVERY" in script
     assert "parse_duration" in script
     assert "training_ips" in script
@@ -527,6 +530,7 @@ def test_backward_rasterizer_benchmark_script_supports_auto_quality_metrics():
         fake_binary.write_text(
             """#!/usr/bin/env python3
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -534,6 +538,9 @@ args = sys.argv[1:]
 output = Path(args[args.index("--output") + 1])
 output.parent.mkdir(parents=True, exist_ok=True)
 (output.parent / "argv.json").write_text(json.dumps(args), encoding="utf-8")
+(output.parent / "env.json").write_text(json.dumps({
+    "raster_specialization": os.environ.get("MSPLAT_ENABLE_RASTER_BACKWARD_SPECIALIZATION"),
+}), encoding="utf-8")
 print("=== Benchmark fake ===")
 print("mean: 1.0 ms/iter")
 print("median: 1.0 ms/iter")
@@ -560,6 +567,8 @@ print("  train L1:        0.01000")
                 str(output_dir),
                 "--modes",
                 "auto",
+                "--raster-backward-specialization",
+                "both",
                 "--quality-metrics",
                 "--",
                 "--alpha-mode",
@@ -572,13 +581,18 @@ print("  train L1:        0.01000")
         )
 
         launched_args = json.loads((output_dir / "auto" / "argv.json").read_text(encoding="utf-8"))
+        base_env = json.loads((output_dir / "auto" / "env.json").read_text(encoding="utf-8"))
+        specialized_env = json.loads((output_dir / "auto-rb-spec" / "env.json").read_text(encoding="utf-8"))
 
     mode_index = launched_args.index("--backward-rasterizer") + 1
     assert launched_args[mode_index] == "auto"
     assert "--final-quality" in launched_args
     assert "--quality-metrics" not in launched_args
     assert "--alpha-mode" in launched_args
+    assert base_env["raster_specialization"] is None
+    assert specialized_env["raster_specialization"] == "1"
     assert "auto" in result.stdout
+    assert "auto-rb-spec" in result.stdout
     assert "30.00" in result.stdout
 
 
