@@ -561,15 +561,20 @@ output.parent.mkdir(parents=True, exist_ok=True)
     "half_sorted_buffers": os.environ.get("MSPLAT_HALF_SORTED_BUFFERS"),
     "intersection_key_bits": os.environ.get("MSPLAT_INTERSECTION_KEY_BITS"),
 }), encoding="utf-8")
+key_mode = os.environ.get("MSPLAT_INTERSECTION_KEY_BITS")
+splats = 12 if key_mode == "auto" else 10
+psnr = 29.50 if key_mode == "auto" else 30.00
+ssim = 0.8800 if key_mode == "auto" else 0.9000
+l1 = 0.01100 if key_mode == "auto" else 0.01000
 print("=== Benchmark fake ===")
 print("mean: 1.0 ms/iter")
 print("median: 1.0 ms/iter")
-print("Progress: 100.0% (1/1)  10 gaussians  1.0 it/s")
+print(f"Progress: 100.0% (1/1)  {splats} gaussians  1.0 it/s")
 print("  training loop: 1.0 s (1 steps, 1.0 it/s)")
 print("  rast_bwd median=0.5ms mean=0.6ms")
-print("  train PSNR:      30.00 dB")
-print("  train SSIM:      0.9000")
-print("  train L1:        0.01000")
+print(f"  train PSNR:      {psnr:.2f} dB")
+print(f"  train SSIM:      {ssim:.4f}")
+print(f"  train L1:        {l1:.5f}")
 """,
             encoding="utf-8",
         )
@@ -644,6 +649,9 @@ print("  train L1:        0.01000")
     assert "auto-key-auto" in result.stdout
     assert "auto-rb-spec-half-key-auto" in result.stdout
     assert "Baseline deltas vs auto" in result.stdout
+    assert "Large quality/count drift vs auto" in result.stdout
+    assert "auto-key-auto: PSNR -0.50 dB" in result.stdout
+    assert "splats +20.0%" in result.stdout
     assert "30.00" in result.stdout
 
 

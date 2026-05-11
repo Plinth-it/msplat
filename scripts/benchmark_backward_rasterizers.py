@@ -191,6 +191,20 @@ def fmt_delta(value: object, baseline: object, digits: int = 1, percent: bool = 
     return f"{delta:+.{digits}f}"
 
 
+def numeric_delta(value: object, baseline: object) -> float | None:
+    if not isinstance(value, (float, int)) or not isinstance(baseline, (float, int)):
+        return None
+    return float(value) - float(baseline)
+
+
+def relative_delta(value: object, baseline: object) -> float | None:
+    if not isinstance(value, (float, int)) or not isinstance(baseline, (float, int)):
+        return None
+    if baseline == 0:
+        return None
+    return (float(value) - float(baseline)) / abs(float(baseline))
+
+
 def run_mode(
     args: argparse.Namespace,
     mode: str,
@@ -342,6 +356,7 @@ def print_table(results: list[dict[str, object]], output_dir: Path) -> None:
             )
         )
     print_baseline_deltas(results)
+    print_quality_warnings(results)
 
 
 def print_baseline_deltas(results: list[dict[str, object]]) -> None:
@@ -365,6 +380,41 @@ def print_baseline_deltas(results: list[dict[str, object]]) -> None:
                 splats=fmt_delta(row["splats"], baseline["splats"]),
             )
         )
+
+
+def quality_drift_reasons(row: dict[str, object], baseline: dict[str, object]) -> list[str]:
+    reasons: list[str] = []
+    psnr_delta = numeric_delta(row["psnr"], baseline["psnr"])
+    if psnr_delta is not None and abs(psnr_delta) >= 0.25:
+        reasons.append(f"PSNR {psnr_delta:+.2f} dB")
+    ssim_delta = numeric_delta(row["ssim"], baseline["ssim"])
+    if ssim_delta is not None and abs(ssim_delta) >= 0.01:
+        reasons.append(f"SSIM {ssim_delta:+.4f}")
+    l1_delta = relative_delta(row["l1"], baseline["l1"])
+    if l1_delta is not None and abs(l1_delta) >= 0.05:
+        reasons.append(f"L1 {l1_delta * 100.0:+.1f}%")
+    splat_delta = relative_delta(row["splats"], baseline["splats"])
+    if splat_delta is not None and abs(splat_delta) >= 0.05:
+        reasons.append(f"splats {splat_delta * 100.0:+.1f}%")
+    return reasons
+
+
+def print_quality_warnings(results: list[dict[str, object]]) -> None:
+    if len(results) < 2:
+        return
+    baseline = results[0]
+    warnings = [
+        (row["mode"], quality_drift_reasons(row, baseline))
+        for row in results[1:]
+    ]
+    warnings = [(mode, reasons) for mode, reasons in warnings if reasons]
+    if not warnings:
+        return
+
+    print()
+    print(f"Large quality/count drift vs {baseline['mode']}:")
+    for mode, reasons in warnings:
+        print(f"  {mode}: {', '.join(reasons)}")
 
 
 def main() -> int:
