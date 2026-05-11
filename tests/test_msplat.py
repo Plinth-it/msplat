@@ -373,6 +373,29 @@ def test_project_sh_kernels_use_function_constant_specialization():
     assert "newFunctionWithName:function_name" in host_source
 
 
+def test_quaternion_rotation_uses_named_wxyz_layout():
+    repo_root = Path(__file__).resolve().parents[1]
+    shader_source = _read_metal_sources(repo_root)
+
+    assert "struct QuaternionWXYZ" in shader_source
+    assert "normalized_quaternion_wxyz" in shader_source
+    assert "Training tensors store quaternions as [w, x, y, z]" in shader_source
+    assert "pack_quaternion_wxyz(v_quat)" in shader_source
+
+    start = shader_source.index("static inline float4 quat_to_rotmat_vjp")
+    end = shader_source.index("// given cotangent", start)
+    body = shader_source[start:end]
+
+    assert "QuaternionWXYZ q = normalized_quaternion_wxyz(quat)" in body
+    assert "QuaternionWXYZ v_quat" in body
+    assert "v_quat.w" in body
+    assert "v_quat.x" in body
+    assert "v_quat.y" in body
+    assert "v_quat.z" in body
+    assert "float w = quat.x" not in body
+    assert "w element stored in x field" not in body
+
+
 def test_metal_supports_opt_in_half_sorted_buffers():
     repo_root = Path(__file__).resolve().parents[1]
     host_source = (repo_root / "core" / "metal" / "msplat_metal.mm").read_text(encoding="utf-8")

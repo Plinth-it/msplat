@@ -154,26 +154,45 @@ static inline float4 transform_4x4(constant float *mat, const float3 p) {
     return out;
 }
 
-// Normalized quaternion → 3x3 rotation matrix (column-major for Metal).
-static inline float3x3 quat_to_rotmat(const float4 quat) {
+struct QuaternionWXYZ {
+    float w;
+    float x;
+    float y;
+    float z;
+};
+
+// Training tensors store quaternions as [w, x, y, z]. Metal float4 fields are
+// named x/y/z/w, so unpack once and keep the math in quaternion names.
+static inline QuaternionWXYZ normalized_quaternion_wxyz(const float4 quat) {
     float s = rsqrt(
         quat.w * quat.w + quat.x * quat.x + quat.y * quat.y + quat.z * quat.z
     );
-    float w = quat.x * s;
-    float x = quat.y * s;
-    float y = quat.z * s;
-    float z = quat.w * s;
+    return QuaternionWXYZ{
+        quat.x * s,
+        quat.y * s,
+        quat.z * s,
+        quat.w * s
+    };
+}
+
+static inline float4 pack_quaternion_wxyz(const QuaternionWXYZ quat) {
+    return float4(quat.w, quat.x, quat.y, quat.z);
+}
+
+// Normalized quaternion -> 3x3 rotation matrix (column-major for Metal).
+static inline float3x3 quat_to_rotmat(const float4 quat) {
+    QuaternionWXYZ q = normalized_quaternion_wxyz(quat);
 
     return float3x3(
-        1.f - 2.f * (y * y + z * z),
-        2.f * (x * y + w * z),
-        2.f * (x * z - w * y),
-        2.f * (x * y - w * z),
-        1.f - 2.f * (x * x + z * z),
-        2.f * (y * z + w * x),
-        2.f * (x * z + w * y),
-        2.f * (y * z - w * x),
-        1.f - 2.f * (x * x + y * y)
+        1.f - 2.f * (q.y * q.y + q.z * q.z),
+        2.f * (q.x * q.y + q.w * q.z),
+        2.f * (q.x * q.z - q.w * q.y),
+        2.f * (q.x * q.y - q.w * q.z),
+        1.f - 2.f * (q.x * q.x + q.z * q.z),
+        2.f * (q.y * q.z + q.w * q.x),
+        2.f * (q.x * q.z + q.w * q.y),
+        2.f * (q.y * q.z - q.w * q.x),
+        1.f - 2.f * (q.x * q.x + q.y * q.y)
     );
 }
 
@@ -973,48 +992,40 @@ static inline void project_cov3d_ewa_vjp(
 }
 
 static inline float4 quat_to_rotmat_vjp(const float4 quat, const float3x3 v_R) {
-    float s = rsqrt(
-        quat.w * quat.w + quat.x * quat.x + quat.y * quat.y + quat.z * quat.z
-    );
-    float w = quat.x * s;
-    float x = quat.y * s;
-    float y = quat.z * s;
-    float z = quat.w * s;
-
-    float4 v_quat;
+    QuaternionWXYZ q = normalized_quaternion_wxyz(quat);
+    QuaternionWXYZ v_quat;
     // v_R is COLUMN MAJOR
-    // w element stored in x field
-    v_quat.x =
+    v_quat.w =
         2.f * (
-                  // v_quat.w = 2.f * (
-                  x * (v_R[1][2] - v_R[2][1]) + y * (v_R[2][0] - v_R[0][2]) +
-                  z * (v_R[0][1] - v_R[1][0])
+                  q.x * (v_R[1][2] - v_R[2][1]) +
+                  q.y * (v_R[2][0] - v_R[0][2]) +
+                  q.z * (v_R[0][1] - v_R[1][0])
               );
-    // x element in y field
+    v_quat.x =
+        2.f *
+        (
+            -2.f * q.x * (v_R[1][1] + v_R[2][2]) +
+            q.y * (v_R[0][1] + v_R[1][0]) +
+            q.z * (v_R[0][2] + v_R[2][0]) +
+            q.w * (v_R[1][2] - v_R[2][1])
+        );
     v_quat.y =
         2.f *
         (
-            // v_quat.x = 2.f * (
-            -2.f * x * (v_R[1][1] + v_R[2][2]) + y * (v_R[0][1] + v_R[1][0]) +
-            z * (v_R[0][2] + v_R[2][0]) + w * (v_R[1][2] - v_R[2][1])
+            q.x * (v_R[0][1] + v_R[1][0]) -
+            2.f * q.y * (v_R[0][0] + v_R[2][2]) +
+            q.z * (v_R[1][2] + v_R[2][1]) +
+            q.w * (v_R[2][0] - v_R[0][2])
         );
-    // y element in z field
     v_quat.z =
         2.f *
         (
-            // v_quat.y = 2.f * (
-            x * (v_R[0][1] + v_R[1][0]) - 2.f * y * (v_R[0][0] + v_R[2][2]) +
-            z * (v_R[1][2] + v_R[2][1]) + w * (v_R[2][0] - v_R[0][2])
+            q.x * (v_R[0][2] + v_R[2][0]) +
+            q.y * (v_R[1][2] + v_R[2][1]) -
+            2.f * q.z * (v_R[0][0] + v_R[1][1]) +
+            q.w * (v_R[0][1] - v_R[1][0])
         );
-    // z element in w field
-    v_quat.w =
-        2.f *
-        (
-            // v_quat.z = 2.f * (
-            x * (v_R[0][2] + v_R[2][0]) + y * (v_R[1][2] + v_R[2][1]) -
-            2.f * z * (v_R[0][0] + v_R[1][1]) + w * (v_R[0][1] - v_R[1][0])
-        );
-    return v_quat;
+    return pack_quaternion_wxyz(v_quat);
 }
 
 // given cotangent v in output space (e.g. d_L/d_cov3d) in R(6)
