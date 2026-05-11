@@ -347,10 +347,20 @@ MetalContext* init_msplat_metal_context() {
             pipeline_load_failed = true;
         }
     };
+    auto requireStaticThreadgroupMemoryFits = [&](id<MTLComputePipelineState> pso, NSString *name) {
+        if (pso && pso.staticThreadgroupMemoryLength > ctx->device.maxThreadgroupMemoryLength) {
+            fprintf(stderr, "msplat: kernel %s uses %lu bytes of static threadgroup memory; device supports %lu\n",
+                    [name UTF8String],
+                    (unsigned long)pso.staticThreadgroupMemoryLength,
+                    (unsigned long)ctx->device.maxThreadgroupMemoryLength);
+            pipeline_load_failed = true;
+        }
+    };
     requireThreadgroupSize(ctx->prefix_sum_kernel_cpso, @"prefix_sum_kernel", 1024);
     requireThreadgroupSize(ctx->prefix_sum_inplace_kernel_cpso, @"prefix_sum_inplace_kernel", 1024);
     requireThreadgroupSize(ctx->block_reduce_kernel_cpso, @"block_reduce_kernel", 1024);
     requireThreadgroupSize(ctx->block_scan_propagate_kernel_cpso, @"block_scan_propagate_kernel", 1024);
+    requireStaticThreadgroupMemoryFits(ctx->ssim_fused_v_fwd_h_bwd_kernel_cpso, @"ssim_fused_v_fwd_h_bwd_kernel");
 
     if (pipeline_load_failed) {
         delete ctx;

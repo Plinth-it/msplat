@@ -9,6 +9,13 @@
 #define SSIM_HALF_WIN 5
 #define SSIM_C1 0.0001f
 #define SSIM_C2 0.0009f
+#define SSIM_TG 16   // threadgroup dimension (16x16 = 256 threads)
+#define SSIM_STATS_PER_CHANNEL 5
+#define SSIM_FLOAT_BYTES 4
+#define SSIM_FUSED_TILE_DIM (SSIM_TG + 2 * SSIM_HALF_WIN)
+#define SSIM_FUSED_TG_HP_BYTES (SSIM_FUSED_TILE_DIM * SSIM_FUSED_TILE_DIM * SSIM_STATS_PER_CHANNEL * SSIM_FLOAT_BYTES)
+#define SSIM_FUSED_TG_DERIV_BYTES (3 * SSIM_TG * SSIM_FUSED_TILE_DIM * SSIM_FLOAT_BYTES)
+#define SSIM_FUSED_TG_REDUCTION_BYTES (32 * SSIM_FLOAT_BYTES)
 
 constant bool fc_loss_composite_gt [[function_constant(3)]];
 constant bool fc_loss_use_mask [[function_constant(4)]];
@@ -206,8 +213,6 @@ constant float GAUSS_1D[11] = {
     0.2660117249f,
     0.2130055377f, 0.1093606895f, 0.0360007721f, 0.0075987581f, 0.0010283801f
 };
-
-#define SSIM_TG 16   // threadgroup dimension (16×16 = 256 threads)
 
 // Forward pass 1: horizontal convolution of rendered and gt.
 // For each pixel, computes 5 horizontal partial sums per channel:
@@ -491,20 +496,23 @@ kernel void ssim_fused_v_fwd_h_bwd_kernel(
     const uint use_alpha_loss_value = loss_use_alpha_loss(use_alpha_loss);
     const int base_gx = (int)(tgid.x * SSIM_TG) - SSIM_HALF_WIN;
     const int base_gy = (int)(tgid.y * SSIM_TG) - SSIM_HALF_WIN;
-    constexpr uint TILE_DIM = SSIM_TG + 2 * SSIM_HALF_WIN;
+    constexpr uint TILE_DIM = SSIM_FUSED_TILE_DIM;
     constexpr uint TILE_PIXELS = TILE_DIM * TILE_DIM;
     float loss_accum = 0.0f;
 
     for (uint c = 0; c < 3; c++) {
-        threadgroup float tg_hp[TILE_DIM][TILE_DIM][5];
+        // Keep this fused kernel one channel at a time. The scratch footprint is
+        // already about (SSIM_FUSED_TG_HP_BYTES + SSIM_FUSED_TG_DERIV_BYTES) bytes
+        // before the final reduction buffer, so further fusion needs a new layout.
+        threadgroup float tg_hp[TILE_DIM][TILE_DIM][SSIM_STATS_PER_CHANNEL];
         for (uint i = tr; i < TILE_PIXELS; i += SSIM_TG * SSIM_TG) {
             uint sy = i / TILE_DIM, sx = i % TILE_DIM;
             int gy = base_gy + (int)sy, gx = base_gx + (int)sx;
             if (gx >= 0 && gx < (int)W && gy >= 0 && gy < (int)H) {
                 uint hp = (gy * W + gx) * 15 + c * 5;
-                for (uint f = 0; f < 5; f++) tg_hp[sy][sx][f] = ssim_h_buf[hp + f];
+                for (uint f = 0; f < SSIM_STATS_PER_CHANNEL; f++) tg_hp[sy][sx][f] = ssim_h_buf[hp + f];
             } else {
-                for (uint f = 0; f < 5; f++) tg_hp[sy][sx][f] = 0.0f;
+                for (uint f = 0; f < SSIM_STATS_PER_CHANNEL; f++) tg_hp[sy][sx][f] = 0.0f;
             }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);

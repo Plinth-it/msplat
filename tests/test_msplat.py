@@ -621,6 +621,23 @@ def test_stage_profiler_uses_synchronized_command_buffers():
     assert "stage_cb.GPUEndTime - stage_cb.GPUStartTime" in host_source
 
 
+def test_fused_ssim_threadgroup_memory_budget_is_explicit():
+    repo_root = Path(__file__).resolve().parents[1]
+    host_source = (repo_root / "core" / "metal" / "msplat_metal.mm").read_text(encoding="utf-8")
+    loss_source = (repo_root / "core" / "metal" / "msplat_loss.metal").read_text(encoding="utf-8")
+
+    assert "#define SSIM_FUSED_TG_HP_BYTES" in loss_source
+    assert "#define SSIM_FUSED_TG_DERIV_BYTES" in loss_source
+    assert "#define SSIM_FUSED_TG_REDUCTION_BYTES" in loss_source
+    assert "Keep this fused kernel one channel at a time" in loss_source
+    assert "SSIM_STATS_PER_CHANNEL" in loss_source
+
+    assert "requireStaticThreadgroupMemoryFits" in host_source
+    assert "staticThreadgroupMemoryLength" in host_source
+    assert "maxThreadgroupMemoryLength" in host_source
+    assert "ssim_fused_v_fwd_h_bwd_kernel" in host_source
+
+
 def test_native_cli_can_log_image_loading():
     if not NATIVE_CLI.exists():
         pytest.skip("native CLI is not built")
