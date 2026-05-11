@@ -310,6 +310,8 @@ specific path for benchmarking. A fixed-splat 1024px garden A/B kept the
 per-pixel path ahead in production throughput (`pixel` 85.51 it/s, 4.732 ms
 median vs `persplat` 83.38 it/s, 6.214 ms median), so the auto threshold remains
 conservative and only switches to per-splat for large/full-resolution renders.
+See `docs/backward_atomic_reduction.md` for the current atomic-reduction design
+notes and benchmark gate.
 The final train-quality pass is skipped by
 default; pass `--final-quality` when you want final train PSNR/SSIM/L1 after
 export.
