@@ -65,6 +65,12 @@ def parse_args() -> argparse.Namespace:
         help="A/B the opt-in MSPLAT_ENABLE_RASTER_BACKWARD_SPECIALIZATION hook.",
     )
     parser.add_argument(
+        "--half-sorted-buffers",
+        choices=["off", "on", "both"],
+        default="off",
+        help="A/B the opt-in MSPLAT_HALF_SORTED_BUFFERS hook.",
+    )
+    parser.add_argument(
         "--quality-metrics",
         "--final-quality",
         dest="quality_metrics",
@@ -168,10 +174,15 @@ def run_mode(
     args: argparse.Namespace,
     mode: str,
     raster_specialization: bool,
+    half_sorted_buffers: bool,
     output_dir: Path,
     extra_args: list[str],
 ) -> dict[str, object]:
-    run_name = f"{mode}-rb-spec" if raster_specialization else mode
+    run_name = mode
+    if raster_specialization:
+        run_name += "-rb-spec"
+    if half_sorted_buffers:
+        run_name += "-half"
     mode_dir = output_dir / run_name
     mode_dir.mkdir(parents=True, exist_ok=True)
     log_path = mode_dir / "run.log"
@@ -199,6 +210,10 @@ def run_mode(
         env["MSPLAT_ENABLE_RASTER_BACKWARD_SPECIALIZATION"] = "1"
     else:
         env.pop("MSPLAT_ENABLE_RASTER_BACKWARD_SPECIALIZATION", None)
+    if half_sorted_buffers:
+        env["MSPLAT_HALF_SORTED_BUFFERS"] = "1"
+    else:
+        env.pop("MSPLAT_HALF_SORTED_BUFFERS", None)
 
     cmd = [
         str(args.binary),
@@ -212,8 +227,13 @@ def run_mode(
         *quality_args,
         *extra_args,
     ]
-    specialization_label = " + raster-backward specialization" if raster_specialization else ""
-    print(f"\n=== Running {mode}{specialization_label} ===", flush=True)
+    labels = []
+    if raster_specialization:
+        labels.append("raster-backward specialization")
+    if half_sorted_buffers:
+        labels.append("half sorted buffers")
+    suffix = f" + {' + '.join(labels)}" if labels else ""
+    print(f"\n=== Running {mode}{suffix} ===", flush=True)
     process = subprocess.Popen(
         cmd,
         text=True,
@@ -243,6 +263,12 @@ def run_mode(
 
 
 def raster_specialization_variants(value: str) -> list[bool]:
+    if value == "both":
+        return [False, True]
+    return [value == "on"]
+
+
+def half_sorted_buffer_variants(value: str) -> list[bool]:
     if value == "both":
         return [False, True]
     return [value == "on"]
@@ -287,9 +313,10 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     results = [
-        run_mode(args, mode, raster_specialization, output_dir, extra_args)
+        run_mode(args, mode, raster_specialization, half_sorted_buffers, output_dir, extra_args)
         for mode in args.modes
         for raster_specialization in raster_specialization_variants(args.raster_backward_specialization)
+        for half_sorted_buffers in half_sorted_buffer_variants(args.half_sorted_buffers)
     ]
     print_table(results, output_dir)
     return 0

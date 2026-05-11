@@ -515,6 +515,9 @@ def test_backward_rasterizer_benchmark_script_supports_production_ab():
     assert "--raster-backward-specialization" in script
     assert "MSPLAT_ENABLE_RASTER_BACKWARD_SPECIALIZATION" in script
     assert "raster_specialization_variants" in script
+    assert "--half-sorted-buffers" in script
+    assert "MSPLAT_HALF_SORTED_BUFFERS" in script
+    assert "half_sorted_buffer_variants" in script
     assert "PROFILE_STAGES_REPORT_EVERY" in script
     assert "parse_duration" in script
     assert "training_ips" in script
@@ -540,6 +543,7 @@ output.parent.mkdir(parents=True, exist_ok=True)
 (output.parent / "argv.json").write_text(json.dumps(args), encoding="utf-8")
 (output.parent / "env.json").write_text(json.dumps({
     "raster_specialization": os.environ.get("MSPLAT_ENABLE_RASTER_BACKWARD_SPECIALIZATION"),
+    "half_sorted_buffers": os.environ.get("MSPLAT_HALF_SORTED_BUFFERS"),
 }), encoding="utf-8")
 print("=== Benchmark fake ===")
 print("mean: 1.0 ms/iter")
@@ -569,6 +573,8 @@ print("  train L1:        0.01000")
                 "auto",
                 "--raster-backward-specialization",
                 "both",
+                "--half-sorted-buffers",
+                "both",
                 "--quality-metrics",
                 "--",
                 "--alpha-mode",
@@ -582,7 +588,9 @@ print("  train L1:        0.01000")
 
         launched_args = json.loads((output_dir / "auto" / "argv.json").read_text(encoding="utf-8"))
         base_env = json.loads((output_dir / "auto" / "env.json").read_text(encoding="utf-8"))
+        half_env = json.loads((output_dir / "auto-half" / "env.json").read_text(encoding="utf-8"))
         specialized_env = json.loads((output_dir / "auto-rb-spec" / "env.json").read_text(encoding="utf-8"))
+        combined_env = json.loads((output_dir / "auto-rb-spec-half" / "env.json").read_text(encoding="utf-8"))
 
     mode_index = launched_args.index("--backward-rasterizer") + 1
     assert launched_args[mode_index] == "auto"
@@ -590,9 +598,17 @@ print("  train L1:        0.01000")
     assert "--quality-metrics" not in launched_args
     assert "--alpha-mode" in launched_args
     assert base_env["raster_specialization"] is None
+    assert base_env["half_sorted_buffers"] is None
+    assert half_env["raster_specialization"] is None
+    assert half_env["half_sorted_buffers"] == "1"
     assert specialized_env["raster_specialization"] == "1"
+    assert specialized_env["half_sorted_buffers"] is None
+    assert combined_env["raster_specialization"] == "1"
+    assert combined_env["half_sorted_buffers"] == "1"
     assert "auto" in result.stdout
     assert "auto-rb-spec" in result.stdout
+    assert "auto-half" in result.stdout
+    assert "auto-rb-spec-half" in result.stdout
     assert "30.00" in result.stdout
 
 

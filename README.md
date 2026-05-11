@@ -315,11 +315,17 @@ metrics. Set `PROFILE_STAGES=1` to compare stage timings and
 completed training steps, including a pixel-path atomic-group estimate for
 cross-warp reduction experiments. Use `MSPLAT_BACKWARD_DEBUG_INTERVAL=N` to
 change that report interval, and `--raster-backward-specialization both` to A/B
-the raster-backward function-constant hook. `MSPLAT_ENABLE_PROJECT_SH_SPECIALIZATION=1`,
+the raster-backward function-constant hook. Use `--half-sorted-buffers both` to
+A/B the opt-in half-precision sorted-buffer path for packed conic, RGB, and
+opacity-comp data. `MSPLAT_ENABLE_PROJECT_SH_SPECIALIZATION=1`,
 `MSPLAT_ENABLE_LOSS_SPECIALIZATION=1`, and
 `MSPLAT_ENABLE_RASTER_BACKWARD_SPECIALIZATION=1` enable opt-in function-constant
-benchmark hooks for pipeline-stable training knobs; they are disabled by default
-because local A/B runs were flat to negative.
+benchmark hooks for pipeline-stable training knobs; `MSPLAT_HALF_SORTED_BUFFERS=1`
+enables the half sorted-buffer hook. These hooks are disabled by default because
+local A/B runs should prove a win before changing production defaults. On the
+600-step garden production smoke shape, half sorted buffers were slower
+(`pixel-half` 263.76 it/s vs `pixel` 275.75 it/s), so that path remains
+benchmark-only.
 
 ### Build from source
 
