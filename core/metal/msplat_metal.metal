@@ -42,6 +42,28 @@ constant float SH_C4[] = {
     -1.7701307697799304f,
     0.6258357354491761f};
 
+constant uint fc_project_sh_degrees_to_use [[function_constant(0)]];
+constant bool fc_project_sh_use_mip_splatting [[function_constant(1)]];
+constant bool fc_project_sh_reduce_second_moment [[function_constant(2)]];
+
+inline uint project_sh_degrees_to_use(const uint runtime_value) {
+    return is_function_constant_defined(fc_project_sh_degrees_to_use)
+        ? fc_project_sh_degrees_to_use
+        : runtime_value;
+}
+
+inline bool project_sh_use_mip_splatting(const uint runtime_value) {
+    return is_function_constant_defined(fc_project_sh_use_mip_splatting)
+        ? fc_project_sh_use_mip_splatting
+        : runtime_value != 0;
+}
+
+inline bool project_sh_reduce_second_moment(const uint runtime_value) {
+    return is_function_constant_defined(fc_project_sh_reduce_second_moment)
+        ? fc_project_sh_reduce_second_moment
+        : runtime_value != 0;
+}
+
 inline float packed_gt_alpha(constant uint *gt_packed, const uint pixel) {
     return float((gt_packed[pixel] >> 24u) & 0xffu) * INV_255;
 }
@@ -2307,7 +2329,8 @@ kernel void project_and_sh_forward_kernel(
     float3 cov2d = project_cov3d_ewa(
         local_cov3d, viewmat, fx, fy, tan_fovx, tan_fovy, p_view
     );
-    float opacity_comp_value = use_mip_splatting ? mip_opacity_compensation(cov2d) : 1.0f;
+    const bool use_mip_splatting_specialized = project_sh_use_mip_splatting(use_mip_splatting);
+    float opacity_comp_value = use_mip_splatting_specialized ? mip_opacity_compensation(cov2d) : 1.0f;
     opacity_comp[idx] = opacity_comp_value;
 
     float3 conic;
@@ -2359,7 +2382,8 @@ kernel void project_and_sh_forward_kernel(
     uint dc_idx = num_channels * idx;
     uint rest_idx = (num_bases - 1) * num_channels * idx;
     uint idx_col = num_channels * idx;
-    sh_coeffs_to_color(degrees_to_use, viewdir, &(features_dc[dc_idx]), &(features_rest[rest_idx]), &(colors[idx_col]));
+    const uint effective_degrees_to_use = project_sh_degrees_to_use(degrees_to_use);
+    sh_coeffs_to_color(effective_degrees_to_use, viewdir, &(features_dc[dc_idx]), &(features_rest[rest_idx]), &(colors[idx_col]));
 }
 
 // Adam update helper — applies one Adam step to a single element.
@@ -2527,7 +2551,8 @@ kernel void project_and_sh_backward_kernel(
         SH_C3[6] * x * (xx - 3.f * yy)
     };
 
-    bool reduce_v = adam_hp.reduce_second_moment != 0;
+    const uint effective_degrees_to_use = project_sh_degrees_to_use(degrees_to_use);
+    bool reduce_v = project_sh_reduce_second_moment(adam_hp.reduce_second_moment);
     float shared_v = 0.0f;
     if (reduce_v) {
         float grad_sq_sum = 0.0f;
@@ -2540,7 +2565,7 @@ kernel void project_and_sh_backward_kernel(
             old_v_sum += dc_exp_avg_sq[dc_idx + c];
             total++;
         }
-        if (degrees_to_use >= 1) {
+        if (effective_degrees_to_use >= 1) {
             for (int b = 0; b < 3; b++) {
                 for (int c = 0; c < 3; c++) {
                     uint i = rest_idx + b * 3 + c;
@@ -2551,7 +2576,7 @@ kernel void project_and_sh_backward_kernel(
                 }
             }
         }
-        if (degrees_to_use >= 2) {
+        if (effective_degrees_to_use >= 2) {
             for (int b = 0; b < 5; b++) {
                 for (int c = 0; c < 3; c++) {
                     uint i = rest_idx + (3 + b) * 3 + c;
@@ -2562,7 +2587,7 @@ kernel void project_and_sh_backward_kernel(
                 }
             }
         }
-        if (degrees_to_use >= 3) {
+        if (effective_degrees_to_use >= 3) {
             for (int b = 0; b < 7; b++) {
                 for (int c = 0; c < 3; c++) {
                     uint i = rest_idx + (8 + b) * 3 + c;
@@ -2591,7 +2616,7 @@ kernel void project_and_sh_backward_kernel(
         }
     }
 
-    if (degrees_to_use < 1) return;
+    if (effective_degrees_to_use < 1) return;
 
     // SH degree 1 (3 bases)
     for (int b = 0; b < 3; b++) {
@@ -2608,7 +2633,7 @@ kernel void project_and_sh_backward_kernel(
         }
     }
 
-    if (degrees_to_use < 2) return;
+    if (effective_degrees_to_use < 2) return;
 
     // SH degree 2 (5 bases)
     for (int b = 0; b < 5; b++) {
@@ -2625,7 +2650,7 @@ kernel void project_and_sh_backward_kernel(
         }
     }
 
-    if (degrees_to_use < 3) return;
+    if (effective_degrees_to_use < 3) return;
 
     // SH degree 3 (7 bases)
     for (int b = 0; b < 7; b++) {

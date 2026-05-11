@@ -336,6 +336,25 @@ def test_persplat_backward_scales_loss_gradient_before_half_pack():
     assert "float4(pix_v_out_tail[pix_rank]) * inv_pix_v_out_tail_scale" in body
 
 
+def test_project_sh_kernels_use_function_constant_specialization():
+    repo_root = Path(__file__).resolve().parents[1]
+    host_source = (repo_root / "core" / "metal" / "msplat_metal.mm").read_text(encoding="utf-8")
+    shader_source = (repo_root / "core" / "metal" / "msplat_metal.metal").read_text(encoding="utf-8")
+
+    assert "fc_project_sh_degrees_to_use [[function_constant(0)]]" in shader_source
+    assert "fc_project_sh_use_mip_splatting [[function_constant(1)]]" in shader_source
+    assert "fc_project_sh_reduce_second_moment [[function_constant(2)]]" in shader_source
+    assert "project_sh_degrees_to_use(degrees_to_use)" in shader_source
+    assert "project_sh_reduce_second_moment(adam_hp.reduce_second_moment)" in shader_source
+
+    assert "MSPLAT_DISABLE_PROJECT_SH_SPECIALIZATION" in host_source
+    assert "loadWithEmptyConstants(@\"project_and_sh_forward_kernel\")" in host_source
+    assert "loadWithEmptyConstants(@\"project_and_sh_backward_kernel\")" in host_source
+    assert "project_sh_forward_pipeline(" in host_source
+    assert "project_sh_backward_pipeline(" in host_source
+    assert "newFunctionWithName:function_name" in host_source
+
+
 def test_backward_rasterizer_benchmark_script_wires_profile_ab():
     repo_root = Path(__file__).resolve().parents[1]
     script = (repo_root / "scripts" / "benchmark_backward_rasterizers.py").read_text(encoding="utf-8")

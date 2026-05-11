@@ -62,6 +62,7 @@ static int stage_profile_report_interval() {
 
 struct MetalContext {
     id<MTLDevice>       device;
+    id<MTLLibrary>      metal_library;
     id<MTLCommandQueue> queue;
     dispatch_queue_t d_queue;
 
@@ -149,6 +150,8 @@ struct MetalContext {
     id<MTLComputePipelineState> densify_cull_classify_kernel_cpso;
     id<MTLComputePipelineState> compact_scatter_kernel_cpso;
     id<MTLComputePipelineState> compact_copy_back_kernel_cpso;
+    std::unordered_map<uint32_t, id<MTLComputePipelineState>> project_sh_forward_specializations;
+    std::unordered_map<uint32_t, id<MTLComputePipelineState>> project_sh_backward_specializations;
 };
 
 // Explicit metallib path (set by Swift/Python wrappers before first use)
@@ -229,6 +232,7 @@ MetalContext* init_msplat_metal_context() {
         delete ctx;
         return NULL;
     }
+    ctx->metal_library = metal_library;
 
     bool pipeline_load_failed = false;
     auto load = [&](NSString* name) -> id<MTLComputePipelineState> {
@@ -249,9 +253,34 @@ MetalContext* init_msplat_metal_context() {
         }
         return pso;
     };
+    auto loadWithEmptyConstants = [&](NSString* name) -> id<MTLComputePipelineState> {
+        MTLFunctionConstantValues *constants = [[MTLFunctionConstantValues alloc] init];
+        NSError *functionError = nil;
+        id<MTLFunction> fn = [metal_library newFunctionWithName:name
+                                                 constantValues:constants
+                                                          error:&functionError];
+        [constants release];
+        if (!fn || functionError) {
+            fprintf(stderr, "msplat: kernel not found: %s (%s)\n",
+                    [name UTF8String],
+                    functionError ? [[functionError description] UTF8String] : "unknown error");
+            pipeline_load_failed = true;
+            return nil;
+        }
+        NSError *pipelineError = nil;
+        id<MTLComputePipelineState> pso = [ctx->device newComputePipelineStateWithFunction:fn error:&pipelineError];
+        [fn release];
+        if (!pso || pipelineError) {
+            fprintf(stderr, "msplat: failed to create pipeline for %s: %s\n",
+                    [name UTF8String],
+                    pipelineError ? [[pipelineError description] UTF8String] : "unknown error");
+            pipeline_load_failed = true;
+        }
+        return pso;
+    };
 
     // Forward pipeline
-    ctx->project_and_sh_forward_kernel_cpso       = load(@"project_and_sh_forward_kernel");
+    ctx->project_and_sh_forward_kernel_cpso       = loadWithEmptyConstants(@"project_and_sh_forward_kernel");
     ctx->nd_rasterize_forward_kernel_cpso         = load(@"nd_rasterize_forward_kernel");
     ctx->copy_int_buffer_kernel_cpso              = load(@"copy_int_buffer_kernel");
     // Brush-style dynamic intersection sorting
@@ -289,7 +318,7 @@ MetalContext* init_msplat_metal_context() {
     ctx->lpips_prepare_nchw_kernel_cpso           = load(@"lpips_prepare_nchw_kernel");
     ctx->lpips_apply_grad_kernel_cpso             = load(@"lpips_apply_grad_kernel");
     // Backward pipeline
-    ctx->project_and_sh_backward_kernel_cpso      = load(@"project_and_sh_backward_kernel");
+    ctx->project_and_sh_backward_kernel_cpso      = loadWithEmptyConstants(@"project_and_sh_backward_kernel");
     ctx->fused_adam_kernel_cpso                    = load(@"fused_adam_kernel");
     ctx->apply_mean_noise_kernel_cpso             = load(@"apply_mean_noise_kernel");
     ctx->accumulate_grad_stats_kernel_cpso        = load(@"accumulate_grad_stats_kernel");
@@ -316,7 +345,6 @@ MetalContext* init_msplat_metal_context() {
     requireThreadgroupSize(ctx->block_reduce_kernel_cpso, @"block_reduce_kernel", 1024);
     requireThreadgroupSize(ctx->block_scan_propagate_kernel_cpso, @"block_scan_propagate_kernel", 1024);
 
-    [metal_library release];
     if (pipeline_load_failed) {
         delete ctx;
         return NULL;
@@ -351,6 +379,106 @@ MetalContext* get_global_context() {
 #define ENC_SCALAR(encoder, x, i) [encoder setBytes:&x length:sizeof(x) atIndex:i]
 #define ENC_ARRAY(encoder, x, i) [encoder setBytes:x length:sizeof(x) atIndex:i]
 #define ENC_BUF(encoder, x, i) [encoder setBuffer:x.buffer() offset:0 atIndex:i]
+
+static bool project_sh_specialization_enabled() {
+    static const bool enabled = std::getenv("MSPLAT_DISABLE_PROJECT_SH_SPECIALIZATION") == nullptr;
+    return enabled;
+}
+
+static bool can_specialize_project_sh(uint32_t degrees_to_use) {
+    return project_sh_specialization_enabled() && degrees_to_use <= 3u;
+}
+
+static uint32_t project_sh_specialization_key(uint32_t degrees_to_use,
+                                             bool use_mip_splatting,
+                                             bool reduce_second_moment) {
+    return (degrees_to_use & 0xffu)
+        | (use_mip_splatting ? (1u << 8) : 0u)
+        | (reduce_second_moment ? (1u << 9) : 0u);
+}
+
+static id<MTLComputePipelineState> make_project_sh_specialization(
+    MetalContext *ctx,
+    NSString *function_name,
+    uint32_t degrees_to_use,
+    bool use_mip_splatting,
+    bool reduce_second_moment,
+    bool specialize_reduce_second_moment
+) {
+    MTLFunctionConstantValues *constants = [[MTLFunctionConstantValues alloc] init];
+    uint32_t degrees = degrees_to_use;
+    bool mip = use_mip_splatting;
+    bool reduce = reduce_second_moment;
+    [constants setConstantValue:&degrees type:MTLDataTypeUInt atIndex:0];
+    [constants setConstantValue:&mip type:MTLDataTypeBool atIndex:1];
+    if (specialize_reduce_second_moment) {
+        [constants setConstantValue:&reduce type:MTLDataTypeBool atIndex:2];
+    }
+
+    NSError *function_error = nil;
+    id<MTLFunction> fn = [ctx->metal_library newFunctionWithName:function_name
+                                                   constantValues:constants
+                                                            error:&function_error];
+    [constants release];
+    if (!fn || function_error) {
+        fprintf(stderr, "msplat: failed to specialize %s: %s\n",
+                [function_name UTF8String],
+                function_error ? [[function_error description] UTF8String] : "unknown error");
+        return nil;
+    }
+
+    NSError *pipeline_error = nil;
+    id<MTLComputePipelineState> pso = [ctx->device newComputePipelineStateWithFunction:fn error:&pipeline_error];
+    [fn release];
+    if (!pso || pipeline_error) {
+        fprintf(stderr, "msplat: failed to create specialized pipeline for %s: %s\n",
+                [function_name UTF8String],
+                pipeline_error ? [[pipeline_error description] UTF8String] : "unknown error");
+        return nil;
+    }
+    return pso;
+}
+
+static id<MTLComputePipelineState> project_sh_forward_pipeline(MetalContext *ctx,
+                                                               uint32_t degrees_to_use,
+                                                               bool use_mip_splatting) {
+    if (!can_specialize_project_sh(degrees_to_use)) {
+        return ctx->project_and_sh_forward_kernel_cpso;
+    }
+    uint32_t key = project_sh_specialization_key(degrees_to_use, use_mip_splatting, false);
+    auto it = ctx->project_sh_forward_specializations.find(key);
+    if (it != ctx->project_sh_forward_specializations.end()) {
+        return it->second;
+    }
+    id<MTLComputePipelineState> pso = make_project_sh_specialization(
+        ctx, @"project_and_sh_forward_kernel", degrees_to_use, use_mip_splatting, false, false);
+    if (!pso) {
+        return ctx->project_and_sh_forward_kernel_cpso;
+    }
+    ctx->project_sh_forward_specializations.emplace(key, pso);
+    return pso;
+}
+
+static id<MTLComputePipelineState> project_sh_backward_pipeline(MetalContext *ctx,
+                                                                uint32_t degrees_to_use,
+                                                                bool reduce_second_moment) {
+    if (!can_specialize_project_sh(degrees_to_use)) {
+        return ctx->project_and_sh_backward_kernel_cpso;
+    }
+    uint32_t key = project_sh_specialization_key(degrees_to_use, false, reduce_second_moment);
+    auto it = ctx->project_sh_backward_specializations.find(key);
+    if (it != ctx->project_sh_backward_specializations.end()) {
+        return it->second;
+    }
+    id<MTLComputePipelineState> pso = make_project_sh_specialization(
+        ctx, @"project_and_sh_backward_kernel", degrees_to_use, false,
+        reduce_second_moment, true);
+    if (!pso) {
+        return ctx->project_and_sh_backward_kernel_cpso;
+    }
+    ctx->project_sh_backward_specializations.emplace(key, pso);
+    return pso;
+}
 
 static uint32_t prefix_sum_block_count(uint32_t count) {
     return std::max<uint32_t>(1, (count + 1023u) / 1024u);
@@ -1307,8 +1435,10 @@ static void forward_pipeline(
 
     // Helper lambdas to encode each stage onto a given encoder
     auto encode_proj_sh = [&](id<MTLComputeCommandEncoder> enc) {
-        NSUInteger tpg = MIN(ctx->project_and_sh_forward_kernel_cpso.maxTotalThreadsPerThreadgroup, (NSUInteger)num_points);
-        [enc setComputePipelineState:ctx->project_and_sh_forward_kernel_cpso];
+        id<MTLComputePipelineState> pso = project_sh_forward_pipeline(
+            ctx, (uint32_t)degrees_to_use, use_mip_splatting_u32 != 0u);
+        NSUInteger tpg = MIN(pso.maxTotalThreadsPerThreadgroup, (NSUInteger)num_points);
+        [enc setComputePipelineState:pso];
         ENC_SCALAR(enc, num_points_u32, 0);
         ENC_BUF(enc, means3d, 1); ENC_BUF(enc, scales, 2);
         ENC_SCALAR(enc, glob_scale, 3); ENC_BUF(enc, quats, 4);
@@ -1879,8 +2009,10 @@ std::tuple<MTensor, float> msplat_train_step(
     };
 
     auto encode_proj_sh = [&](id<MTLComputeCommandEncoder> enc) {
-        NSUInteger tpg = MIN(ctx->project_and_sh_forward_kernel_cpso.maxTotalThreadsPerThreadgroup, (NSUInteger)num_points);
-        [enc setComputePipelineState:ctx->project_and_sh_forward_kernel_cpso];
+        id<MTLComputePipelineState> pso = project_sh_forward_pipeline(
+            ctx, (uint32_t)degrees_to_use, use_mip_splatting_u32 != 0u);
+        NSUInteger tpg = MIN(pso.maxTotalThreadsPerThreadgroup, (NSUInteger)num_points);
+        [enc setComputePipelineState:pso];
         ENC_SCALAR(enc, num_points_u32, 0);
         ENC_BUF(enc, means3d, 1); ENC_BUF(enc, scales, 2);
         ENC_SCALAR(enc, glob_scale, 3); ENC_BUF(enc, quats, 4);
@@ -2340,8 +2472,10 @@ std::tuple<MTensor, float> msplat_train_step(
     }
 
     auto encode_proj_sh_bwd_adam = [&](id<MTLComputeCommandEncoder> enc) {
-        NSUInteger tpg = MIN(ctx->project_and_sh_backward_kernel_cpso.maxTotalThreadsPerThreadgroup, (NSUInteger)num_points);
-        [enc setComputePipelineState:ctx->project_and_sh_backward_kernel_cpso];
+        id<MTLComputePipelineState> pso = project_sh_backward_pipeline(
+            ctx, (uint32_t)degrees_to_use, sh_adam_hp.reduce_second_moment != 0u);
+        NSUInteger tpg = MIN(pso.maxTotalThreadsPerThreadgroup, (NSUInteger)num_points);
+        [enc setComputePipelineState:pso];
         ENC_SCALAR(enc, num_points, 0); ENC_BUF(enc, means3d, 1); ENC_BUF(enc, scales, 2);
         ENC_SCALAR(enc, glob_scale, 3); ENC_BUF(enc, quats, 4);
         ENC_BUF(enc, viewmat, 5); ENC_BUF(enc, projmat, 6);
