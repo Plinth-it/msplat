@@ -111,13 +111,13 @@ def clean_extra_args(args: list[str]) -> list[str]:
 
 
 def parse_float(pattern: str, text: str) -> float | None:
-    match = re.search(pattern, text, re.MULTILINE)
-    return float(match.group(1)) if match else None
+    matches = re.findall(pattern, text, re.MULTILINE)
+    return float(matches[-1]) if matches else None
 
 
 def parse_int(pattern: str, text: str) -> int | None:
-    match = re.search(pattern, text, re.MULTILINE)
-    return int(match.group(1)) if match else None
+    matches = re.findall(pattern, text, re.MULTILINE)
+    return int(matches[-1]) if matches else None
 
 
 def parse_duration(text: str) -> float | None:

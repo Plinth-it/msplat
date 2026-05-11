@@ -579,6 +579,7 @@ print("mean: 1.0 ms/iter")
 print("median: 1.0 ms/iter")
 print(f"Progress: 100.0% (1/1)  {splats} gaussians  1.0 it/s")
 print("  training loop: 1.0 s (1 steps, 1.0 it/s)")
+print("  rast_bwd median=0.9ms mean=1.0ms")
 print("  rast_bwd median=0.5ms mean=0.6ms")
 print(f"  train PSNR:      {psnr:.2f} dB")
 print(f"  train SSIM:      {ssim:.4f}")
@@ -664,6 +665,7 @@ print(f"  train L1:        {l1:.5f}")
     assert "auto-key-auto" in result.stdout
     assert "auto-rb-spec-half-key-auto" in result.stdout
     assert "Baseline deltas vs auto" in result.stdout
+    assert "| auto | 1.00 | 1.00 | 1.000 | 0.500 | 30.00 | 0.9000 | 0.01000 | 10 |" in result.stdout
     assert "Large quality/count drift vs auto" in result.stdout
     assert "auto-key-auto: PSNR -0.50 dB" in result.stdout
     assert "splats +20.0%" in result.stdout
