@@ -921,12 +921,11 @@ int main(int argc, char *argv[]) {
                 imwriteRGB((fs::path(valRender) / (std::to_string(step) + ".png")).string(), valImg);
             }
         }
-        const auto trainingEnd = CliClock::now();
-        const auto finalizationStart = CliClock::now();
-
         if (benchmarking && benchmarkAsyncSubmit) {
             msplat_gpu_sync();
         }
+        const auto trainingEnd = CliClock::now();
+        const auto finalizationStart = CliClock::now();
 
         if (benchmarking && !bench_iter_ms.empty()) {
             clearImageLoadingStatusLine();
@@ -951,6 +950,11 @@ int main(int argc, char *argv[]) {
             std::cout << "  min:    " << sorted.front() << " ms/iter\n";
             std::cout << "  max:    " << sorted.back()  << " ms/iter\n";
             std::cout << "  wall:   " << total_s << "s for " << numIters << " iters\n";
+            std::cout << "  timing mode: " << benchmarkTimingMode;
+            if (benchmarkAsyncSubmit) {
+                std::cout << " (per-iter samples measure CPU submit; wall includes final GPU drain)";
+            }
+            std::cout << "\n";
 
             auto stats = [](std::vector<double> &v) {
                 std::vector<double> s = v;
@@ -986,26 +990,28 @@ int main(int argc, char *argv[]) {
             }
 
             // Per-stage GPU timing (PROFILE_STAGES=1)
-            constexpr int MAX_STAGES = 16;
-            std::vector<double> stage_times[MAX_STAGES];
-            const char* stage_names[MAX_STAGES] = {};
-            int n_stages = 0;
-            msplat_drain_stage_times(stage_times, MAX_STAGES, n_stages, stage_names);
-            bool has_stage_data = false;
-            for (int i = 0; i < n_stages; i++) if (!stage_times[i].empty()) { has_stage_data = true; break; }
-            if (has_stage_data) {
-                std::cout << "\n  --- Per-stage GPU time (synchronized command buffers) ---\n";
-                double total_med = 0;
-                for (int i = 0; i < n_stages; i++) {
-                    if (stage_times[i].empty()) continue;
-                    auto [s_mean, s_med] = stats(stage_times[i]);
-                    total_med += s_med;
-                    std::cout << "  " << std::left << std::setw(22) << stage_names[i]
-                              << "median=" << std::fixed << std::setprecision(3) << s_med
-                              << "ms  mean=" << s_mean << "ms  (" << stage_times[i].size() << " samples)\n";
+            if (std::getenv("PROFILE_STAGES") != nullptr) {
+                constexpr int MAX_STAGES = 16;
+                std::vector<double> stage_times[MAX_STAGES];
+                const char* stage_names[MAX_STAGES] = {};
+                int n_stages = 0;
+                msplat_drain_stage_times(stage_times, MAX_STAGES, n_stages, stage_names);
+                bool has_stage_data = false;
+                for (int i = 0; i < n_stages; i++) if (!stage_times[i].empty()) { has_stage_data = true; break; }
+                if (has_stage_data) {
+                    std::cout << "\n  --- Per-stage GPU time (synchronized command buffers) ---\n";
+                    double total_med = 0;
+                    for (int i = 0; i < n_stages; i++) {
+                        if (stage_times[i].empty()) continue;
+                        auto [s_mean, s_med] = stats(stage_times[i]);
+                        total_med += s_med;
+                        std::cout << "  " << std::left << std::setw(22) << stage_names[i]
+                                  << "median=" << std::fixed << std::setprecision(3) << s_med
+                                  << "ms  mean=" << s_mean << "ms  (" << stage_times[i].size() << " samples)\n";
+                    }
+                    std::cout << "  " << std::left << std::setw(22) << "TOTAL (sum medians)"
+                              << std::fixed << std::setprecision(3) << total_med << "ms\n";
                 }
-                std::cout << "  " << std::left << std::setw(22) << "TOTAL (sum medians)"
-                          << std::fixed << std::setprecision(3) << total_med << "ms\n";
             }
             std::cout << "\n";
         }

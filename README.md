@@ -320,13 +320,16 @@ Use `scripts/benchmark_backward_rasterizers.py` for controlled A/B runs. It can
 compare `auto`, `pixel`, and `persplat` directly, and `--quality-metrics` passes
 `--final-quality` through to the CLI so the output table includes final train
 metrics. It also writes `summary.json` in the output directory; compare multiple
-summary artifacts with `scripts/compare_benchmark_summaries.py`. Set
-`PROFILE_STAGES=1` to compare stage timings and
-`MSPLAT_BACKWARD_DEBUG=1` to print debug-only range/replay counters every 100
-completed training steps, including a pixel-path atomic-group estimate for
-cross-warp reduction experiments. Use `MSPLAT_BACKWARD_DEBUG_INTERVAL=N` to
-change that report interval, `--timing-mode async-submit` to measure CPU submit
-cost without draining the GPU after every benchmark iteration,
+summary artifacts with `scripts/compare_benchmark_summaries.py`. The wrapper
+defaults to production throughput mode: no synchronized stage profiling, no
+backward debug counters, and `--timing-mode async-submit`. Pass
+`--profile-stages` to compare synchronized stage timings; `--stage-report-every`
+also enables stage profiling. Pass `--debug` to print debug-only range/replay
+counters every 100 completed training steps, including a pixel-path atomic-group
+estimate for cross-warp reduction experiments. Use `--debug-interval N` to
+change that report interval, `--timing-mode drain-each-iter` to include a GPU
+drain in every iteration sample, or keep `--timing-mode async-submit` to measure
+CPU submit cost without draining the GPU after every benchmark iteration,
 `--project-sh-specialization both` to A/B the projection/SH function-constant
 hook, `--loss-specialization both` to A/B the loss function-constant hook, and
 `--raster-backward-specialization both` to A/B

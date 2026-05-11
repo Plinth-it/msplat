@@ -572,6 +572,132 @@ def test_benchmark_script_supports_async_submit_timing_mode():
     assert "MSPLAT_BENCHMARK_TIMING_MODE" in cli
     assert "async-submit" in cli
     assert "drain-each-iter" in cli
+    assert "timing mode:" in cli
+    assert "wall includes final GPU drain" in cli
+
+
+def test_backward_rasterizer_benchmark_defaults_to_production_throughput():
+    repo_root = Path(__file__).resolve().parents[1]
+    script = repo_root / "scripts" / "benchmark_backward_rasterizers.py"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        fake_binary = tmp_path / "fake_msplat.py"
+        fake_binary.write_text(
+            """#!/usr/bin/env python3
+import json
+import os
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+output = Path(args[args.index("--output") + 1])
+output.parent.mkdir(parents=True, exist_ok=True)
+(output.parent / "env.json").write_text(json.dumps({
+    "profile_stages": os.environ.get("PROFILE_STAGES"),
+    "backward_debug": os.environ.get("MSPLAT_BACKWARD_DEBUG"),
+    "timing_mode": os.environ.get("MSPLAT_BENCHMARK_TIMING_MODE"),
+}), encoding="utf-8")
+print("=== Benchmark fake ===")
+print("mean: 1.0 ms/iter")
+print("median: 1.0 ms/iter")
+print("Progress: 100.0% (1/1)  10 gaussians  1.0 it/s")
+print("  training loop: 1.0 s (1 steps, 1.0 it/s)")
+""",
+            encoding="utf-8",
+        )
+        os.chmod(fake_binary, 0o755)
+        output_dir = tmp_path / "bench"
+
+        subprocess.run(
+            [
+                "python3",
+                str(script),
+                "/tmp/dataset",
+                "--binary",
+                str(fake_binary),
+                "--output-dir",
+                str(output_dir),
+                "--modes",
+                "auto",
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        env = json.loads((output_dir / "auto" / "env.json").read_text(encoding="utf-8"))
+        summary = json.loads((output_dir / "summary.json").read_text(encoding="utf-8"))
+
+    assert env["profile_stages"] is None
+    assert env["backward_debug"] is None
+    assert env["timing_mode"] == "async-submit"
+    assert summary["profile_stages"] is False
+    assert summary["profile_mode"] == "production"
+    assert summary["debug"] is False
+    assert summary["timing_mode"] == "async-submit"
+
+
+def test_backward_rasterizer_stage_report_interval_enables_stage_profile():
+    repo_root = Path(__file__).resolve().parents[1]
+    script = repo_root / "scripts" / "benchmark_backward_rasterizers.py"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        fake_binary = tmp_path / "fake_msplat.py"
+        fake_binary.write_text(
+            """#!/usr/bin/env python3
+import json
+import os
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+output = Path(args[args.index("--output") + 1])
+output.parent.mkdir(parents=True, exist_ok=True)
+(output.parent / "env.json").write_text(json.dumps({
+    "profile_stages": os.environ.get("PROFILE_STAGES"),
+    "stage_report_every": os.environ.get("PROFILE_STAGES_REPORT_EVERY"),
+}), encoding="utf-8")
+print("=== Benchmark fake ===")
+print("mean: 1.0 ms/iter")
+print("median: 1.0 ms/iter")
+print("Progress: 100.0% (1/1)  10 gaussians  1.0 it/s")
+print("  training loop: 1.0 s (1 steps, 1.0 it/s)")
+""",
+            encoding="utf-8",
+        )
+        os.chmod(fake_binary, 0o755)
+        output_dir = tmp_path / "bench"
+
+        subprocess.run(
+            [
+                "python3",
+                str(script),
+                "/tmp/dataset",
+                "--binary",
+                str(fake_binary),
+                "--output-dir",
+                str(output_dir),
+                "--modes",
+                "auto",
+                "--stage-report-every",
+                "600",
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        env = json.loads((output_dir / "auto" / "env.json").read_text(encoding="utf-8"))
+        summary = json.loads((output_dir / "summary.json").read_text(encoding="utf-8"))
+
+    assert env["profile_stages"] == "1"
+    assert env["stage_report_every"] == "600"
+    assert summary["profile_stages"] is True
+    assert summary["profile_mode"] == "stage"
 
 
 def test_train_step_forced_syncs_are_named_and_counted():

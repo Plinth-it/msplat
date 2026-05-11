@@ -26,14 +26,14 @@ def parse_args() -> argparse.Namespace:
         "--profile-stages",
         dest="profile_stages",
         action="store_true",
-        default=True,
-        help="Enable synchronized per-stage GPU profiling (default).",
+        default=False,
+        help="Enable synchronized per-stage GPU profiling.",
     )
     parser.add_argument(
         "--no-profile-stages",
         dest="profile_stages",
         action="store_false",
-        help="Disable per-stage profiling for production throughput measurements.",
+        help="Disable per-stage profiling for production throughput measurements (default).",
     )
     parser.add_argument(
         "--stage-report-every",
@@ -43,21 +43,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--timing-mode",
         choices=["drain-each-iter", "async-submit"],
-        default="drain-each-iter",
+        default="async-submit",
         help="Benchmark either per-iteration GPU drain timing or async CPU submit throughput.",
     )
     parser.add_argument(
         "--debug",
         dest="debug",
         action="store_true",
-        default=True,
-        help="Enable backward raster debug counters (default).",
+        default=False,
+        help="Enable backward raster debug counters.",
     )
     parser.add_argument(
         "--no-debug",
         dest="debug",
         action="store_false",
-        help="Disable backward raster debug counters for production throughput measurements.",
+        help="Disable backward raster debug counters for production throughput measurements (default).",
     )
     parser.add_argument(
         "--modes",
@@ -119,6 +119,8 @@ def parse_args() -> argparse.Namespace:
     )
     args, extra_args = parser.parse_known_args()
     args.msplat_args = clean_extra_args(extra_args)
+    if args.stage_report_every is not None:
+        args.profile_stages = True
     return args
 
 
@@ -518,6 +520,7 @@ def write_summary(args: argparse.Namespace, results: list[dict[str, object]], ou
         "output_dir": str(output_dir),
         "iters": args.iters,
         "profile_stages": args.profile_stages,
+        "profile_mode": "stage" if args.profile_stages else "production",
         "timing_mode": args.timing_mode,
         "debug": args.debug,
         "quality_metrics": args.quality_metrics,
