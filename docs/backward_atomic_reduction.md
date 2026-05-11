@@ -66,6 +66,14 @@ as an ambiguous crossover case until a full quality-gated run shows a clear win.
    `rast_bwd` from 0.669 ms to 0.915 ms. Keep it opt-in unless larger scenes
    show a clear stage-median win.
 
+   A parser-fixed 600-step profile run at 256px is still mixed. On playroom,
+   warp-merge improved `rast_bwd` from 0.573 ms to 0.508 ms, training throughput
+   from 295.87 to 325.37 it/s, and kept splat count stable. On the masked
+   porcelain object dataset, throughput improved from 86.62 to 93.29 it/s, but
+   `rast_bwd` moved from 1.040 ms to 1.055 ms. That is not enough to promote
+   the hook; it needs a broader quality-gated run or a cheaper merge scheme that
+   avoids paying barriers where atomics are not the bottleneck.
+
 4. Consider a two-pass contribution compaction only for large/full-resolution
    scenes. Emitting per-tile or per-gaussian contribution records and segmented
    reducing them would attack global atomics directly, but it adds memory
