@@ -353,7 +353,12 @@ total 4.323 ms; `auto-rb-spec` was only noise-level faster in `rast_bwd` at
 1.663 ms with GPU stage total 4.337 ms; `auto-rb-spec-half` reached 1.659 ms
 `rast_bwd` but lower throughput at 123.75 it/s; every warp-merge variant
 regressed `rast_bwd` to roughly 2.77-2.79 ms and throughput to roughly
-110-112 it/s. A forced-dynamic pre-densify garden A/B with fixed splat count
+110-112 it/s. The larger-scene regression gate was not run in this checkout
+because `datasets/mipnerf360/garden` is the only local valid training dataset.
+Do not default any raster/backward or command-stream optimization unless it
+improves median stage timing on two garden repeats and one larger scene, keeps
+final quality and splat growth within smoke noise, and passes the non-GPU pytest
+tier. A forced-dynamic pre-densify garden A/B with fixed splat count
 showed the guarded auto key mode slightly faster (`pixel-key-auto` 182.29 it/s,
 3.366 ms median vs `pixel` 178.59 it/s, 3.530 ms median at 138766 splats). A
 600-step quality-gated garden A/B also favored guarded auto keys (`pixel-key-auto`
