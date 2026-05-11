@@ -1,6 +1,7 @@
 #ifndef MSPLAT_BINDINGS_H
 #define MSPLAT_BINDINGS_H
 
+#include <cstdint>
 #include <tuple>
 #include "metal_tensor.hpp"
 
@@ -31,6 +32,7 @@ void msplat_drain_gpu_times(std::vector<double>& out);
 // Drains per-stage GPU times. stage_times must be an array of N_STAGES vectors.
 void msplat_drain_stage_times(std::vector<double> stage_times[], int max_stages, int& n_stages,
                               const char** stage_names);
+uint64_t msplat_drain_forced_sync_count();
 
 void msplat_apply_mean_noise(
     int num_points, MTensor &means3d, MTensor &opacities, MTensor &radii,

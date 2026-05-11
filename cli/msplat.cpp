@@ -966,6 +966,8 @@ int main(int argc, char *argv[]) {
             std::cout << "  cpu dispatch:  mean=" << cpu_mean << "  median=" << cpu_med << " ms\n";
             std::cout << "  gpu drain:     mean=" << drain_mean << "  median=" << drain_med << " ms\n";
             std::cout << "  gpu fraction:  " << (drain_med / median * 100) << "%\n";
+            uint64_t forcedSyncs = msplat_drain_forced_sync_count();
+            std::cout << "  forced syncs:  " << forcedSyncs << "\n";
 
             // GPU timing from completion handlers (PROFILE_GPU=1)
             std::vector<double> gpu_times;

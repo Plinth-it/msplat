@@ -566,6 +566,18 @@ def test_benchmark_script_supports_async_submit_timing_mode():
     assert "drain-each-iter" in cli
 
 
+def test_train_step_forced_syncs_are_named_and_counted():
+    repo_root = Path(__file__).resolve().parents[1]
+    host = (repo_root / "core" / "metal" / "msplat_metal.mm").read_text(encoding="utf-8")
+    bindings = (repo_root / "core" / "metal" / "bindings.h").read_text(encoding="utf-8")
+
+    assert "record_forced_sync" in host
+    assert "msplat_drain_forced_sync_count" in host
+    assert "msplat_drain_forced_sync_count" in bindings
+    assert 'record_forced_sync("overflow-check")' in host
+    assert 'record_forced_sync("dynamic-count-prepass")' in host
+
+
 def test_backward_rasterizer_benchmark_script_supports_auto_quality_metrics():
     repo_root = Path(__file__).resolve().parents[1]
     script = repo_root / "scripts" / "benchmark_backward_rasterizers.py"

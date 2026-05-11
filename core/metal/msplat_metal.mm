@@ -33,6 +33,15 @@ static bool g_gpu_timing_checked = false;
 static std::mutex g_gpu_timing_mutex;
 static std::vector<double> g_gpu_times_ms;
 
+static std::mutex g_forced_sync_mutex;
+static uint64_t g_forced_sync_count = 0;
+
+static void record_forced_sync(const char *reason) {
+    (void)reason;
+    std::lock_guard<std::mutex> lock(g_forced_sync_mutex);
+    g_forced_sync_count++;
+}
+
 // Per-stage profiling
 static bool g_profile_stages = false;
 static bool g_profile_stages_checked = false;
@@ -786,6 +795,13 @@ void msplat_drain_stage_times(std::vector<double> stage_times[], int max_stages,
         g_stage_times[i].clear();
         stage_names[i] = g_train_stage_names[i];
     }
+}
+
+uint64_t msplat_drain_forced_sync_count() {
+    std::lock_guard<std::mutex> lock(g_forced_sync_mutex);
+    uint64_t count = g_forced_sync_count;
+    g_forced_sync_count = 0;
+    return count;
 }
 
 void msplat_apply_mean_noise(
@@ -1608,6 +1624,7 @@ static void forward_pipeline(
     bool num_points_changed = (num_points != g_tcache.fwd_num_points && g_tcache.fwd_num_points > 0);
     if (g_tcache.overflow_flag.defined() && g_tcache.fwd_num_points > 0
         && (num_points_changed || (iter_count_oc % 100) == 1)) {
+        record_forced_sync("overflow-check");
         ctx->syncCB();
         int32_t flag_val = *g_tcache.overflow_flag.data<int32_t>();
         if (flag_val > 0) {
@@ -2159,6 +2176,7 @@ std::tuple<MTensor, float> msplat_train_step(
     bool num_points_changed = (num_points != g_tcache.fwd_num_points && g_tcache.fwd_num_points > 0);
     if (g_tcache.overflow_flag.defined() && g_tcache.fwd_num_points > 0
         && (num_points_changed || (iter_count_oc % 100) == 1)) {
+        record_forced_sync("overflow-check");
         ctx->syncCB();
         int32_t flag_val = *g_tcache.overflow_flag.data<int32_t>();
         if (flag_val > 0) {
@@ -2918,6 +2936,7 @@ std::tuple<MTensor, float> msplat_train_step(
             encode_count_prefix(enc);
             [enc endEncoding];
         });
+        record_forced_sync("dynamic-count-prepass");
         ctx->syncCB();
         int64_t exact_intersections = read_dynamic_intersection_count(cum_tiles_hit, num_points);
         capacity = padded_dynamic_intersection_capacity(exact_intersections);
