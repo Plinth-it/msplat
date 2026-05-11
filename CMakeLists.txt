@@ -55,6 +55,8 @@ find_library(COREGRAPHICS_FRAMEWORK CoreGraphics REQUIRED)
 
 # --- Compile Metal shaders ---
 
+option(MSPLAT_ENABLE_METAL4_SHADERS "Compile Metal shaders with Metal 4.0 language mode" OFF)
+
 set(METAL_COMMON_SOURCE ${CMAKE_SOURCE_DIR}/core/metal/msplat_common.metal)
 set(METAL_SOURCES
     ${CMAKE_SOURCE_DIR}/core/metal/msplat_project.metal
@@ -69,13 +71,18 @@ set(METAL_SOURCES
 configure_file(${CMAKE_SOURCE_DIR}/core/resources/lpips_vgg.bin
                ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/lpips_vgg.bin COPYONLY)
 
+set(MSPLAT_METAL_FLAGS -O3)
+if(MSPLAT_ENABLE_METAL4_SHADERS)
+    list(APPEND MSPLAT_METAL_FLAGS -std=metal4.0)
+endif()
+
 set(METAL_AIR_FILES)
 foreach(METAL_SOURCE ${METAL_SOURCES})
     get_filename_component(METAL_NAME ${METAL_SOURCE} NAME_WE)
     set(METAL_AIR ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/${METAL_NAME}.air)
     add_custom_command(
         OUTPUT ${METAL_AIR}
-        COMMAND xcrun -sdk macosx metal -O3 -c
+        COMMAND xcrun -sdk macosx metal ${MSPLAT_METAL_FLAGS} -c
             ${METAL_SOURCE}
             -I ${CMAKE_SOURCE_DIR}/core/metal
             -o ${METAL_AIR}

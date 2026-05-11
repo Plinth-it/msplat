@@ -492,6 +492,9 @@ def test_metal_sources_compile_as_logical_units():
     assert "msplat_project.metal" in cmake_source
     assert "msplat_loss.metal" in cmake_source
     assert "msplat_densify.metal" in cmake_source
+    assert "MSPLAT_ENABLE_METAL4_SHADERS" in cmake_source
+    assert "MSPLAT_METAL_FLAGS" in cmake_source
+    assert "-std=metal4.0" in cmake_source
     assert "msplat_metal.metal" not in cmake_source
 
     assert "Metal source manifest" in manifest
@@ -528,6 +531,12 @@ def test_backward_rasterizer_benchmark_script_supports_production_ab():
 
     assert "--no-profile-stages" in script
     assert "--no-debug" in script
+    assert "--project-sh-specialization" in script
+    assert "MSPLAT_ENABLE_PROJECT_SH_SPECIALIZATION" in script
+    assert "project_sh_specialization_variants" in script
+    assert "--loss-specialization" in script
+    assert "MSPLAT_ENABLE_LOSS_SPECIALIZATION" in script
+    assert "loss_specialization_variants" in script
     assert "--raster-backward-specialization" in script
     assert "MSPLAT_ENABLE_RASTER_BACKWARD_SPECIALIZATION" in script
     assert "raster_specialization_variants" in script
@@ -564,6 +573,8 @@ output = Path(args[args.index("--output") + 1])
 output.parent.mkdir(parents=True, exist_ok=True)
 (output.parent / "argv.json").write_text(json.dumps(args), encoding="utf-8")
 (output.parent / "env.json").write_text(json.dumps({
+    "project_sh_specialization": os.environ.get("MSPLAT_ENABLE_PROJECT_SH_SPECIALIZATION"),
+    "loss_specialization": os.environ.get("MSPLAT_ENABLE_LOSS_SPECIALIZATION"),
     "raster_specialization": os.environ.get("MSPLAT_ENABLE_RASTER_BACKWARD_SPECIALIZATION"),
     "half_sorted_buffers": os.environ.get("MSPLAT_HALF_SORTED_BUFFERS"),
     "warp_merge": os.environ.get("MSPLAT_ENABLE_RASTER_BACKWARD_WARP_MERGE"),
@@ -637,6 +648,8 @@ print(f"  train L1:        {l1:.5f}")
     assert "--final-quality" in launched_args
     assert "--quality-metrics" not in launched_args
     assert "--alpha-mode" in launched_args
+    assert base_env["project_sh_specialization"] is None
+    assert base_env["loss_specialization"] is None
     assert base_env["raster_specialization"] is None
     assert base_env["half_sorted_buffers"] is None
     assert base_env["intersection_key_bits"] is None
@@ -675,7 +688,12 @@ print(f"  train L1:        {l1:.5f}")
     assert summary["dataset"] == "/tmp/dataset"
     assert summary["iters"] == 120
     assert summary["quality_metrics"] is True
+    assert summary["project_sh_specialization"] == "off"
+    assert summary["loss_specialization"] == "off"
+    assert summary["raster_backward_specialization"] == "both"
+    assert summary["half_sorted_buffers"] == "both"
     assert summary["warp_merge"] == "both"
+    assert summary["intersection_key_bits"] == ["default", "auto"]
     assert summary["msplat_args"] == ["--alpha-mode", "transparent"]
     assert [row["mode"] for row in summary["results"]] == [
         "auto",
@@ -698,6 +716,86 @@ print(f"  train L1:        {l1:.5f}")
     assert summary["results"][0]["log"].endswith("/auto/run.log")
     assert summary["quality_warnings"][0]["mode"] == "auto-key-auto"
     assert "PSNR -0.50 dB" in summary["quality_warnings"][0]["reasons"]
+
+
+def test_backward_rasterizer_benchmark_script_supports_project_and_loss_specialization_ab():
+    repo_root = Path(__file__).resolve().parents[1]
+    script = repo_root / "scripts" / "benchmark_backward_rasterizers.py"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        fake_binary = tmp_path / "fake_msplat.py"
+        fake_binary.write_text(
+            """#!/usr/bin/env python3
+import json
+import os
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+output = Path(args[args.index("--output") + 1])
+output.parent.mkdir(parents=True, exist_ok=True)
+(output.parent / "env.json").write_text(json.dumps({
+    "project_sh_specialization": os.environ.get("MSPLAT_ENABLE_PROJECT_SH_SPECIALIZATION"),
+    "loss_specialization": os.environ.get("MSPLAT_ENABLE_LOSS_SPECIALIZATION"),
+}), encoding="utf-8")
+print("=== Benchmark fake ===")
+print("mean: 1.0 ms/iter")
+print("median: 1.0 ms/iter")
+print("Progress: 100.0% (1/1)  10 gaussians  1.0 it/s")
+print("  training loop: 1.0 s (1 steps, 1.0 it/s)")
+""",
+            encoding="utf-8",
+        )
+        os.chmod(fake_binary, 0o755)
+        output_dir = tmp_path / "bench"
+
+        subprocess.run(
+            [
+                "python3",
+                str(script),
+                "/tmp/dataset",
+                "--binary",
+                str(fake_binary),
+                "--output-dir",
+                str(output_dir),
+                "--modes",
+                "auto",
+                "--project-sh-specialization",
+                "both",
+                "--loss-specialization",
+                "both",
+                "--no-profile-stages",
+                "--no-debug",
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        base_env = json.loads((output_dir / "auto" / "env.json").read_text(encoding="utf-8"))
+        loss_env = json.loads((output_dir / "auto-loss-spec" / "env.json").read_text(encoding="utf-8"))
+        project_env = json.loads((output_dir / "auto-project-sh-spec" / "env.json").read_text(encoding="utf-8"))
+        both_env = json.loads((output_dir / "auto-project-sh-spec-loss-spec" / "env.json").read_text(encoding="utf-8"))
+        summary = json.loads((output_dir / "summary.json").read_text(encoding="utf-8"))
+
+    assert base_env["project_sh_specialization"] is None
+    assert base_env["loss_specialization"] is None
+    assert loss_env["project_sh_specialization"] is None
+    assert loss_env["loss_specialization"] == "1"
+    assert project_env["project_sh_specialization"] == "1"
+    assert project_env["loss_specialization"] is None
+    assert both_env["project_sh_specialization"] == "1"
+    assert both_env["loss_specialization"] == "1"
+    assert summary["project_sh_specialization"] == "both"
+    assert summary["loss_specialization"] == "both"
+    assert [row["mode"] for row in summary["results"]] == [
+        "auto",
+        "auto-loss-spec",
+        "auto-project-sh-spec",
+        "auto-project-sh-spec-loss-spec",
+    ]
 
 
 def test_compare_benchmark_summaries_script_prints_cross_run_table():

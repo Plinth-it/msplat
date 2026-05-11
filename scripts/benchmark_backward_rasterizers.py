@@ -60,6 +60,18 @@ def parse_args() -> argparse.Namespace:
         choices=["auto", "pixel", "perpixel", "chunked", "persplat", "brush"],
     )
     parser.add_argument(
+        "--project-sh-specialization",
+        choices=["off", "on", "both"],
+        default="off",
+        help="A/B the opt-in MSPLAT_ENABLE_PROJECT_SH_SPECIALIZATION hook.",
+    )
+    parser.add_argument(
+        "--loss-specialization",
+        choices=["off", "on", "both"],
+        default="off",
+        help="A/B the opt-in MSPLAT_ENABLE_LOSS_SPECIALIZATION hook.",
+    )
+    parser.add_argument(
         "--raster-backward-specialization",
         choices=["off", "on", "both"],
         default="off",
@@ -215,6 +227,8 @@ def relative_delta(value: object, baseline: object) -> float | None:
 def run_mode(
     args: argparse.Namespace,
     mode: str,
+    project_sh_specialization: bool,
+    loss_specialization: bool,
     raster_specialization: bool,
     half_sorted_buffers: bool,
     warp_merge: bool,
@@ -223,6 +237,10 @@ def run_mode(
     extra_args: list[str],
 ) -> dict[str, object]:
     run_name = mode
+    if project_sh_specialization:
+        run_name += "-project-sh-spec"
+    if loss_specialization:
+        run_name += "-loss-spec"
     if raster_specialization:
         run_name += "-rb-spec"
     if half_sorted_buffers:
@@ -254,6 +272,14 @@ def run_mode(
     else:
         env.pop("MSPLAT_BACKWARD_DEBUG", None)
         env.pop("MSPLAT_BACKWARD_DEBUG_INTERVAL", None)
+    if project_sh_specialization:
+        env["MSPLAT_ENABLE_PROJECT_SH_SPECIALIZATION"] = "1"
+    else:
+        env.pop("MSPLAT_ENABLE_PROJECT_SH_SPECIALIZATION", None)
+    if loss_specialization:
+        env["MSPLAT_ENABLE_LOSS_SPECIALIZATION"] = "1"
+    else:
+        env.pop("MSPLAT_ENABLE_LOSS_SPECIALIZATION", None)
     if raster_specialization:
         env["MSPLAT_ENABLE_RASTER_BACKWARD_SPECIALIZATION"] = "1"
     else:
@@ -284,6 +310,10 @@ def run_mode(
         *extra_args,
     ]
     labels = []
+    if project_sh_specialization:
+        labels.append("project/SH specialization")
+    if loss_specialization:
+        labels.append("loss specialization")
     if raster_specialization:
         labels.append("raster-backward specialization")
     if half_sorted_buffers:
@@ -320,6 +350,18 @@ def run_mode(
     metrics["mode"] = run_name
     metrics["log"] = log_path
     return metrics
+
+
+def project_sh_specialization_variants(value: str) -> list[bool]:
+    if value == "both":
+        return [False, True]
+    return [value == "on"]
+
+
+def loss_specialization_variants(value: str) -> list[bool]:
+    if value == "both":
+        return [False, True]
+    return [value == "on"]
 
 
 def raster_specialization_variants(value: str) -> list[bool]:
@@ -465,7 +507,12 @@ def write_summary(args: argparse.Namespace, results: list[dict[str, object]], ou
         "profile_stages": args.profile_stages,
         "debug": args.debug,
         "quality_metrics": args.quality_metrics,
+        "project_sh_specialization": args.project_sh_specialization,
+        "loss_specialization": args.loss_specialization,
+        "raster_backward_specialization": args.raster_backward_specialization,
+        "half_sorted_buffers": args.half_sorted_buffers,
         "warp_merge": args.warp_merge,
+        "intersection_key_bits": args.intersection_key_bits,
         "msplat_args": args.msplat_args,
         "results": [json_result(row) for row in results],
         "quality_warnings": quality_warning_rows(results),
@@ -482,8 +529,21 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     results = [
-        run_mode(args, mode, raster_specialization, half_sorted_buffers, warp_merge, intersection_key_bits, output_dir, extra_args)
+        run_mode(
+            args,
+            mode,
+            project_sh_specialization,
+            loss_specialization,
+            raster_specialization,
+            half_sorted_buffers,
+            warp_merge,
+            intersection_key_bits,
+            output_dir,
+            extra_args,
+        )
         for mode in args.modes
+        for project_sh_specialization in project_sh_specialization_variants(args.project_sh_specialization)
+        for loss_specialization in loss_specialization_variants(args.loss_specialization)
         for raster_specialization in raster_specialization_variants(args.raster_backward_specialization)
         for half_sorted_buffers in half_sorted_buffer_variants(args.half_sorted_buffers)
         for warp_merge in warp_merge_variants(args.warp_merge)
