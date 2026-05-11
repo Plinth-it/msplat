@@ -120,6 +120,10 @@ def parse_metrics(log_text: str) -> dict[str, object]:
         r"persplat replay estimate: active_pairs ([0-9.]+)M/sample, diagonal_steps ([0-9.]+)M/sample, tightened_skip ([0-9.]+)M/sample",
         log_text,
     )
+    atomics = re.search(
+        r"pixel atomic estimate: warp_groups ([0-9.]+)M/sample, tile_merge_floor ([0-9.]+)M/sample, max_reduction ([0-9.]+)%",
+        log_text,
+    )
 
     return {
         "iter_mean_ms": float(benchmark.group(1)) if benchmark else None,
@@ -137,6 +141,9 @@ def parse_metrics(log_text: str) -> dict[str, object]:
         "tile_avg_after": float(tile_ranges.group(2)) if tile_ranges else None,
         "tile_median_before": float(tile_ranges.group(3)) if tile_ranges else None,
         "tile_median_after": float(tile_ranges.group(4)) if tile_ranges else None,
+        "pixel_atomic_groups_m": float(atomics.group(1)) if atomics else None,
+        "tile_merge_floor_m": float(atomics.group(2)) if atomics else None,
+        "tile_merge_max_reduction": float(atomics.group(3)) if atomics else None,
         "replay_active_m": float(replay.group(1)) if replay else None,
         "replay_diagonal_m": float(replay.group(2)) if replay else None,
         "replay_skip_m": float(replay.group(3)) if replay else None,
@@ -224,14 +231,14 @@ def has_final_quality_arg(args: list[str]) -> bool:
 def print_table(results: list[dict[str, object]], output_dir: Path) -> None:
     print(f"Logs: {output_dir}")
     print()
-    print("| mode | train it/s | train s | iter median ms | rast_bwd median ms | PSNR | SSIM | L1 | splats | tile avg | replay active M |")
-    print("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
+    print("| mode | train it/s | train s | iter median ms | rast_bwd median ms | PSNR | SSIM | L1 | splats | tile avg | pixel atomic M | merge ceiling % | replay active M |")
+    print("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
     for row in results:
         tile_avg = "-"
         if row["tile_avg_before"] is not None and row["tile_avg_after"] is not None:
             tile_avg = f"{fmt(row['tile_avg_before'], 1)}->{fmt(row['tile_avg_after'], 1)}"
         print(
-            "| {mode} | {ips} | {train_s} | {iter_ms} | {bwd_ms} | {psnr} | {ssim} | {l1} | {splats} | {tile_avg} | {replay} |".format(
+            "| {mode} | {ips} | {train_s} | {iter_ms} | {bwd_ms} | {psnr} | {ssim} | {l1} | {splats} | {tile_avg} | {atomic_groups} | {merge_ceiling} | {replay} |".format(
                 mode=row["mode"],
                 ips=fmt(row["training_ips"], 2),
                 train_s=fmt(row["training_seconds"], 2),
@@ -242,6 +249,8 @@ def print_table(results: list[dict[str, object]], output_dir: Path) -> None:
                 l1=fmt(row["l1"], 5),
                 splats=fmt(row["splats"], 0),
                 tile_avg=tile_avg,
+                atomic_groups=fmt(row["pixel_atomic_groups_m"], 1),
+                merge_ceiling=fmt(row["tile_merge_max_reduction"], 1),
                 replay=fmt(row["replay_active_m"], 1),
             )
         )

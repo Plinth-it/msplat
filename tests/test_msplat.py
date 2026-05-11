@@ -329,6 +329,8 @@ def test_metal_exposes_brush_style_persplat_backward():
     assert 'load(@"rasterize_backward_persplat_kernel")' in host_source
     assert "MSPLAT_BACKWARD_RASTERIZER" in host_source
     assert "MSPLAT_BACKWARD_DEBUG" in host_source
+    assert "pixel atomic estimate" in host_source
+    assert "pixel_warp_atomic_groups" in host_source
     assert "copy_int_buffer_kernel_cpso" in host_source
     assert "--backward-rasterizer" in (repo_root / "cli" / "msplat.cpp").read_text(encoding="utf-8")
     assert "rasterize_backward_persplat_kernel" in shader_source
@@ -421,6 +423,8 @@ def test_backward_rasterizer_benchmark_script_wires_profile_ab():
     assert "--backward-rasterizer" in script
     assert "--quality-metrics" in script
     assert "--final-quality" in script
+    assert "pixel_atomic_groups_m" in script
+    assert "merge ceiling %" in script
     assert "rast_bwd" in script
     assert "train PSNR" in script
     assert "train SSIM" in script

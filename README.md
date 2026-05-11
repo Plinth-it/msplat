@@ -312,8 +312,9 @@ compare `auto`, `pixel`, and `persplat` directly, and `--quality-metrics` passes
 `--final-quality` through to the CLI so the output table includes final train
 metrics. Set `PROFILE_STAGES=1` to compare stage timings and
 `MSPLAT_BACKWARD_DEBUG=1` to print debug-only range/replay counters every 100
-completed training steps. Use `MSPLAT_BACKWARD_DEBUG_INTERVAL=N` to change that
-report interval.
+completed training steps, including a pixel-path atomic-group estimate for
+cross-warp reduction experiments. Use `MSPLAT_BACKWARD_DEBUG_INTERVAL=N` to
+change that report interval.
 
 ### Build from source
 

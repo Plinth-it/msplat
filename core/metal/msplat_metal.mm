@@ -1216,6 +1216,8 @@ struct BackwardDebugSample {
     double post_median = 0.0;
     int pre_max = 0;
     int post_max = 0;
+    uint64_t pixel_warp_atomic_groups = 0;
+    uint64_t tile_splat_atomic_groups = 0;
     uint64_t replay_active_pairs = 0;
     uint64_t replay_diagonal_steps = 0;
     uint64_t tightened_pairs_skipped = 0;
@@ -1230,6 +1232,8 @@ struct BackwardDebugAccum {
     double post_median_sum = 0.0;
     double pre_max_sum = 0.0;
     double post_max_sum = 0.0;
+    uint64_t pixel_warp_atomic_groups = 0;
+    uint64_t tile_splat_atomic_groups = 0;
     uint64_t replay_active_pairs = 0;
     uint64_t replay_diagonal_steps = 0;
     uint64_t tightened_pairs_skipped = 0;
@@ -1283,6 +1287,9 @@ static BackwardDebugSample make_backward_debug_sample(
         post_sum += (uint64_t)post_len;
         sample.pre_max = std::max(sample.pre_max, pre_len);
         sample.post_max = std::max(sample.post_max, post_len);
+        uint64_t pixel_warps = (pixels + 31u) / 32u;
+        sample.pixel_warp_atomic_groups += (uint64_t)post_len * pixel_warps;
+        sample.tile_splat_atomic_groups += (uint64_t)post_len;
         sample.replay_active_pairs += (uint64_t)post_len * pixels;
         sample.tightened_pairs_skipped += (uint64_t)std::max(0, pre_len - post_len) * pixels;
         for (int offset = 0; offset < post_len; offset += BLOCK_SIZE) {
@@ -1319,6 +1326,8 @@ static void record_backward_debug_sample(const BackwardDebugSample &sample, bool
     acc.post_median_sum += sample.post_median;
     acc.pre_max_sum += sample.pre_max;
     acc.post_max_sum += sample.post_max;
+    acc.pixel_warp_atomic_groups += sample.pixel_warp_atomic_groups;
+    acc.tile_splat_atomic_groups += sample.tile_splat_atomic_groups;
     acc.replay_active_pairs += sample.replay_active_pairs;
     acc.replay_diagonal_steps += sample.replay_diagonal_steps;
     acc.tightened_pairs_skipped += sample.tightened_pairs_skipped;
@@ -1328,9 +1337,13 @@ static void record_backward_debug_sample(const BackwardDebugSample &sample, bool
     if ((acc.samples % (uint64_t)interval) != 0u) return;
 
     double n = (double)acc.samples;
+    double pixel_groups = (double)acc.pixel_warp_atomic_groups / n;
+    double tile_groups = (double)acc.tile_splat_atomic_groups / n;
+    double max_merge_pct = pixel_groups > 0.0 ? 100.0 * (1.0 - tile_groups / pixel_groups) : 0.0;
     fprintf(stderr,
             "\n  === Backward Raster Debug (n=%llu, mode=%s) ===\n"
             "  tile splats: avg %.1f -> %.1f, median %.1f -> %.1f, max %.1f -> %.1f\n"
+            "  pixel atomic estimate: warp_groups %.1fM/sample, tile_merge_floor %.1fM/sample, max_reduction %.1f%%\n"
             "  persplat replay estimate: active_pairs %.1fM/sample, diagonal_steps %.1fM/sample, tightened_skip %.1fM/sample\n"
             "  saturated pixels: %.1f/sample\n",
             (unsigned long long)acc.samples,
@@ -1338,6 +1351,7 @@ static void record_backward_debug_sample(const BackwardDebugSample &sample, bool
             acc.pre_avg_sum / n, acc.post_avg_sum / n,
             acc.pre_median_sum / n, acc.post_median_sum / n,
             acc.pre_max_sum / n, acc.post_max_sum / n,
+            pixel_groups / 1e6, tile_groups / 1e6, max_merge_pct,
             ((double)acc.replay_active_pairs / n) / 1e6,
             ((double)acc.replay_diagonal_steps / n) / 1e6,
             ((double)acc.tightened_pairs_skipped / n) / 1e6,
