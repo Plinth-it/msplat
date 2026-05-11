@@ -329,7 +329,12 @@ enables the half sorted-buffer hook. These hooks are disabled by default because
 local A/B runs should prove a win before changing production defaults. On the
 600-step garden production smoke shape, half sorted buffers were slower
 (`pixel-half` 263.76 it/s vs `pixel` 275.75 it/s), so that path remains
-benchmark-only.
+benchmark-only. A forced-dynamic pre-densify garden A/B with fixed splat count
+showed the guarded auto key mode slightly faster (`pixel-key-auto` 182.29 it/s,
+3.366 ms median vs `pixel` 178.59 it/s, 3.530 ms median at 138766 splats), but
+longer growth-enabled runs can change the splat trajectory because the 32-bit
+path quantizes depth to 16 bits, so key-mode changes also remain opt-in until a
+quality-gated full-run A/B justifies changing defaults.
 
 ### Build from source
 
