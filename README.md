@@ -320,7 +320,8 @@ cross-warp reduction experiments. Use `MSPLAT_BACKWARD_DEBUG_INTERVAL=N` to
 change that report interval, and `--raster-backward-specialization both` to A/B
 the raster-backward function-constant hook. Use `--half-sorted-buffers both` to
 A/B the opt-in half-precision sorted-buffer path for packed conic, RGB, and
-opacity-comp data. `MSPLAT_ENABLE_PROJECT_SH_SPECIALIZATION=1`,
+opacity-comp data, and `--intersection-key-bits default auto 32` to compare
+dynamic sort key modes. `MSPLAT_ENABLE_PROJECT_SH_SPECIALIZATION=1`,
 `MSPLAT_ENABLE_LOSS_SPECIALIZATION=1`, and
 `MSPLAT_ENABLE_RASTER_BACKWARD_SPECIALIZATION=1` enable opt-in function-constant
 benchmark hooks for pipeline-stable training knobs; `MSPLAT_HALF_SORTED_BUFFERS=1`

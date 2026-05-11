@@ -71,6 +71,13 @@ def parse_args() -> argparse.Namespace:
         help="A/B the opt-in MSPLAT_HALF_SORTED_BUFFERS hook.",
     )
     parser.add_argument(
+        "--intersection-key-bits",
+        nargs="+",
+        default=["default"],
+        choices=["default", "64", "32", "auto"],
+        help="Run with one or more MSPLAT_INTERSECTION_KEY_BITS modes; default leaves the env unset.",
+    )
+    parser.add_argument(
         "--quality-metrics",
         "--final-quality",
         dest="quality_metrics",
@@ -175,6 +182,7 @@ def run_mode(
     mode: str,
     raster_specialization: bool,
     half_sorted_buffers: bool,
+    intersection_key_bits: str,
     output_dir: Path,
     extra_args: list[str],
 ) -> dict[str, object]:
@@ -183,6 +191,8 @@ def run_mode(
         run_name += "-rb-spec"
     if half_sorted_buffers:
         run_name += "-half"
+    if intersection_key_bits != "default":
+        run_name += f"-key-{intersection_key_bits}"
     mode_dir = output_dir / run_name
     mode_dir.mkdir(parents=True, exist_ok=True)
     log_path = mode_dir / "run.log"
@@ -214,6 +224,10 @@ def run_mode(
         env["MSPLAT_HALF_SORTED_BUFFERS"] = "1"
     else:
         env.pop("MSPLAT_HALF_SORTED_BUFFERS", None)
+    if intersection_key_bits == "default":
+        env.pop("MSPLAT_INTERSECTION_KEY_BITS", None)
+    else:
+        env["MSPLAT_INTERSECTION_KEY_BITS"] = intersection_key_bits
 
     cmd = [
         str(args.binary),
@@ -232,6 +246,8 @@ def run_mode(
         labels.append("raster-backward specialization")
     if half_sorted_buffers:
         labels.append("half sorted buffers")
+    if intersection_key_bits != "default":
+        labels.append(f"{intersection_key_bits}-bit intersection keys" if intersection_key_bits != "auto" else "auto intersection keys")
     suffix = f" + {' + '.join(labels)}" if labels else ""
     print(f"\n=== Running {mode}{suffix} ===", flush=True)
     process = subprocess.Popen(
@@ -274,6 +290,10 @@ def half_sorted_buffer_variants(value: str) -> list[bool]:
     return [value == "on"]
 
 
+def intersection_key_bit_variants(values: list[str]) -> list[str]:
+    return list(dict.fromkeys(values))
+
+
 def has_final_quality_arg(args: list[str]) -> bool:
     return any(arg in {"--final-quality", "--no-final-quality"} for arg in args)
 
@@ -313,10 +333,11 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     results = [
-        run_mode(args, mode, raster_specialization, half_sorted_buffers, output_dir, extra_args)
+        run_mode(args, mode, raster_specialization, half_sorted_buffers, intersection_key_bits, output_dir, extra_args)
         for mode in args.modes
         for raster_specialization in raster_specialization_variants(args.raster_backward_specialization)
         for half_sorted_buffers in half_sorted_buffer_variants(args.half_sorted_buffers)
+        for intersection_key_bits in intersection_key_bit_variants(args.intersection_key_bits)
     ]
     print_table(results, output_dir)
     return 0
