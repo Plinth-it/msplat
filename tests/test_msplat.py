@@ -618,6 +618,7 @@ print(f"  train L1:        {l1:.5f}")
         specialized_env = json.loads((output_dir / "auto-rb-spec" / "env.json").read_text(encoding="utf-8"))
         combined_env = json.loads((output_dir / "auto-rb-spec-half" / "env.json").read_text(encoding="utf-8"))
         combined_key_env = json.loads((output_dir / "auto-rb-spec-half-key-auto" / "env.json").read_text(encoding="utf-8"))
+        summary = json.loads((output_dir / "summary.json").read_text(encoding="utf-8"))
 
     mode_index = launched_args.index("--backward-rasterizer") + 1
     assert launched_args[mode_index] == "auto"
@@ -652,7 +653,26 @@ print(f"  train L1:        {l1:.5f}")
     assert "Large quality/count drift vs auto" in result.stdout
     assert "auto-key-auto: PSNR -0.50 dB" in result.stdout
     assert "splats +20.0%" in result.stdout
+    assert "Summary:" in result.stdout
     assert "30.00" in result.stdout
+    assert summary["schema_version"] == 1
+    assert summary["dataset"] == "/tmp/dataset"
+    assert summary["iters"] == 120
+    assert summary["quality_metrics"] is True
+    assert summary["msplat_args"] == ["--alpha-mode", "transparent"]
+    assert [row["mode"] for row in summary["results"]] == [
+        "auto",
+        "auto-key-auto",
+        "auto-half",
+        "auto-half-key-auto",
+        "auto-rb-spec",
+        "auto-rb-spec-key-auto",
+        "auto-rb-spec-half",
+        "auto-rb-spec-half-key-auto",
+    ]
+    assert summary["results"][0]["log"].endswith("/auto/run.log")
+    assert summary["quality_warnings"][0]["mode"] == "auto-key-auto"
+    assert "PSNR -0.50 dB" in summary["quality_warnings"][0]["reasons"]
 
 
 def test_stage_profiler_uses_synchronized_command_buffers():

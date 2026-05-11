@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import subprocess
@@ -403,18 +404,53 @@ def print_quality_warnings(results: list[dict[str, object]]) -> None:
     if len(results) < 2:
         return
     baseline = results[0]
-    warnings = [
-        (row["mode"], quality_drift_reasons(row, baseline))
-        for row in results[1:]
-    ]
-    warnings = [(mode, reasons) for mode, reasons in warnings if reasons]
+    warnings = quality_warning_rows(results)
     if not warnings:
         return
 
     print()
     print(f"Large quality/count drift vs {baseline['mode']}:")
-    for mode, reasons in warnings:
-        print(f"  {mode}: {', '.join(reasons)}")
+    for warning in warnings:
+        print(f"  {warning['mode']}: {', '.join(warning['reasons'])}")
+
+
+def quality_warning_rows(results: list[dict[str, object]]) -> list[dict[str, object]]:
+    if len(results) < 2:
+        return []
+    baseline = results[0]
+    rows: list[dict[str, object]] = []
+    for row in results[1:]:
+        reasons = quality_drift_reasons(row, baseline)
+        if reasons:
+            rows.append({"mode": row["mode"], "reasons": reasons})
+    return rows
+
+
+def json_result(row: dict[str, object]) -> dict[str, object]:
+    return {
+        key: str(value) if isinstance(value, Path) else value
+        for key, value in row.items()
+    }
+
+
+def write_summary(args: argparse.Namespace, results: list[dict[str, object]], output_dir: Path) -> Path:
+    summary_path = output_dir / "summary.json"
+    summary = {
+        "schema_version": 1,
+        "dataset": str(args.dataset),
+        "binary": str(args.binary),
+        "output_dir": str(output_dir),
+        "iters": args.iters,
+        "profile_stages": args.profile_stages,
+        "debug": args.debug,
+        "quality_metrics": args.quality_metrics,
+        "msplat_args": args.msplat_args,
+        "results": [json_result(row) for row in results],
+        "quality_warnings": quality_warning_rows(results),
+    }
+    summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(f"Summary: {summary_path}")
+    return summary_path
 
 
 def main() -> int:
@@ -431,6 +467,7 @@ def main() -> int:
         for intersection_key_bits in intersection_key_bit_variants(args.intersection_key_bits)
     ]
     print_table(results, output_dir)
+    write_summary(args, results, output_dir)
     return 0
 
 
