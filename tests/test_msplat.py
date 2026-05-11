@@ -623,8 +623,11 @@ print("mean: 1.0 ms/iter")
 print("median: 1.0 ms/iter")
 print(f"Progress: 100.0% (1/1)  {splats} gaussians  1.0 it/s")
 print("  training loop: 1.0 s (1 steps, 1.0 it/s)")
+print("  loss_fwd_bwd     median=0.2ms mean=0.2ms")
 print("  rast_bwd median=0.9ms mean=1.0ms")
 print("  rast_bwd median=0.5ms mean=0.6ms")
+print("  proj_sh_bwd_adam median=0.3ms mean=0.3ms")
+print("  TOTAL (sum medians) 1.0ms")
 print(f"  train PSNR:      {psnr:.2f} dB")
 print(f"  train SSIM:      {ssim:.4f}")
 print(f"  train L1:        {l1:.5f}")
@@ -711,7 +714,7 @@ print(f"  train L1:        {l1:.5f}")
     assert "auto-key-auto" in result.stdout
     assert "auto-rb-spec-half-key-auto" in result.stdout
     assert "Baseline deltas vs auto" in result.stdout
-    assert "| auto | 1.00 | 1.00 | 1.000 | 0.500 | 30.00 | 0.9000 | 0.01000 | 10 |" in result.stdout
+    assert "| auto | 1.00 | 1.00 | 1.000 | 1.000 | 0.200 | 0.500 | 0.300 | 30.00 | 0.9000 | 0.01000 | 10 |" in result.stdout
     assert "Large quality/count drift vs auto" in result.stdout
     assert "auto-key-auto: PSNR -0.50 dB" in result.stdout
     assert "splats +20.0%" in result.stdout
@@ -747,8 +750,22 @@ print(f"  train L1:        {l1:.5f}")
         "auto-rb-spec-half-warp-merge-key-auto",
     ]
     assert summary["results"][0]["log"].endswith("/auto/run.log")
+    assert summary["results"][0]["gpu_stage_total_median_ms"] == 1.0
+    assert summary["results"][0]["loss_fwd_bwd_median_ms"] == 0.2
+    assert summary["results"][0]["proj_sh_bwd_adam_median_ms"] == 0.3
     assert summary["quality_warnings"][0]["mode"] == "auto-key-auto"
     assert "PSNR -0.50 dB" in summary["quality_warnings"][0]["reasons"]
+
+
+def test_benchmark_summary_extracts_gpu_stage_total():
+    repo_root = Path(__file__).resolve().parents[1]
+    script = (repo_root / "scripts" / "benchmark_backward_rasterizers.py").read_text(encoding="utf-8")
+    compare = (repo_root / "scripts" / "compare_benchmark_summaries.py").read_text(encoding="utf-8")
+
+    assert "gpu_stage_total_median_ms" in script
+    assert "loss_fwd_bwd_median_ms" in script
+    assert "proj_sh_bwd_adam_median_ms" in script
+    assert "gpu_stage_total_median_ms" in compare
 
 
 def test_backward_rasterizer_benchmark_script_supports_project_and_loss_specialization_ab():
@@ -849,7 +866,10 @@ def test_compare_benchmark_summaries_script_prints_cross_run_table():
                     "mode": "pixel",
                     "training_ips": 100.0,
                     "iter_median_ms": 3.0,
+                    "gpu_stage_total_median_ms": 2.0,
+                    "loss_fwd_bwd_median_ms": 0.4,
                     "rast_bwd_median_ms": 1.0,
+                    "proj_sh_bwd_adam_median_ms": 0.5,
                     "psnr": 20.0,
                     "ssim": 0.8,
                     "l1": 0.04,
@@ -859,7 +879,10 @@ def test_compare_benchmark_summaries_script_prints_cross_run_table():
                     "mode": "pixel-key-auto",
                     "training_ips": 110.0,
                     "iter_median_ms": 2.7,
+                    "gpu_stage_total_median_ms": 1.8,
+                    "loss_fwd_bwd_median_ms": 0.36,
                     "rast_bwd_median_ms": 0.9,
+                    "proj_sh_bwd_adam_median_ms": 0.45,
                     "psnr": 19.7,
                     "ssim": 0.79,
                     "l1": 0.045,
@@ -893,7 +916,7 @@ def test_compare_benchmark_summaries_script_prints_cross_run_table():
 
     assert "## msplat-garden" in result.stdout
     assert "dataset: /datasets/garden" in result.stdout
-    assert "| pixel-key-auto | 110.00 | +10.0% | -10.0% | -10.0% | -0.30 | -0.0100 | +12.5% | +6.0% | PSNR -0.30 dB, splats +6.0% |" in result.stdout
+    assert "| pixel-key-auto | 110.00 | +10.0% | -10.0% | -10.0% | -10.0% | -10.0% | -10.0% | -0.30 | -0.0100 | +12.5% | +6.0% | PSNR -0.30 dB, splats +6.0% |" in result.stdout
     assert "## msplat-playroom" in result.stdout
 
 

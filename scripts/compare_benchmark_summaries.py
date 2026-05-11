@@ -80,19 +80,22 @@ def print_summary(path: Path) -> None:
     print(f"\n## {label}")
     print(f"dataset: {dataset}")
     print()
-    print("| mode | train it/s | it/s delta | iter median delta | rast_bwd delta | PSNR delta | SSIM delta | L1 delta | splats delta | warnings |")
-    print("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |")
+    print("| mode | train it/s | it/s delta | iter median delta | GPU stage total delta | loss delta | rast_bwd delta | proj/SH/Adam delta | PSNR delta | SSIM delta | L1 delta | splats delta | warnings |")
+    print("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |")
     for row in results:
         if not isinstance(row, dict):
             continue
         mode = str(row.get("mode", "-"))
         print(
-            "| {mode} | {ips} | {ips_delta} | {iter_delta} | {bwd_delta} | {psnr_delta} | {ssim_delta} | {l1_delta} | {splat_delta} | {warnings} |".format(
+            "| {mode} | {ips} | {ips_delta} | {iter_delta} | {gpu_total_delta} | {loss_delta} | {bwd_delta} | {proj_adam_delta} | {psnr_delta} | {ssim_delta} | {l1_delta} | {splat_delta} | {warnings} |".format(
                 mode=mode,
                 ips=fmt(row.get("training_ips"), 2),
                 ips_delta=fmt_delta(row.get("training_ips"), baseline.get("training_ips")),
                 iter_delta=fmt_delta(row.get("iter_median_ms"), baseline.get("iter_median_ms")),
+                gpu_total_delta=fmt_delta(row.get("gpu_stage_total_median_ms"), baseline.get("gpu_stage_total_median_ms")),
+                loss_delta=fmt_delta(row.get("loss_fwd_bwd_median_ms"), baseline.get("loss_fwd_bwd_median_ms")),
                 bwd_delta=fmt_delta(row.get("rast_bwd_median_ms"), baseline.get("rast_bwd_median_ms")),
+                proj_adam_delta=fmt_delta(row.get("proj_sh_bwd_adam_median_ms"), baseline.get("proj_sh_bwd_adam_median_ms")),
                 psnr_delta=fmt_delta(row.get("psnr"), baseline.get("psnr"), digits=2, percent=False),
                 ssim_delta=fmt_delta(row.get("ssim"), baseline.get("ssim"), digits=4, percent=False),
                 l1_delta=fmt_delta(row.get("l1"), baseline.get("l1")),

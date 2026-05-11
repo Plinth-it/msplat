@@ -176,8 +176,11 @@ def parse_metrics(log_text: str) -> dict[str, object]:
         "training_seconds": parse_duration(training.group(1).strip()) if training else None,
         "training_steps": int(training.group(2)) if training else None,
         "training_ips": float(training.group(3)) if training else None,
+        "gpu_stage_total_median_ms": parse_float(r"^\s*TOTAL \(sum medians\)\s+([0-9.]+)ms", log_text),
+        "loss_fwd_bwd_median_ms": parse_float(r"^\s*loss_fwd_bwd\s+median=([0-9.]+)ms", log_text),
         "rast_bwd_median_ms": parse_float(r"^\s*rast_bwd\s+median=([0-9.]+)ms", log_text),
         "rast_bwd_mean_ms": parse_float(r"^\s*rast_bwd\s+median=[0-9.]+ms\s+mean=([0-9.]+)ms", log_text),
+        "proj_sh_bwd_adam_median_ms": parse_float(r"^\s*proj_sh_bwd_adam\s+median=([0-9.]+)ms", log_text),
         "psnr": parse_float(r"train PSNR:\s+([0-9.]+)", log_text),
         "ssim": parse_float(r"train SSIM:\s+([0-9.]+)", log_text),
         "l1": parse_float(r"train L1:\s+([0-9.]+)", log_text),
@@ -400,19 +403,22 @@ def has_final_quality_arg(args: list[str]) -> bool:
 def print_table(results: list[dict[str, object]], output_dir: Path) -> None:
     print(f"Logs: {output_dir}")
     print()
-    print("| mode | train it/s | train s | iter median ms | rast_bwd median ms | PSNR | SSIM | L1 | splats | tile avg | pixel atomic M | merge ceiling % | replay active M | replay diag M | replay skip M | sat px |")
-    print("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
+    print("| mode | train it/s | train s | iter median ms | GPU stage total ms | loss median ms | rast_bwd median ms | proj/SH/Adam median ms | PSNR | SSIM | L1 | splats | tile avg | pixel atomic M | merge ceiling % | replay active M | replay diag M | replay skip M | sat px |")
+    print("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
     for row in results:
         tile_avg = "-"
         if row["tile_avg_before"] is not None and row["tile_avg_after"] is not None:
             tile_avg = f"{fmt(row['tile_avg_before'], 1)}->{fmt(row['tile_avg_after'], 1)}"
         print(
-            "| {mode} | {ips} | {train_s} | {iter_ms} | {bwd_ms} | {psnr} | {ssim} | {l1} | {splats} | {tile_avg} | {atomic_groups} | {merge_ceiling} | {replay} | {replay_diag} | {replay_skip} | {sat_px} |".format(
+            "| {mode} | {ips} | {train_s} | {iter_ms} | {gpu_total_ms} | {loss_ms} | {bwd_ms} | {proj_adam_ms} | {psnr} | {ssim} | {l1} | {splats} | {tile_avg} | {atomic_groups} | {merge_ceiling} | {replay} | {replay_diag} | {replay_skip} | {sat_px} |".format(
                 mode=row["mode"],
                 ips=fmt(row["training_ips"], 2),
                 train_s=fmt(row["training_seconds"], 2),
                 iter_ms=fmt(row["iter_median_ms"]),
+                gpu_total_ms=fmt(row["gpu_stage_total_median_ms"]),
+                loss_ms=fmt(row["loss_fwd_bwd_median_ms"]),
                 bwd_ms=fmt(row["rast_bwd_median_ms"]),
+                proj_adam_ms=fmt(row["proj_sh_bwd_adam_median_ms"]),
                 psnr=fmt(row["psnr"], 2),
                 ssim=fmt(row["ssim"], 4),
                 l1=fmt(row["l1"], 5),
