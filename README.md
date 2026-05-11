@@ -325,9 +325,11 @@ summary artifacts with `scripts/compare_benchmark_summaries.py`. Set
 `MSPLAT_BACKWARD_DEBUG=1` to print debug-only range/replay counters every 100
 completed training steps, including a pixel-path atomic-group estimate for
 cross-warp reduction experiments. Use `MSPLAT_BACKWARD_DEBUG_INTERVAL=N` to
-change that report interval, `--project-sh-specialization both` to A/B the
-projection/SH function-constant hook, `--loss-specialization both` to A/B the
-loss function-constant hook, and `--raster-backward-specialization both` to A/B
+change that report interval, `--timing-mode async-submit` to measure CPU submit
+cost without draining the GPU after every benchmark iteration,
+`--project-sh-specialization both` to A/B the projection/SH function-constant
+hook, `--loss-specialization both` to A/B the loss function-constant hook, and
+`--raster-backward-specialization both` to A/B
 the raster-backward function-constant hook. Use `--half-sorted-buffers both` to
 A/B the opt-in half-precision sorted-buffer path for packed conic, RGB, and
 opacity-comp data, `--warp-merge both` to A/B the opt-in per-pixel backward

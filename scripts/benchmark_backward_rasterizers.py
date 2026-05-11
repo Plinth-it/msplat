@@ -41,6 +41,12 @@ def parse_args() -> argparse.Namespace:
         help="PROFILE_STAGES_REPORT_EVERY value when stage profiling is enabled.",
     )
     parser.add_argument(
+        "--timing-mode",
+        choices=["drain-each-iter", "async-submit"],
+        default="drain-each-iter",
+        help="Benchmark either per-iteration GPU drain timing or async CPU submit throughput.",
+    )
+    parser.add_argument(
         "--debug",
         dest="debug",
         action="store_true",
@@ -259,6 +265,7 @@ def run_mode(
 
     env = os.environ.copy()
     env["BENCHMARK"] = "1"
+    env["MSPLAT_BENCHMARK_TIMING_MODE"] = args.timing_mode
     if args.profile_stages:
         env["PROFILE_STAGES"] = "1"
         if args.stage_report_every:
@@ -505,6 +512,7 @@ def write_summary(args: argparse.Namespace, results: list[dict[str, object]], ou
         "output_dir": str(output_dir),
         "iters": args.iters,
         "profile_stages": args.profile_stages,
+        "timing_mode": args.timing_mode,
         "debug": args.debug,
         "quality_metrics": args.quality_metrics,
         "project_sh_specialization": args.project_sh_specialization,

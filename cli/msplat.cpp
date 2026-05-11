@@ -831,6 +831,11 @@ int main(int argc, char *argv[]) {
             : static_cast<size_t>(std::max(1, numIters / 100));
 
         bool benchmarking = std::getenv("BENCHMARK") != nullptr;
+        const char *timingModeEnv = std::getenv("MSPLAT_BENCHMARK_TIMING_MODE");
+        const std::string benchmarkTimingMode = timingModeEnv != nullptr
+            ? std::string(timingModeEnv)
+            : std::string("drain-each-iter");
+        const bool benchmarkAsyncSubmit = benchmarkTimingMode == "async-submit";
         int bench_warmup = 50;
         std::vector<double> bench_iter_ms, bench_cpu_ms, bench_drain_ms;
         if (benchmarking) {
@@ -866,7 +871,9 @@ int main(int argc, char *argv[]) {
 
             if (benchmarking && step > (size_t)bench_warmup) {
                 auto pre_sync = cpu_now();
-                msplat_gpu_sync();
+                if (!benchmarkAsyncSubmit) {
+                    msplat_gpu_sync();
+                }
                 auto iter_end = cpu_now();
                 double iter_ms = std::chrono::duration_cast<std::chrono::microseconds>(iter_end - iter_start).count() / 1000.0;
                 double cpu_ms = std::chrono::duration_cast<std::chrono::microseconds>(pre_sync - iter_start).count() / 1000.0;
@@ -916,6 +923,10 @@ int main(int argc, char *argv[]) {
         }
         const auto trainingEnd = CliClock::now();
         const auto finalizationStart = CliClock::now();
+
+        if (benchmarking && benchmarkAsyncSubmit) {
+            msplat_gpu_sync();
+        }
 
         if (benchmarking && !bench_iter_ms.empty()) {
             clearImageLoadingStatusLine();

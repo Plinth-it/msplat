@@ -554,6 +554,18 @@ def test_backward_rasterizer_benchmark_script_supports_production_ab():
     assert "training_ips" in script
 
 
+def test_benchmark_script_supports_async_submit_timing_mode():
+    repo_root = Path(__file__).resolve().parents[1]
+    script = (repo_root / "scripts" / "benchmark_backward_rasterizers.py").read_text(encoding="utf-8")
+    cli = (repo_root / "cli" / "msplat.cpp").read_text(encoding="utf-8")
+
+    assert "--timing-mode" in script
+    assert "MSPLAT_BENCHMARK_TIMING_MODE" in script
+    assert "MSPLAT_BENCHMARK_TIMING_MODE" in cli
+    assert "async-submit" in cli
+    assert "drain-each-iter" in cli
+
+
 def test_backward_rasterizer_benchmark_script_supports_auto_quality_metrics():
     repo_root = Path(__file__).resolve().parents[1]
     script = repo_root / "scripts" / "benchmark_backward_rasterizers.py"
