@@ -67,7 +67,9 @@ kernel void rasterize_backward_kernel(
     // df/d_out for this pixel
     const float3 v_out = read_packed_float3(v_output, pix_id);
     const float target_alpha = inside ? packed_gt_alpha(gt_packed, (uint)pix_id) : 0.0f;
-    const float alpha_loss_grad = (use_alpha_loss != 0 && inside)
+    const uint use_alpha_loss_value = raster_use_alpha_loss(use_alpha_loss);
+    const uint use_half_sorted_buffers_value = raster_use_half_sorted_buffers(use_half_sorted_buffers);
+    const float alpha_loss_grad = (use_alpha_loss_value != 0 && inside)
         ? alpha_loss_grad_scale * (((1.0f - T_final) > target_alpha) ? 1.0f
             : (((1.0f - T_final) < target_alpha) ? -1.0f : 0.0f))
         : 0.0f;
@@ -108,11 +110,11 @@ kernel void rasterize_backward_kernel(
             // Sequential reads from packed sorted-order buffers
             xy_opacity_batch[tr] = read_packed_float3(packed_xy_opac, idx);
             conic_batch[tr] = read_packed_sorted_float3(
-                packed_conic, packed_conic_half, idx, use_half_sorted_buffers);
+                packed_conic, packed_conic_half, idx, use_half_sorted_buffers_value);
             rgbs_batch[tr] = read_packed_sorted_float3(
-                packed_rgb, packed_rgb_half, idx, use_half_sorted_buffers);
+                packed_rgb, packed_rgb_half, idx, use_half_sorted_buffers_value);
             opacity_comp_batch[tr] = read_packed_sorted_float(
-                packed_opacity_comp, packed_opacity_comp_half, idx, use_half_sorted_buffers);
+                packed_opacity_comp, packed_opacity_comp_half, idx, use_half_sorted_buffers_value);
         }
         // wait for other threads to collect the gaussians in batch
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -296,6 +298,8 @@ kernel void rasterize_backward_persplat_kernel(
         return;
     }
     uint rounds = (num_splats_in_tile + SPLAT_BATCH - 1) / SPLAT_BATCH;
+    const uint use_alpha_loss_value = raster_use_alpha_loss(use_alpha_loss);
+    const uint use_half_sorted_buffers_value = raster_use_half_sorted_buffers(use_half_sorted_buffers);
 
     for (uint pix_rank = thread_rank; pix_rank < TILE_PIXELS; pix_rank += SPLAT_BATCH) {
         uint2 local_xy = uint2(pix_rank % BLOCK_X, pix_rank / BLOCK_X);
@@ -307,7 +311,7 @@ kernel void rasterize_backward_persplat_kernel(
             float3 final_rgb = read_packed_float3(out_img, (int)pix_id);
             float3 v_out = read_packed_float3(v_output, (int)pix_id);
             float target_alpha = packed_gt_alpha(gt_packed, pix_id);
-            float alpha_loss_grad = (use_alpha_loss != 0)
+            float alpha_loss_grad = (use_alpha_loss_value != 0)
                 ? alpha_loss_grad_scale * (((1.0f - T_final) > target_alpha) ? 1.0f
                     : (((1.0f - T_final) < target_alpha) ? -1.0f : 0.0f))
                 : 0.0f;
@@ -339,11 +343,11 @@ kernel void rasterize_backward_persplat_kernel(
             gaussian_id = gaussian_ids_sorted[sorted_idx];
             xy_opac = read_packed_float3(packed_xy_opac, sorted_idx);
             conic = read_packed_sorted_float3(
-                packed_conic, packed_conic_half, sorted_idx, use_half_sorted_buffers);
+                packed_conic, packed_conic_half, sorted_idx, use_half_sorted_buffers_value);
             raw_rgb = read_packed_sorted_float3(
-                packed_rgb, packed_rgb_half, sorted_idx, use_half_sorted_buffers);
+                packed_rgb, packed_rgb_half, sorted_idx, use_half_sorted_buffers_value);
             opacity_comp = read_packed_sorted_float(
-                packed_opacity_comp, packed_opacity_comp_half, sorted_idx, use_half_sorted_buffers);
+                packed_opacity_comp, packed_opacity_comp_half, sorted_idx, use_half_sorted_buffers_value);
         }
 
         uint num_splats_this_batch = min(SPLAT_BATCH, num_splats_in_tile - batch_idx * SPLAT_BATCH);
@@ -544,4 +548,3 @@ kernel void nd_rasterize_backward_kernel(
         );
     }
 }
-

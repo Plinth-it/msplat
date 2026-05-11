@@ -334,7 +334,7 @@ def test_metal_exposes_brush_style_persplat_backward():
 
     assert "return std::max(img_width, img_height) > 2560 || num_tiles > 25000;" in host_source
     assert "rasterize_backward_persplat_kernel_cpso" in host_source
-    assert 'load(@"rasterize_backward_persplat_kernel")' in host_source
+    assert 'loadWithEmptyConstants(@"rasterize_backward_persplat_kernel")' in host_source
     assert "MSPLAT_BACKWARD_RASTERIZER" in host_source
     assert "MSPLAT_BACKWARD_DEBUG" in host_source
     assert "pixel atomic estimate" in host_source
@@ -404,6 +404,26 @@ def test_loss_kernels_have_opt_in_function_constant_specialization():
     assert '@"l1_loss_fwd_bwd_kernel"' in host_source
     assert '@"ssim_fused_v_fwd_h_bwd_kernel"' in host_source
     assert "MSPLAT_ENABLE_LOSS_SPECIALIZATION=1" in readme
+
+
+def test_raster_backward_has_opt_in_function_constant_specialization():
+    repo_root = Path(__file__).resolve().parents[1]
+    host_source = (repo_root / "core" / "metal" / "msplat_metal.mm").read_text(encoding="utf-8")
+    shader_source = _read_metal_sources(repo_root)
+    readme = (repo_root / "README.md").read_text(encoding="utf-8")
+
+    assert "fc_raster_use_alpha_loss [[function_constant(6)]]" in shader_source
+    assert "fc_raster_use_half_sorted_buffers [[function_constant(7)]]" in shader_source
+    assert "raster_use_alpha_loss(use_alpha_loss)" in shader_source
+    assert "raster_use_half_sorted_buffers(use_half_sorted_buffers)" in shader_source
+
+    assert "MSPLAT_ENABLE_RASTER_BACKWARD_SPECIALIZATION" in host_source
+    assert "raster_backward_specializations" in host_source
+    assert "raster_backward_persplat_specializations" in host_source
+    assert "raster_backward_chunked_specializations" in host_source
+    assert "loadWithEmptyConstants(@\"rasterize_backward_kernel\")" in host_source
+    assert "raster_backward_pipeline(" in host_source
+    assert "MSPLAT_ENABLE_RASTER_BACKWARD_SPECIALIZATION=1" in readme
 
 
 def test_quaternion_rotation_uses_named_wxyz_layout():

@@ -45,6 +45,8 @@ constant float SH_C4[] = {
 constant uint fc_project_sh_degrees_to_use [[function_constant(0)]];
 constant bool fc_project_sh_use_mip_splatting [[function_constant(1)]];
 constant bool fc_project_sh_reduce_second_moment [[function_constant(2)]];
+constant bool fc_raster_use_alpha_loss [[function_constant(6)]];
+constant bool fc_raster_use_half_sorted_buffers [[function_constant(7)]];
 
 static inline uint project_sh_degrees_to_use(const uint runtime_value) {
     return is_function_constant_defined(fc_project_sh_degrees_to_use)
@@ -62,6 +64,18 @@ static inline bool project_sh_reduce_second_moment(const uint runtime_value) {
     return is_function_constant_defined(fc_project_sh_reduce_second_moment)
         ? fc_project_sh_reduce_second_moment
         : runtime_value != 0;
+}
+
+static inline uint raster_use_alpha_loss(const uint runtime_value) {
+    return is_function_constant_defined(fc_raster_use_alpha_loss)
+        ? (fc_raster_use_alpha_loss ? 1u : 0u)
+        : runtime_value;
+}
+
+static inline uint raster_use_half_sorted_buffers(const uint runtime_value) {
+    return is_function_constant_defined(fc_raster_use_half_sorted_buffers)
+        ? (fc_raster_use_half_sorted_buffers ? 1u : 0u)
+        : runtime_value;
 }
 
 static inline float packed_gt_alpha(constant uint *gt_packed, const uint pixel) {

@@ -156,6 +156,9 @@ struct MetalContext {
     std::unordered_map<uint32_t, id<MTLComputePipelineState>> loss_ssim_h_specializations;
     std::unordered_map<uint32_t, id<MTLComputePipelineState>> loss_ssim_fused_specializations;
     std::unordered_map<uint32_t, id<MTLComputePipelineState>> loss_ssim_v_bwd_specializations;
+    std::unordered_map<uint32_t, id<MTLComputePipelineState>> raster_backward_specializations;
+    std::unordered_map<uint32_t, id<MTLComputePipelineState>> raster_backward_persplat_specializations;
+    std::unordered_map<uint32_t, id<MTLComputePipelineState>> raster_backward_chunked_specializations;
 };
 
 // Explicit metallib path (set by Swift/Python wrappers before first use)
@@ -310,9 +313,9 @@ MetalContext* init_msplat_metal_context() {
     ctx->rasterize_forward_chunked_kernel_cpso    = load(@"rasterize_forward_chunked_kernel");
     ctx->rasterize_forward_merge_kernel_cpso      = load(@"rasterize_forward_merge_kernel");
     ctx->compute_chunk_prefix_suffix_kernel_cpso  = load(@"compute_chunk_prefix_suffix_kernel");
-    ctx->rasterize_backward_chunked_kernel_cpso   = load(@"rasterize_backward_chunked_kernel");
-    ctx->rasterize_backward_persplat_kernel_cpso  = load(@"rasterize_backward_persplat_kernel");
-    ctx->rasterize_backward_kernel_cpso           = load(@"rasterize_backward_kernel");
+    ctx->rasterize_backward_chunked_kernel_cpso   = loadWithEmptyConstants(@"rasterize_backward_chunked_kernel");
+    ctx->rasterize_backward_persplat_kernel_cpso  = loadWithEmptyConstants(@"rasterize_backward_persplat_kernel");
+    ctx->rasterize_backward_kernel_cpso           = loadWithEmptyConstants(@"rasterize_backward_kernel");
     // Separable SSIM loss
     ctx->ssim_h_fwd_kernel_cpso                   = loadWithEmptyConstants(@"ssim_h_fwd_kernel");
     ctx->ssim_v_fwd_kernel_cpso                   = loadWithEmptyConstants(@"ssim_v_fwd_kernel");
@@ -596,6 +599,81 @@ static id<MTLComputePipelineState> loss_pipeline(
     id<MTLComputePipelineState> pso = make_loss_specialization(
         ctx, function_name, composite_gt, use_loss_mask, use_alpha_loss,
         specialize_mask, specialize_alpha);
+    if (!pso) {
+        return default_pso;
+    }
+    cache.emplace(key, pso);
+    return pso;
+}
+
+static bool raster_backward_specialization_enabled() {
+    static const bool enabled = [] {
+        const char *value = std::getenv("MSPLAT_ENABLE_RASTER_BACKWARD_SPECIALIZATION");
+        return value != nullptr && std::strcmp(value, "1") == 0;
+    }();
+    return enabled;
+}
+
+static uint32_t raster_backward_specialization_key(uint32_t use_alpha_loss,
+                                                   uint32_t use_half_sorted_buffers) {
+    return (use_alpha_loss ? 1u : 0u)
+        | (use_half_sorted_buffers ? (1u << 1) : 0u);
+}
+
+static id<MTLComputePipelineState> make_raster_backward_specialization(
+    MetalContext *ctx,
+    NSString *function_name,
+    uint32_t use_alpha_loss,
+    uint32_t use_half_sorted_buffers
+) {
+    MTLFunctionConstantValues *constants = [[MTLFunctionConstantValues alloc] init];
+    bool alpha = use_alpha_loss != 0u;
+    bool half = use_half_sorted_buffers != 0u;
+    [constants setConstantValue:&alpha type:MTLDataTypeBool atIndex:6];
+    [constants setConstantValue:&half type:MTLDataTypeBool atIndex:7];
+
+    NSError *function_error = nil;
+    id<MTLFunction> fn = [ctx->metal_library newFunctionWithName:function_name
+                                                   constantValues:constants
+                                                            error:&function_error];
+    [constants release];
+    if (!fn || function_error) {
+        fprintf(stderr, "msplat: failed to specialize %s: %s\n",
+                [function_name UTF8String],
+                function_error ? [[function_error description] UTF8String] : "unknown error");
+        return nil;
+    }
+
+    NSError *pipeline_error = nil;
+    id<MTLComputePipelineState> pso = [ctx->device newComputePipelineStateWithFunction:fn error:&pipeline_error];
+    [fn release];
+    if (!pso || pipeline_error) {
+        fprintf(stderr, "msplat: failed to create specialized pipeline for %s: %s\n",
+                [function_name UTF8String],
+                pipeline_error ? [[pipeline_error description] UTF8String] : "unknown error");
+        return nil;
+    }
+    return pso;
+}
+
+static id<MTLComputePipelineState> raster_backward_pipeline(
+    MetalContext *ctx,
+    id<MTLComputePipelineState> default_pso,
+    std::unordered_map<uint32_t, id<MTLComputePipelineState>> &cache,
+    NSString *function_name,
+    uint32_t use_alpha_loss,
+    uint32_t use_half_sorted_buffers
+) {
+    if (!raster_backward_specialization_enabled()) {
+        return default_pso;
+    }
+    uint32_t key = raster_backward_specialization_key(use_alpha_loss, use_half_sorted_buffers);
+    auto it = cache.find(key);
+    if (it != cache.end()) {
+        return it->second;
+    }
+    id<MTLComputePipelineState> pso = make_raster_backward_specialization(
+        ctx, function_name, use_alpha_loss, use_half_sorted_buffers);
     if (!pso) {
         return default_pso;
     }
@@ -2556,7 +2634,12 @@ std::tuple<MTensor, float> msplat_train_step(
 
     auto encode_rast_bwd = [&](id<MTLComputeCommandEncoder> enc) {
         if (use_persplat_backward) {
-            [enc setComputePipelineState:ctx->rasterize_backward_persplat_kernel_cpso];
+            id<MTLComputePipelineState> pso = raster_backward_pipeline(
+                ctx, ctx->rasterize_backward_persplat_kernel_cpso,
+                ctx->raster_backward_persplat_specializations,
+                @"rasterize_backward_persplat_kernel",
+                use_alpha_loss_u32, use_half_sorted_buffers_u32);
+            [enc setComputePipelineState:pso];
             [enc setBytes:rast_tb.data() length:sizeof(rast_tb) atIndex:0];
             [enc setBytes:rast_isz.data() length:sizeof(rast_isz) atIndex:1];
             ENC_BUF(enc, gaussian_ids, 2); ENC_BUF(enc, tile_bins, 3);
@@ -2579,7 +2662,12 @@ std::tuple<MTensor, float> msplat_train_step(
         if (bwd_K_max <= 1) {
             // Monolithic
             MTLSize num_tg = MTLSizeMake((img_width+RAST_BLOCK_X-1)/RAST_BLOCK_X, (img_height+RAST_BLOCK_Y-1)/RAST_BLOCK_Y, 1);
-            [enc setComputePipelineState:ctx->rasterize_backward_kernel_cpso];
+            id<MTLComputePipelineState> pso = raster_backward_pipeline(
+                ctx, ctx->rasterize_backward_kernel_cpso,
+                ctx->raster_backward_specializations,
+                @"rasterize_backward_kernel",
+                use_alpha_loss_u32, use_half_sorted_buffers_u32);
+            [enc setComputePipelineState:pso];
             [enc setBytes:rast_tb.data() length:sizeof(rast_tb) atIndex:0];
             [enc setBytes:rast_isz.data() length:sizeof(rast_isz) atIndex:1];
             ENC_BUF(enc, gaussian_ids, 2); ENC_BUF(enc, tile_bins, 3);
@@ -2612,7 +2700,12 @@ std::tuple<MTensor, float> msplat_train_step(
             [enc dispatchThreads:MTLSizeMake(img_width, img_height, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
             [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
             // Phase 2: backward chunked
-            [enc setComputePipelineState:ctx->rasterize_backward_chunked_kernel_cpso];
+            id<MTLComputePipelineState> pso = raster_backward_pipeline(
+                ctx, ctx->rasterize_backward_chunked_kernel_cpso,
+                ctx->raster_backward_chunked_specializations,
+                @"rasterize_backward_chunked_kernel",
+                use_alpha_loss_u32, use_half_sorted_buffers_u32);
+            [enc setComputePipelineState:pso];
             [enc setBytes:rast_tb.data() length:sizeof(rast_tb) atIndex:0];
             [enc setBytes:rast_isz.data() length:sizeof(rast_isz) atIndex:1];
             ENC_BUF(enc, gaussian_ids, 2); ENC_BUF(enc, tile_bins, 3);
