@@ -14,6 +14,21 @@ dominates. A fixed-splat 1024px garden A/B showed the per-pixel path still ahead
 for this mid-resolution case, so the current auto threshold should stay
 conservative.
 
+## Baseline observation
+
+A fixed-splat 1024px garden run with stage profiling and backward debug counters
+reported the following shape:
+
+| mode | rast_bwd median | pixel atomic groups | tile merge floor | replay active | replay diagonal | saturated pixels |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| pixel | 2.389 ms | 0.8M/sample | 0.1M/sample | 27.1M/sample | 0.2M/sample | 2071.7/sample |
+| persplat | 4.894 ms | 0.8M/sample | 0.1M/sample | 27.1M/sample | 0.2M/sample | 2070.8/sample |
+
+The pixel path has an apparent 87% cross-warp merge ceiling, but the existing
+per-splat replay path is still slower on this case. That means a new reduction
+path must prove it can capture some of the atomic reduction without paying the
+full replay cost.
+
 ## Candidate paths
 
 1. Keep the current pixel/per-splat split as the production baseline. It already
