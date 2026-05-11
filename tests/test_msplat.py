@@ -296,6 +296,8 @@ def test_metal_uses_dynamic_global_intersections():
     assert "padded_dynamic_intersection_capacity" in host_source
     assert "DType::UInt64" in host_source
     assert "IntersectionKeyBitsMode::Auto32WhenSafe" in host_source
+    assert "IntersectionKeyBitsMode::Force64" in host_source
+    assert '!mode || std::strcmp(mode, "auto") == 0' in host_source
     assert 'std::strcmp(mode, "auto") == 0' in host_source
     assert 'std::strcmp(mode, "64") == 0' in host_source
     assert "use_dynamic_u32_keys ? 32u : 64u" in host_source

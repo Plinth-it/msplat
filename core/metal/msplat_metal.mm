@@ -1312,7 +1312,7 @@ static uint32_t radix_pass_count_for_tiles(int num_tiles) {
 }
 
 enum class IntersectionKeyBitsMode {
-    Default64,
+    Force64,
     Force32,
     Auto32WhenSafe,
 };
@@ -1320,24 +1320,24 @@ enum class IntersectionKeyBitsMode {
 static IntersectionKeyBitsMode intersection_key_bits_mode() {
     static const IntersectionKeyBitsMode mode = [] {
         const char *mode = std::getenv("MSPLAT_INTERSECTION_KEY_BITS");
-        if (!mode || std::strcmp(mode, "64") == 0) {
-            return IntersectionKeyBitsMode::Default64;
+        if (!mode || std::strcmp(mode, "auto") == 0) {
+            return IntersectionKeyBitsMode::Auto32WhenSafe;
+        }
+        if (std::strcmp(mode, "64") == 0) {
+            return IntersectionKeyBitsMode::Force64;
         }
         if (std::strcmp(mode, "32") == 0) {
             return IntersectionKeyBitsMode::Force32;
         }
-        if (std::strcmp(mode, "auto") == 0) {
-            return IntersectionKeyBitsMode::Auto32WhenSafe;
-        }
-        fprintf(stderr, "WARNING: unknown MSPLAT_INTERSECTION_KEY_BITS=%s; using 64-bit keys.\n", mode);
-        return IntersectionKeyBitsMode::Default64;
+        fprintf(stderr, "WARNING: unknown MSPLAT_INTERSECTION_KEY_BITS=%s; using auto keys.\n", mode);
+        return IntersectionKeyBitsMode::Auto32WhenSafe;
     }();
     return mode;
 }
 
 static bool should_use_32_bit_intersection_keys(int num_tiles) {
     IntersectionKeyBitsMode mode = intersection_key_bits_mode();
-    if (mode == IntersectionKeyBitsMode::Default64) {
+    if (mode == IntersectionKeyBitsMode::Force64) {
         return false;
     }
     if (num_tiles <= 65536) {

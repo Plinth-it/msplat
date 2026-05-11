@@ -67,9 +67,9 @@ training path C++/Metal-first:
   backward plus Adam, fused SSIM vertical-forward/horizontal-backward, an
   L1-only loss fast path when `--ssim-weight 0.0`, and an auto-selected
   Brush-style per-splat backward rasterizer for large renders. Dynamic
-  gaussian-tile sorting defaults to 64-bit keys, with
-  `MSPLAT_INTERSECTION_KEY_BITS=auto` available to use 32-bit keys only when the
-  tile count fits the packed-key contract. Use
+  gaussian-tile sorting uses guarded 32-bit keys when the tile count fits the
+  packed-key contract, with `MSPLAT_INTERSECTION_KEY_BITS=64` available to force
+  the legacy 64-bit path. Use
   `--backward-rasterizer pixel` or `--backward-rasterizer persplat` to force a
   specific path.
 - Swift, C, and Python APIs expose the expanded training config surface,
@@ -324,7 +324,7 @@ cross-warp reduction experiments. Use `MSPLAT_BACKWARD_DEBUG_INTERVAL=N` to
 change that report interval, and `--raster-backward-specialization both` to A/B
 the raster-backward function-constant hook. Use `--half-sorted-buffers both` to
 A/B the opt-in half-precision sorted-buffer path for packed conic, RGB, and
-opacity-comp data, and `--intersection-key-bits default auto 32` to compare
+opacity-comp data, and `--intersection-key-bits default 64 32` to compare
 dynamic sort key modes. `MSPLAT_ENABLE_PROJECT_SH_SPECIALIZATION=1`,
 `MSPLAT_ENABLE_LOSS_SPECIALIZATION=1`, and
 `MSPLAT_ENABLE_RASTER_BACKWARD_SPECIALIZATION=1` enable opt-in function-constant
@@ -335,10 +335,12 @@ local A/B runs should prove a win before changing production defaults. On the
 (`pixel-half` 263.76 it/s vs `pixel` 275.75 it/s), so that path remains
 benchmark-only. A forced-dynamic pre-densify garden A/B with fixed splat count
 showed the guarded auto key mode slightly faster (`pixel-key-auto` 182.29 it/s,
-3.366 ms median vs `pixel` 178.59 it/s, 3.530 ms median at 138766 splats), but
-longer growth-enabled runs can change the splat trajectory because the 32-bit
-path quantizes depth to 16 bits, so key-mode changes also remain opt-in until a
-quality-gated full-run A/B justifies changing defaults.
+3.366 ms median vs `pixel` 178.59 it/s, 3.530 ms median at 138766 splats). A
+600-step quality-gated garden A/B also favored guarded auto keys (`pixel-key-auto`
+304.00 it/s, 23.30 dB PSNR, 0.8127 SSIM, 0.04683 L1 at 161111 splats vs
+forced-64 `pixel` 276.19 it/s, 18.33 dB PSNR, 0.5773 SSIM, 0.09301 L1 at
+186173 splats), so guarded auto is the default while explicit 64-bit keys remain
+available for regression checks.
 
 ### Build from source
 
