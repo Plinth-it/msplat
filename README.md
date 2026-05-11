@@ -306,7 +306,11 @@ The training backward rasterizer defaults to `auto`, which uses the stable
 per-pixel path on smaller renders and the Brush-style per-splat diagonal replay
 path on large/full-resolution renders. Use `--backward-rasterizer pixel`,
 `--backward-rasterizer persplat`, or `--backward-rasterizer brush` to force a
-specific path for benchmarking. The final train-quality pass is skipped by
+specific path for benchmarking. A fixed-splat 1024px garden A/B kept the
+per-pixel path ahead in production throughput (`pixel` 85.51 it/s, 4.732 ms
+median vs `persplat` 83.38 it/s, 6.214 ms median), so the auto threshold remains
+conservative and only switches to per-splat for large/full-resolution renders.
+The final train-quality pass is skipped by
 default; pass `--final-quality` when you want final train PSNR/SSIM/L1 after
 export.
 
