@@ -179,6 +179,18 @@ def fmt(value: object, digits: int = 3) -> str:
     return str(value)
 
 
+def fmt_delta(value: object, baseline: object, digits: int = 1, percent: bool = True) -> str:
+    if not isinstance(value, (float, int)) or not isinstance(baseline, (float, int)):
+        return "-"
+    if percent:
+        if baseline == 0:
+            return "-"
+        delta = 100.0 * (float(value) - float(baseline)) / abs(float(baseline))
+        return f"{delta:+.{digits}f}%"
+    delta = float(value) - float(baseline)
+    return f"{delta:+.{digits}f}"
+
+
 def run_mode(
     args: argparse.Namespace,
     mode: str,
@@ -327,6 +339,30 @@ def print_table(results: list[dict[str, object]], output_dir: Path) -> None:
                 replay_diag=fmt(row["replay_diagonal_m"], 1),
                 replay_skip=fmt(row["replay_skip_m"], 1),
                 sat_px=fmt(row["saturated_pixels"], 1),
+            )
+        )
+    print_baseline_deltas(results)
+
+
+def print_baseline_deltas(results: list[dict[str, object]]) -> None:
+    if len(results) < 2:
+        return
+    baseline = results[0]
+    print()
+    print(f"Baseline deltas vs {baseline['mode']}:")
+    print("| mode | train it/s | iter median | rast_bwd median | PSNR | SSIM | L1 | splats |")
+    print("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
+    for row in results[1:]:
+        print(
+            "| {mode} | {ips} | {iter_ms} | {bwd_ms} | {psnr} | {ssim} | {l1} | {splats} |".format(
+                mode=row["mode"],
+                ips=fmt_delta(row["training_ips"], baseline["training_ips"]),
+                iter_ms=fmt_delta(row["iter_median_ms"], baseline["iter_median_ms"]),
+                bwd_ms=fmt_delta(row["rast_bwd_median_ms"], baseline["rast_bwd_median_ms"]),
+                psnr=fmt_delta(row["psnr"], baseline["psnr"], digits=2, percent=False),
+                ssim=fmt_delta(row["ssim"], baseline["ssim"], digits=4, percent=False),
+                l1=fmt_delta(row["l1"], baseline["l1"]),
+                splats=fmt_delta(row["splats"], baseline["splats"]),
             )
         )
 

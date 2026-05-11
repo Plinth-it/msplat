@@ -511,6 +511,8 @@ def test_backward_rasterizer_benchmark_script_wires_profile_ab():
     assert "replay skip M" in script
     assert "saturated_pixels" in script
     assert "sat px" in script
+    assert "print_baseline_deltas" in script
+    assert "Baseline deltas vs" in script
     assert "rast_bwd" in script
     assert "train PSNR" in script
     assert "train SSIM" in script
@@ -641,6 +643,7 @@ print("  train L1:        0.01000")
     assert "auto-rb-spec-half" in result.stdout
     assert "auto-key-auto" in result.stdout
     assert "auto-rb-spec-half-key-auto" in result.stdout
+    assert "Baseline deltas vs auto" in result.stdout
     assert "30.00" in result.stdout
 
 
