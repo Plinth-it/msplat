@@ -346,7 +346,14 @@ default because local A/B runs should prove a win before changing production
 defaults. On the
 600-step garden production smoke shape, half sorted buffers were slower
 (`pixel-half` 263.76 it/s vs `pixel` 275.75 it/s), so that path remains
-benchmark-only. A forced-dynamic pre-densify garden A/B with fixed splat count
+benchmark-only. A 600-step garden raster/backward matrix with stage profiling
+and final-quality checks kept the default path ahead enough to leave all raster
+prototypes opt-in: `auto` ran 124.77 it/s with `rast_bwd` 1.676 ms and GPU stage
+total 4.323 ms; `auto-rb-spec` was only noise-level faster in `rast_bwd` at
+1.663 ms with GPU stage total 4.337 ms; `auto-rb-spec-half` reached 1.659 ms
+`rast_bwd` but lower throughput at 123.75 it/s; every warp-merge variant
+regressed `rast_bwd` to roughly 2.77-2.79 ms and throughput to roughly
+110-112 it/s. A forced-dynamic pre-densify garden A/B with fixed splat count
 showed the guarded auto key mode slightly faster (`pixel-key-auto` 182.29 it/s,
 3.366 ms median vs `pixel` 178.59 it/s, 3.530 ms median at 138766 splats). A
 600-step quality-gated garden A/B also favored guarded auto keys (`pixel-key-auto`
