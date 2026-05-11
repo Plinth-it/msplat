@@ -152,6 +152,10 @@ struct MetalContext {
     id<MTLComputePipelineState> compact_copy_back_kernel_cpso;
     std::unordered_map<uint32_t, id<MTLComputePipelineState>> project_sh_forward_specializations;
     std::unordered_map<uint32_t, id<MTLComputePipelineState>> project_sh_backward_specializations;
+    std::unordered_map<uint32_t, id<MTLComputePipelineState>> loss_l1_specializations;
+    std::unordered_map<uint32_t, id<MTLComputePipelineState>> loss_ssim_h_specializations;
+    std::unordered_map<uint32_t, id<MTLComputePipelineState>> loss_ssim_fused_specializations;
+    std::unordered_map<uint32_t, id<MTLComputePipelineState>> loss_ssim_v_bwd_specializations;
 };
 
 // Explicit metallib path (set by Swift/Python wrappers before first use)
@@ -310,11 +314,11 @@ MetalContext* init_msplat_metal_context() {
     ctx->rasterize_backward_persplat_kernel_cpso  = load(@"rasterize_backward_persplat_kernel");
     ctx->rasterize_backward_kernel_cpso           = load(@"rasterize_backward_kernel");
     // Separable SSIM loss
-    ctx->ssim_h_fwd_kernel_cpso                   = load(@"ssim_h_fwd_kernel");
-    ctx->ssim_v_fwd_kernel_cpso                   = load(@"ssim_v_fwd_kernel");
-    ctx->l1_loss_fwd_bwd_kernel_cpso              = load(@"l1_loss_fwd_bwd_kernel");
-    ctx->ssim_fused_v_fwd_h_bwd_kernel_cpso       = load(@"ssim_fused_v_fwd_h_bwd_kernel");
-    ctx->ssim_v_bwd_kernel_cpso                   = load(@"ssim_v_bwd_kernel");
+    ctx->ssim_h_fwd_kernel_cpso                   = loadWithEmptyConstants(@"ssim_h_fwd_kernel");
+    ctx->ssim_v_fwd_kernel_cpso                   = loadWithEmptyConstants(@"ssim_v_fwd_kernel");
+    ctx->l1_loss_fwd_bwd_kernel_cpso              = loadWithEmptyConstants(@"l1_loss_fwd_bwd_kernel");
+    ctx->ssim_fused_v_fwd_h_bwd_kernel_cpso       = loadWithEmptyConstants(@"ssim_fused_v_fwd_h_bwd_kernel");
+    ctx->ssim_v_bwd_kernel_cpso                   = loadWithEmptyConstants(@"ssim_v_bwd_kernel");
     ctx->lpips_prepare_nchw_kernel_cpso           = load(@"lpips_prepare_nchw_kernel");
     ctx->lpips_apply_grad_kernel_cpso             = load(@"lpips_apply_grad_kernel");
     // Backward pipeline
@@ -503,6 +507,99 @@ static id<MTLComputePipelineState> project_sh_backward_pipeline(MetalContext *ct
         return ctx->project_and_sh_backward_kernel_cpso;
     }
     ctx->project_sh_backward_specializations.emplace(key, pso);
+    return pso;
+}
+
+static bool loss_specialization_enabled() {
+    static const bool enabled = [] {
+        const char *value = std::getenv("MSPLAT_ENABLE_LOSS_SPECIALIZATION");
+        return value != nullptr && std::strcmp(value, "1") == 0;
+    }();
+    return enabled;
+}
+
+static uint32_t loss_specialization_key(uint32_t composite_gt,
+                                        uint32_t use_loss_mask,
+                                        uint32_t use_alpha_loss) {
+    return (composite_gt ? 1u : 0u)
+        | (use_loss_mask ? (1u << 1) : 0u)
+        | (use_alpha_loss ? (1u << 2) : 0u);
+}
+
+static id<MTLComputePipelineState> make_loss_specialization(
+    MetalContext *ctx,
+    NSString *function_name,
+    uint32_t composite_gt,
+    uint32_t use_loss_mask,
+    uint32_t use_alpha_loss,
+    bool specialize_mask,
+    bool specialize_alpha
+) {
+    MTLFunctionConstantValues *constants = [[MTLFunctionConstantValues alloc] init];
+    bool composite = composite_gt != 0u;
+    bool mask = use_loss_mask != 0u;
+    bool alpha = use_alpha_loss != 0u;
+    [constants setConstantValue:&composite type:MTLDataTypeBool atIndex:3];
+    if (specialize_mask) {
+        [constants setConstantValue:&mask type:MTLDataTypeBool atIndex:4];
+    }
+    if (specialize_alpha) {
+        [constants setConstantValue:&alpha type:MTLDataTypeBool atIndex:5];
+    }
+
+    NSError *function_error = nil;
+    id<MTLFunction> fn = [ctx->metal_library newFunctionWithName:function_name
+                                                   constantValues:constants
+                                                            error:&function_error];
+    [constants release];
+    if (!fn || function_error) {
+        fprintf(stderr, "msplat: failed to specialize %s: %s\n",
+                [function_name UTF8String],
+                function_error ? [[function_error description] UTF8String] : "unknown error");
+        return nil;
+    }
+
+    NSError *pipeline_error = nil;
+    id<MTLComputePipelineState> pso = [ctx->device newComputePipelineStateWithFunction:fn error:&pipeline_error];
+    [fn release];
+    if (!pso || pipeline_error) {
+        fprintf(stderr, "msplat: failed to create specialized pipeline for %s: %s\n",
+                [function_name UTF8String],
+                pipeline_error ? [[pipeline_error description] UTF8String] : "unknown error");
+        return nil;
+    }
+    return pso;
+}
+
+static id<MTLComputePipelineState> loss_pipeline(
+    MetalContext *ctx,
+    id<MTLComputePipelineState> default_pso,
+    std::unordered_map<uint32_t, id<MTLComputePipelineState>> &cache,
+    NSString *function_name,
+    uint32_t composite_gt,
+    uint32_t use_loss_mask,
+    uint32_t use_alpha_loss,
+    bool specialize_mask,
+    bool specialize_alpha
+) {
+    if (!loss_specialization_enabled()) {
+        return default_pso;
+    }
+    uint32_t key = loss_specialization_key(
+        composite_gt,
+        specialize_mask ? use_loss_mask : 0u,
+        specialize_alpha ? use_alpha_loss : 0u);
+    auto it = cache.find(key);
+    if (it != cache.end()) {
+        return it->second;
+    }
+    id<MTLComputePipelineState> pso = make_loss_specialization(
+        ctx, function_name, composite_gt, use_loss_mask, use_alpha_loss,
+        specialize_mask, specialize_alpha);
+    if (!pso) {
+        return default_pso;
+    }
+    cache.emplace(key, pso);
     return pso;
 }
 
@@ -2337,7 +2434,11 @@ std::tuple<MTensor, float> msplat_train_step(
         MTLSize loss_tg_count = MTLSizeMake((img_width + 15) / 16, (img_height + 15) / 16, 1);
         MTLSize tg = MTLSizeMake(16, 16, 1);
         if (ssim_weight <= 0.0f) {
-            [enc setComputePipelineState:ctx->l1_loss_fwd_bwd_kernel_cpso];
+            id<MTLComputePipelineState> l1_pso = loss_pipeline(
+                ctx, ctx->l1_loss_fwd_bwd_kernel_cpso, ctx->loss_l1_specializations,
+                @"l1_loss_fwd_bwd_kernel", composite_gt_u32, use_loss_mask_u32,
+                use_alpha_loss_u32, true, true);
+            [enc setComputePipelineState:l1_pso];
             ENC_BUF(enc, out_img, 0); ENC_BUF(enc, gt_packed, 1);
             [enc setBytes:loss_img_size.data() length:sizeof(loss_img_size) atIndex:2];
             ENC_SCALAR(enc, loss_inv_n, 3);
@@ -2350,7 +2451,11 @@ std::tuple<MTensor, float> msplat_train_step(
             return;
         }
         // Pass 1: H conv on images → ssim_h_buf
-        [enc setComputePipelineState:ctx->ssim_h_fwd_kernel_cpso];
+        id<MTLComputePipelineState> ssim_h_pso = loss_pipeline(
+            ctx, ctx->ssim_h_fwd_kernel_cpso, ctx->loss_ssim_h_specializations,
+            @"ssim_h_fwd_kernel", composite_gt_u32, use_loss_mask_u32,
+            use_alpha_loss_u32, false, false);
+        [enc setComputePipelineState:ssim_h_pso];
         ENC_BUF(enc, out_img, 0); ENC_BUF(enc, gt_packed, 1);
         [enc setBytes:loss_img_size.data() length:sizeof(loss_img_size) atIndex:2];
         ENC_BUF(enc, g_tcache.ssim_h_buf, 3);
@@ -2358,7 +2463,11 @@ std::tuple<MTensor, float> msplat_train_step(
         [enc dispatchThreadgroups:loss_tg_count threadsPerThreadgroup:tg];
         [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
         // Pass 2: Fused V fwd + H bwd
-        [enc setComputePipelineState:ctx->ssim_fused_v_fwd_h_bwd_kernel_cpso];
+        id<MTLComputePipelineState> ssim_fused_pso = loss_pipeline(
+            ctx, ctx->ssim_fused_v_fwd_h_bwd_kernel_cpso,
+            ctx->loss_ssim_fused_specializations, @"ssim_fused_v_fwd_h_bwd_kernel",
+            composite_gt_u32, use_loss_mask_u32, use_alpha_loss_u32, true, true);
+        [enc setComputePipelineState:ssim_fused_pso];
         ENC_BUF(enc, out_img, 0); ENC_BUF(enc, gt_packed, 1);
         ENC_BUF(enc, g_tcache.ssim_h_buf, 2);
         [enc setBytes:loss_img_size.data() length:sizeof(loss_img_size) atIndex:3];
@@ -2371,7 +2480,11 @@ std::tuple<MTensor, float> msplat_train_step(
         [enc dispatchThreadgroups:loss_tg_count threadsPerThreadgroup:tg];
         [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
         // Pass 3: V bwd
-        [enc setComputePipelineState:ctx->ssim_v_bwd_kernel_cpso];
+        id<MTLComputePipelineState> ssim_v_bwd_pso = loss_pipeline(
+            ctx, ctx->ssim_v_bwd_kernel_cpso, ctx->loss_ssim_v_bwd_specializations,
+            @"ssim_v_bwd_kernel", composite_gt_u32, use_loss_mask_u32,
+            use_alpha_loss_u32, true, false);
+        [enc setComputePipelineState:ssim_v_bwd_pso];
         ENC_BUF(enc, out_img, 0); ENC_BUF(enc, gt_packed, 1);
         ENC_BUF(enc, loss_intermediates, 2);
         [enc setBytes:loss_img_size.data() length:sizeof(loss_img_size) atIndex:3];

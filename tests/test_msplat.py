@@ -373,6 +373,31 @@ def test_project_sh_kernels_use_function_constant_specialization():
     assert "newFunctionWithName:function_name" in host_source
 
 
+def test_loss_kernels_have_opt_in_function_constant_specialization():
+    repo_root = Path(__file__).resolve().parents[1]
+    host_source = (repo_root / "core" / "metal" / "msplat_metal.mm").read_text(encoding="utf-8")
+    shader_source = _read_metal_sources(repo_root)
+    readme = (repo_root / "README.md").read_text(encoding="utf-8")
+
+    assert "fc_loss_composite_gt [[function_constant(3)]]" in shader_source
+    assert "fc_loss_use_mask [[function_constant(4)]]" in shader_source
+    assert "fc_loss_use_alpha_loss [[function_constant(5)]]" in shader_source
+    assert "loss_composite_gt(composite_gt)" in shader_source
+    assert "loss_use_mask(use_loss_mask)" in shader_source
+    assert "loss_use_alpha_loss(use_alpha_loss)" in shader_source
+
+    assert "MSPLAT_ENABLE_LOSS_SPECIALIZATION" in host_source
+    assert "loss_l1_specializations" in host_source
+    assert "loss_ssim_h_specializations" in host_source
+    assert "loss_ssim_fused_specializations" in host_source
+    assert "loss_ssim_v_bwd_specializations" in host_source
+    assert "loadWithEmptyConstants(@\"l1_loss_fwd_bwd_kernel\")" in host_source
+    assert "loadWithEmptyConstants(@\"ssim_h_fwd_kernel\")" in host_source
+    assert '@"l1_loss_fwd_bwd_kernel"' in host_source
+    assert '@"ssim_fused_v_fwd_h_bwd_kernel"' in host_source
+    assert "MSPLAT_ENABLE_LOSS_SPECIALIZATION=1" in readme
+
+
 def test_quaternion_rotation_uses_named_wxyz_layout():
     repo_root = Path(__file__).resolve().parents[1]
     shader_source = _read_metal_sources(repo_root)

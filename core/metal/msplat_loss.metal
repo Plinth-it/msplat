@@ -10,6 +10,28 @@
 #define SSIM_C1 0.0001f
 #define SSIM_C2 0.0009f
 
+constant bool fc_loss_composite_gt [[function_constant(3)]];
+constant bool fc_loss_use_mask [[function_constant(4)]];
+constant bool fc_loss_use_alpha_loss [[function_constant(5)]];
+
+static inline uint loss_composite_gt(const uint runtime_value) {
+    return is_function_constant_defined(fc_loss_composite_gt)
+        ? (fc_loss_composite_gt ? 1u : 0u)
+        : runtime_value;
+}
+
+static inline uint loss_use_mask(const uint runtime_value) {
+    return is_function_constant_defined(fc_loss_use_mask)
+        ? (fc_loss_use_mask ? 1u : 0u)
+        : runtime_value;
+}
+
+static inline uint loss_use_alpha_loss(const uint runtime_value) {
+    return is_function_constant_defined(fc_loss_use_alpha_loss)
+        ? (fc_loss_use_alpha_loss ? 1u : 0u)
+        : runtime_value;
+}
+
 kernel void fused_loss_forward_kernel(
     constant float* rendered,       // (H, W, 3) HWC
     constant float* gt,             // (H, W, 3) HWC
@@ -207,6 +229,7 @@ kernel void ssim_h_fwd_kernel(
     const uint H = img_size.y;
     const uint px = gid.x;
     const uint py = gid.y;
+    const uint composite_gt_value = loss_composite_gt(composite_gt);
     const int base_gx = (int)(tgid.x * SSIM_TG) - SSIM_HALF_WIN;
     const int base_gy = (int)(tgid.y * SSIM_TG);
     constexpr uint TILE_W = SSIM_TG + 2 * SSIM_HALF_WIN;  // 26
@@ -226,7 +249,7 @@ kernel void ssim_h_fwd_kernel(
             if (gx >= 0 && gx < (int)W && gy >= 0 && gy < (int)H) {
                 uint pixel = gy * W + gx;
                 uint idx = pixel * 3 + c;
-                gv = packed_gt_effective(gt_packed, pixel, c, background, composite_gt);
+                gv = packed_gt_effective(gt_packed, pixel, c, background, composite_gt_value);
                 rv = rendered[idx];
             }
             tg_gt[c][sy][sx] = gv;
@@ -282,23 +305,26 @@ kernel void l1_loss_fwd_bwd_kernel(
     const uint H = img_size.y;
     const uint px = gid.x;
     const uint py = gid.y;
+    const uint composite_gt_value = loss_composite_gt(composite_gt);
+    const uint use_loss_mask_value = loss_use_mask(use_loss_mask);
+    const uint use_alpha_loss_value = loss_use_alpha_loss(use_alpha_loss);
     float pixel_loss = 0.0f;
 
     if (px < W && py < H) {
         const uint pixel = py * W + px;
         const float gt_alpha = packed_gt_alpha(gt_packed, pixel);
-        const float mask_weight = use_loss_mask != 0 ? gt_alpha : 1.0f;
+        const float mask_weight = use_loss_mask_value != 0 ? gt_alpha : 1.0f;
         float l1_sum = 0.0f;
         for (uint c = 0; c < 3; c++) {
             const uint idx = pixel * 3 + c;
-            const float gt_val = packed_gt_effective(gt_packed, pixel, c, background, composite_gt);
+            const float gt_val = packed_gt_effective(gt_packed, pixel, c, background, composite_gt_value);
             const float rend_val = rendered[idx];
             l1_sum += fabs(gt_val - rend_val);
             const float v_l1 = (gt_val > rend_val) ? -1.0f : ((gt_val < rend_val) ? 1.0f : 0.0f);
             v_rendered[idx] = mask_weight * inv_n * v_l1;
         }
         pixel_loss = mask_weight * l1_sum / 3.0f;
-        if (use_alpha_loss != 0) {
+        if (use_alpha_loss_value != 0) {
             pixel_loss += alpha_loss_weight * fabs(gt_alpha - (1.0f - final_Ts[pixel]));
         }
     }
@@ -347,6 +373,7 @@ kernel void ssim_v_fwd_kernel(
     const uint H = img_size.y;
     const uint px = gid.x;
     const uint py = gid.y;
+    const uint composite_gt_value = loss_composite_gt(composite_gt);
     const int base_gx = (int)(tgid.x * SSIM_TG);
     const int base_gy = (int)(tgid.y * SSIM_TG) - SSIM_HALF_WIN;
     constexpr uint TILE_H = SSIM_TG + 2 * SSIM_HALF_WIN;  // 26
@@ -407,7 +434,7 @@ kernel void ssim_v_fwd_kernel(
             ssim_sum += clamp(raw_ssim, -1.0f, 1.0f);
 
             // L1 for this channel
-            float gt_v  = packed_gt_effective(gt_packed, py * W + px, c, background, composite_gt);
+            float gt_v  = packed_gt_effective(gt_packed, py * W + px, c, background, composite_gt_value);
             float rd_v  = rendered[(py * W + px) * 3 + c];
             l1_sum += fabs(gt_v - rd_v);
         }
@@ -459,6 +486,9 @@ kernel void ssim_fused_v_fwd_h_bwd_kernel(
 ) {
     const uint W = img_size.x, H = img_size.y;
     const uint px = gid.x, py = gid.y;
+    const uint composite_gt_value = loss_composite_gt(composite_gt);
+    const uint use_loss_mask_value = loss_use_mask(use_loss_mask);
+    const uint use_alpha_loss_value = loss_use_alpha_loss(use_alpha_loss);
     const int base_gx = (int)(tgid.x * SSIM_TG) - SSIM_HALF_WIN;
     const int base_gy = (int)(tgid.y * SSIM_TG) - SSIM_HALF_WIN;
     constexpr uint TILE_DIM = SSIM_TG + 2 * SSIM_HALF_WIN;
@@ -508,7 +538,7 @@ kernel void ssim_fused_v_fwd_h_bwd_kernel(
             bool center_valid = gpx >= 0 && gpx < (int)W && gpy >= 0 && gpy < (int)H;
             uint center_pixel = (uint)gpy * W + (uint)gpx;
             float center_mask = center_valid
-                ? ((use_loss_mask != 0) ? packed_gt_alpha(gt_packed, center_pixel) : 1.0f)
+                ? ((use_loss_mask_value != 0) ? packed_gt_alpha(gt_packed, center_pixel) : 1.0f)
                 : 0.0f;
             float deriv_scale = ssim_clamped ? 0.0f : center_mask;
             tg_f1[dy][dx] = deriv_scale * (dmu - 2.0f*mu_y*dsyq - mu_x*dsxy);
@@ -517,7 +547,7 @@ kernel void ssim_fused_v_fwd_h_bwd_kernel(
             if (dx >= SSIM_HALF_WIN && dx < SSIM_HALF_WIN + SSIM_TG) {
                 if (center_valid) {
                     float gt_val = packed_gt_effective(
-                        gt_packed, center_pixel, c, background, composite_gt);
+                        gt_packed, center_pixel, c, background, composite_gt_value);
                     float l1 = fabs(gt_val - rendered[(gpy*W+gpx)*3+c]);
                     loss_accum += center_mask * (
                         (c == 0 ? ssim_weight : 0.0f)
@@ -540,7 +570,7 @@ kernel void ssim_fused_v_fwd_h_bwd_kernel(
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
-    if (use_alpha_loss != 0 && px < W && py < H) {
+    if (use_alpha_loss_value != 0 && px < W && py < H) {
         uint pixel = py * W + px;
         loss_accum += alpha_loss_weight * fabs(packed_gt_alpha(gt_packed, pixel) - (1.0f - final_Ts[pixel]));
     }
@@ -668,6 +698,8 @@ kernel void ssim_v_bwd_kernel(
     const uint H = img_size.y;
     const uint px = gid.x;
     const uint py = gid.y;
+    const uint composite_gt_value = loss_composite_gt(composite_gt);
+    const uint use_loss_mask_value = loss_use_mask(use_loss_mask);
     const int base_gx = (int)(tgid.x * SSIM_TG);
     const int base_gy = (int)(tgid.y * SSIM_TG) - SSIM_HALF_WIN;
     constexpr uint TILE_H = SSIM_TG + 2 * SSIM_HALF_WIN;  // 26
@@ -700,7 +732,7 @@ kernel void ssim_v_bwd_kernel(
 
     if (px < W && py < H) {
         uint pixel = py * W + px;
-        float l1_mask_weight = use_loss_mask != 0 ? packed_gt_alpha(gt_packed, pixel) : 1.0f;
+        float l1_mask_weight = use_loss_mask_value != 0 ? packed_gt_alpha(gt_packed, pixel) : 1.0f;
         for (uint c = 0; c < 3; c++) {
             float conv_f1 = 0, conv_f2 = 0, conv_f3 = 0;
             for (uint dy = 0; dy < SSIM_WIN; dy++) {
@@ -711,7 +743,7 @@ kernel void ssim_v_bwd_kernel(
             }
 
             float rend_val = rendered[(py * W + px) * 3 + c];
-            float gt_val = packed_gt_effective(gt_packed, pixel, c, background, composite_gt);
+            float gt_val = packed_gt_effective(gt_packed, pixel, c, background, composite_gt_value);
 
             float v_ssim = conv_f1 + rend_val * conv_f2 + gt_val * conv_f3;
             float v_l1 = (gt_val > rend_val) ? -1.0f : ((gt_val < rend_val) ? 1.0f : 0.0f);
