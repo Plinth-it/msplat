@@ -578,6 +578,15 @@ def test_train_step_forced_syncs_are_named_and_counted():
     assert 'record_forced_sync("dynamic-count-prepass")' in host
 
 
+def test_overflow_check_uses_delayed_polling_window():
+    repo_root = Path(__file__).resolve().parents[1]
+    host = (repo_root / "core" / "metal" / "msplat_metal.mm").read_text(encoding="utf-8")
+
+    assert "kOverflowPollInterval" in host
+    assert "pending_overflow_poll" in host
+    assert "overflow_poll_due" in host
+
+
 def test_backward_rasterizer_benchmark_script_supports_auto_quality_metrics():
     repo_root = Path(__file__).resolve().parents[1]
     script = repo_root / "scripts" / "benchmark_backward_rasterizers.py"

@@ -2172,13 +2172,22 @@ std::tuple<MTensor, float> msplat_train_step(
     // Only warn once; the dynamic path should size buffers to the exact GPU count.
     static bool overflow_warned = false;
     static int iter_count_oc = 0;
+    static bool pending_overflow_poll = false;
+    constexpr int kOverflowPollInterval = 100;
     iter_count_oc++;
     bool num_points_changed = (num_points != g_tcache.fwd_num_points && g_tcache.fwd_num_points > 0);
+    bool overflow_poll_due = num_points_changed || (iter_count_oc % kOverflowPollInterval) == 1;
+    if (num_points_changed) {
+        pending_overflow_poll = true;
+    }
     if (g_tcache.overflow_flag.defined() && g_tcache.fwd_num_points > 0
-        && (num_points_changed || (iter_count_oc % 100) == 1)) {
-        record_forced_sync("overflow-check");
-        ctx->syncCB();
+        && overflow_poll_due && pending_overflow_poll) {
+        if (ctx->_currentCB) {
+            record_forced_sync("overflow-check");
+            ctx->syncCB();
+        }
         int32_t flag_val = *g_tcache.overflow_flag.data<int32_t>();
+        pending_overflow_poll = false;
         if (flag_val > 0) {
             if (g_tcache.last_sort_path_dynamic) {
                 g_tcache.invalidate_dynamic_capacity();
@@ -3187,6 +3196,8 @@ std::tuple<MTensor, float> msplat_train_step(
             }
         }];
     }
+
+    pending_overflow_poll = true;
 
     // Callers currently use the returned radii only. Reading loss_sum here would
     // force a stale shared-memory read before this command buffer is committed.
