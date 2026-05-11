@@ -314,11 +314,12 @@ metrics. Set `PROFILE_STAGES=1` to compare stage timings and
 `MSPLAT_BACKWARD_DEBUG=1` to print debug-only range/replay counters every 100
 completed training steps, including a pixel-path atomic-group estimate for
 cross-warp reduction experiments. Use `MSPLAT_BACKWARD_DEBUG_INTERVAL=N` to
-change that report interval. `MSPLAT_ENABLE_PROJECT_SH_SPECIALIZATION=1`,
+change that report interval, and `--raster-backward-specialization both` to A/B
+the raster-backward function-constant hook. `MSPLAT_ENABLE_PROJECT_SH_SPECIALIZATION=1`,
 `MSPLAT_ENABLE_LOSS_SPECIALIZATION=1`, and
 `MSPLAT_ENABLE_RASTER_BACKWARD_SPECIALIZATION=1` enable opt-in function-constant
 benchmark hooks for pipeline-stable training knobs; they are disabled by default
-because local A/B runs were flat.
+because local A/B runs were flat to negative.
 
 ### Build from source
 
