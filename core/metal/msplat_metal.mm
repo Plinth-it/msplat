@@ -404,7 +404,10 @@ static void bind_sorted_half_buffers(id<MTLComputeCommandEncoder> enc,
 }
 
 static bool project_sh_specialization_enabled() {
-    static const bool enabled = std::getenv("MSPLAT_DISABLE_PROJECT_SH_SPECIALIZATION") == nullptr;
+    static const bool enabled = [] {
+        const char *value = std::getenv("MSPLAT_ENABLE_PROJECT_SH_SPECIALIZATION");
+        return value != nullptr && std::strcmp(value, "1") == 0;
+    }();
     return enabled;
 }
 

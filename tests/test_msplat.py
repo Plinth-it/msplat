@@ -363,7 +363,7 @@ def test_project_sh_kernels_use_function_constant_specialization():
     assert "project_sh_degrees_to_use(degrees_to_use)" in shader_source
     assert "project_sh_reduce_second_moment(adam_hp.reduce_second_moment)" in shader_source
 
-    assert "MSPLAT_DISABLE_PROJECT_SH_SPECIALIZATION" in host_source
+    assert "MSPLAT_ENABLE_PROJECT_SH_SPECIALIZATION" in host_source
     assert "loadWithEmptyConstants(@\"project_and_sh_forward_kernel\")" in host_source
     assert "loadWithEmptyConstants(@\"project_and_sh_backward_kernel\")" in host_source
     assert "project_sh_forward_pipeline(" in host_source
