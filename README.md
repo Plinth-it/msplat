@@ -66,7 +66,10 @@ training path C++/Metal-first:
   backward, per-tile overflow warnings, a higher tile element cap, fused SH
   backward plus Adam, fused SSIM vertical-forward/horizontal-backward, an
   L1-only loss fast path when `--ssim-weight 0.0`, and an auto-selected
-  Brush-style per-splat backward rasterizer for large renders. Use
+  Brush-style per-splat backward rasterizer for large renders. Dynamic
+  gaussian-tile sorting defaults to 64-bit keys, with
+  `MSPLAT_INTERSECTION_KEY_BITS=auto` available to use 32-bit keys only when the
+  tile count fits the packed-key contract. Use
   `--backward-rasterizer pixel` or `--backward-rasterizer persplat` to force a
   specific path.
 - Swift, C, and Python APIs expose the expanded training config surface,

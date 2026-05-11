@@ -295,6 +295,10 @@ def test_metal_uses_dynamic_global_intersections():
     assert "did_dynamic_count_prepass" in host_source
     assert "padded_dynamic_intersection_capacity" in host_source
     assert "DType::UInt64" in host_source
+    assert "IntersectionKeyBitsMode::Auto32WhenSafe" in host_source
+    assert 'std::strcmp(mode, "auto") == 0' in host_source
+    assert 'std::strcmp(mode, "64") == 0' in host_source
+    assert "use_dynamic_u32_keys ? 32u : 64u" in host_source
     assert "UInt64" in tensor_header
     assert "case DType::UInt64:  return 8;" in tensor_header
     assert "device uint64_t* isect_ids" in shader_source

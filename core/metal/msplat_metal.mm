@@ -1311,16 +1311,40 @@ static uint32_t radix_pass_count_for_tiles(int num_tiles) {
     return std::max(2u, std::min(8u, passes));
 }
 
-static bool should_use_32_bit_intersection_keys(int num_tiles) {
-    static const bool requested = [] {
+enum class IntersectionKeyBitsMode {
+    Default64,
+    Force32,
+    Auto32WhenSafe,
+};
+
+static IntersectionKeyBitsMode intersection_key_bits_mode() {
+    static const IntersectionKeyBitsMode mode = [] {
         const char *mode = std::getenv("MSPLAT_INTERSECTION_KEY_BITS");
-        return mode && std::strcmp(mode, "32") == 0;
+        if (!mode || std::strcmp(mode, "64") == 0) {
+            return IntersectionKeyBitsMode::Default64;
+        }
+        if (std::strcmp(mode, "32") == 0) {
+            return IntersectionKeyBitsMode::Force32;
+        }
+        if (std::strcmp(mode, "auto") == 0) {
+            return IntersectionKeyBitsMode::Auto32WhenSafe;
+        }
+        fprintf(stderr, "WARNING: unknown MSPLAT_INTERSECTION_KEY_BITS=%s; using 64-bit keys.\n", mode);
+        return IntersectionKeyBitsMode::Default64;
     }();
-    if (!requested) {
+    return mode;
+}
+
+static bool should_use_32_bit_intersection_keys(int num_tiles) {
+    IntersectionKeyBitsMode mode = intersection_key_bits_mode();
+    if (mode == IntersectionKeyBitsMode::Default64) {
         return false;
     }
     if (num_tiles <= 65536) {
         return true;
+    }
+    if (mode == IntersectionKeyBitsMode::Auto32WhenSafe) {
+        return false;
     }
     static bool warned = false;
     if (!warned) {
@@ -1659,7 +1683,9 @@ static void forward_pipeline(
             fprintf(stderr, "  features_rest:  [%lld x %lld x %lld]\n",
                 (long long)features_rest.size(0), (long long)features_rest.size(1), (long long)features_rest.size(2));
             fprintf(stderr, "  sort:           dynamic global radix\n");
-            fprintf(stderr, "  sort buffer:    %.1f MB (keys)\n", (double)capacity * 8.0 / 1e6);
+            fprintf(stderr, "  sort keys:      %u-bit\n", use_dynamic_u32_keys ? 32u : 64u);
+            fprintf(stderr, "  sort buffer:    %.1f MB (keys)\n",
+                    (double)capacity * (use_dynamic_u32_keys ? 4.0 : 8.0) / 1e6);
             fprintf(stderr, "  opacities:      [%lld]\n", (long long)opacities.size(0));
             fprintf(stderr, "===========================\n\n");
     }
