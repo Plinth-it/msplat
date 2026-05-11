@@ -340,7 +340,12 @@ showed the guarded auto key mode slightly faster (`pixel-key-auto` 182.29 it/s,
 304.00 it/s, 23.30 dB PSNR, 0.8127 SSIM, 0.04683 L1 at 161111 splats vs
 forced-64 `pixel` 276.19 it/s, 18.33 dB PSNR, 0.5773 SSIM, 0.09301 L1 at
 186173 splats), so guarded auto is the default while explicit 64-bit keys remain
-available for regression checks.
+available for regression checks. Follow-up 600-step validation on a masked
+porcelain object dataset and the Tanks and Temples playroom scene also favored
+guarded auto for final quality: porcelain improved from 19.30 dB/0.6937 SSIM/
+0.05338 L1 at 123260 splats to 23.57 dB/0.8776 SSIM/0.03036 L1 at 115867
+splats, and playroom improved from 11.68 dB/0.4895 SSIM/0.22738 L1 at 58046
+splats to 17.55 dB/0.6933 SSIM/0.10177 L1 at 56303 splats.
 
 ### Build from source
 
