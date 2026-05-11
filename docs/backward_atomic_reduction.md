@@ -29,6 +29,14 @@ per-splat replay path is still slower on this case. That means a new reduction
 path must prove it can capture some of the atomic reduction without paying the
 full replay cost.
 
+A larger fixed-splat 2048px garden run did not justify lowering the auto
+threshold either. With profiling enabled, the per-pixel path reported a
+`rast_bwd` median of 1.265 ms versus 3.651 ms for per-splat, with the same
+1.0M/sample pixel atomic estimate and 87.4% merge ceiling. A production run on
+the same shape showed higher total throughput for per-splat (102.28 it/s versus
+93.25 it/s), but a worse iteration median (4.828 ms versus 3.839 ms). Treat this
+as an ambiguous crossover case until a full quality-gated run shows a clear win.
+
 ## Candidate paths
 
 1. Keep the current pixel/per-splat split as the production baseline. It already
