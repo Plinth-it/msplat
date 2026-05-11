@@ -297,7 +297,7 @@ kernel void map_gaussian_to_intersects_kernel(
     constant int32_t* num_tiles_hit,
     constant uint3& tile_bounds,
     constant uint& capacity,
-    device int64_t* isect_ids,
+    device uint64_t* isect_ids,
     device int32_t* gaussian_ids,
     constant float* aabb, // float2: per-axis pixel extents
     device atomic_uint* overflow_flag, // set to 1 if any intersection exceeds capacity
@@ -335,7 +335,7 @@ kernel void map_gaussian_to_intersects_kernel(
                 return;
             }
             uint64_t tile_id = (uint64_t)(i * tile_bounds.x + j);
-            isect_ids[cur_idx] = (int64_t)((tile_id << 32) | depth_bits);
+            isect_ids[cur_idx] = (tile_id << 32) | depth_bits;
             gaussian_ids[cur_idx] = idx;                     // 3D gaussian id
             ++cur_idx; // handles gaussians that hit more than one tile
         }
@@ -398,7 +398,7 @@ kernel void map_gaussian_to_intersects_u32_kernel(
 // Find start/end offsets for each tile in the sorted intersection array.
 kernel void get_tile_bin_edges_kernel(
     constant uint& capacity,
-    constant int64_t* isect_ids_sorted,
+    constant uint64_t* isect_ids_sorted,
     device int* tile_bins, // int2
     device const int32_t* cum_tiles_hit,
     constant uint& num_points,
@@ -411,11 +411,11 @@ kernel void get_tile_bin_edges_kernel(
     // Save the indices where the tile_id changes. The final element still has
     // to run the transition case; otherwise a last-element tile change leaves
     // the previous tile open and the final tile without a start offset.
-    int32_t cur_tile_idx = (int32_t)(((uint64_t)isect_ids_sorted[idx]) >> 32);
+    int32_t cur_tile_idx = (int32_t)(isect_ids_sorted[idx] >> 32);
     if (idx == 0) {
         write_packed_int2x(tile_bins, cur_tile_idx, 0);
     } else {
-        int32_t prev_tile_idx = (int32_t)(((uint64_t)isect_ids_sorted[idx - 1]) >> 32);
+        int32_t prev_tile_idx = (int32_t)(isect_ids_sorted[idx - 1] >> 32);
         if (prev_tile_idx != cur_tile_idx) {
             write_packed_int2y(tile_bins, prev_tile_idx, idx);
             write_packed_int2x(tile_bins, cur_tile_idx, idx);

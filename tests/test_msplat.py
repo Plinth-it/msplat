@@ -283,6 +283,7 @@ def test_metal_uses_dynamic_global_intersections():
     repo_root = Path(__file__).resolve().parents[1]
     host_source = (repo_root / "core" / "metal" / "msplat_metal.mm").read_text(encoding="utf-8")
     shader_source = _read_metal_sources(repo_root)
+    tensor_header = (repo_root / "core" / "include" / "metal_tensor.hpp").read_text(encoding="utf-8")
 
     assert "map_gaussian_to_intersects_kernel_cpso" in host_source
     assert "radix_sort_histogram_kernel_cpso" in host_source
@@ -293,6 +294,13 @@ def test_metal_uses_dynamic_global_intersections():
     assert "dynamic_capacity_valid" in host_source
     assert "did_dynamic_count_prepass" in host_source
     assert "padded_dynamic_intersection_capacity" in host_source
+    assert "DType::UInt64" in host_source
+    assert "UInt64" in tensor_header
+    assert "case DType::UInt64:  return 8;" in tensor_header
+    assert "device uint64_t* isect_ids" in shader_source
+    assert "constant uint64_t* isect_ids_sorted" in shader_source
+    assert "device const uint64_t* keys_in" in shader_source
+    assert "device uint64_t* keys_out" in shader_source
     assert "(tile_id << 32) | depth_bits" in shader_source
     assert "write_packed_sorted_float(" in shader_source
 

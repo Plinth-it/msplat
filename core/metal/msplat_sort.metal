@@ -196,8 +196,8 @@ kernel void bitonic_sort_per_tile_kernel(
     }
 }
 
-// ===== Radix Sort Kernels (legacy, kept for reference) =====
-// 8-bit LSB radix sort for int64 keys + int32 values.
+// ===== Dynamic Radix Sort Kernels =====
+// 8-bit LSB radix sort for uint64/uint32 keys + int32 values.
 // 3 kernels per pass: histogram, scan, scatter.
 // TG_SIZE = 256 = RS_RADIX (one element per thread, one histogram bin per thread).
 
@@ -206,7 +206,7 @@ kernel void bitonic_sort_per_tile_kernel(
 
 kernel void radix_sort_histogram_kernel(
     constant uint& capacity        [[buffer(0)]],
-    device const int64_t* keys_in  [[buffer(1)]],
+    device const uint64_t* keys_in [[buffer(1)]],
     device uint* counts            [[buffer(2)]],
     constant uint& shift           [[buffer(3)]],
     device const int32_t* cum_tiles_hit [[buffer(4)]],
@@ -232,7 +232,7 @@ kernel void radix_sort_histogram_kernel(
     // Count digit for this thread's element
     uint global_idx = bid * RS_TG_SIZE + tid;
     if (global_idx < N) {
-        uint digit = extract_bits((uint64_t)keys_in[global_idx], shift, 8);
+        uint digit = extract_bits(keys_in[global_idx], shift, 8);
         atomic_fetch_add_explicit(&local_hist[digit], 1, memory_order_relaxed);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -382,9 +382,9 @@ kernel void radix_sort_scatter_u32_kernel(
 
 kernel void radix_sort_scatter_kernel(
     constant uint& capacity            [[buffer(0)]],
-    device const int64_t* keys_in      [[buffer(1)]],
+    device const uint64_t* keys_in     [[buffer(1)]],
     device const int32_t* vals_in      [[buffer(2)]],
-    device int64_t* keys_out           [[buffer(3)]],
+    device uint64_t* keys_out          [[buffer(3)]],
     device int32_t* vals_out           [[buffer(4)]],
     device const uint* counts          [[buffer(5)]],
     constant uint& shift               [[buffer(6)]],
@@ -406,7 +406,7 @@ kernel void radix_sort_scatter_kernel(
     uint global_idx = bid * RS_TG_SIZE + tid;
 
     // Load element
-    int64_t my_key = 0;
+    uint64_t my_key = 0;
     int32_t my_val = 0;
     uint my_digit = 0;
     bool valid = (global_idx < N);
@@ -414,7 +414,7 @@ kernel void radix_sort_scatter_kernel(
     if (valid) {
         my_key = keys_in[global_idx];
         my_val = vals_in[global_idx];
-        my_digit = extract_bits((uint64_t)my_key, shift, 8);
+        my_digit = extract_bits(my_key, shift, 8);
     }
 
     // Store digits for cross-simdgroup rank computation

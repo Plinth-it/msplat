@@ -797,8 +797,8 @@ struct FusedTensorCache {
             packed_sorted_half = use_half_sorted_buffers;
             gaussian_ids = mtensor_empty(dev, {cap}, DType::Int32);
             gaussian_ids_tmp = mtensor_empty(dev, {cap}, DType::Int32);
-            isect_ids = mtensor_empty(dev, {cap}, DType::Int64);
-            isect_ids_tmp = mtensor_empty(dev, {cap}, DType::Int64);
+            isect_ids = mtensor_empty(dev, {cap}, DType::UInt64);
+            isect_ids_tmp = mtensor_empty(dev, {cap}, DType::UInt64);
             if (needs_dynamic_u32_keys) {
                 isect_ids_u32 = mtensor_empty(dev, {cap}, DType::UInt32);
                 isect_ids_u32_tmp = mtensor_empty(dev, {cap}, DType::UInt32);
@@ -865,7 +865,7 @@ struct FusedTensorCache {
             prealloc_bins.reset();
         }
         if (needs_fixed_tile_bins && !prealloc_bins.defined()) {
-            prealloc_bins = mtensor_empty(dev, {(int64_t)nt * kMaxTileElems}, DType::Int64);
+            prealloc_bins = mtensor_empty(dev, {(int64_t)nt * kMaxTileElems}, DType::UInt64);
         }
         if (!loss_sum.defined()) {
             loss_sum = mtensor_empty(dev, {1}, DType::Float32);
