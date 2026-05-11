@@ -63,12 +63,21 @@ kernel void rasterize_backward_kernel(
     threadgroup float3 conic_batch[RAST_BLOCK_SIZE];
     threadgroup float3 rgbs_batch[RAST_BLOCK_SIZE];
     threadgroup float opacity_comp_batch[RAST_BLOCK_SIZE];
+    constexpr uint NUM_WARPS = RAST_BLOCK_SIZE / 32;
+    threadgroup int warp_max_finals[NUM_WARPS];
+    threadgroup uint warp_merge_active[NUM_WARPS];
+    threadgroup float3 warp_merge_rgb[NUM_WARPS];
+    threadgroup float3 warp_merge_conic[NUM_WARPS];
+    threadgroup float2 warp_merge_xy[NUM_WARPS];
+    threadgroup float warp_merge_opacity[NUM_WARPS];
+    threadgroup float warp_merge_refine[NUM_WARPS];
 
     // df/d_out for this pixel
     const float3 v_out = read_packed_float3(v_output, pix_id);
     const float target_alpha = inside ? packed_gt_alpha(gt_packed, (uint)pix_id) : 0.0f;
     const uint use_alpha_loss_value = raster_use_alpha_loss(use_alpha_loss);
     const uint use_half_sorted_buffers_value = raster_use_half_sorted_buffers(use_half_sorted_buffers);
+    const bool use_warp_merge = raster_use_warp_merge();
     const float alpha_loss_grad = (use_alpha_loss_value != 0 && inside)
         ? alpha_loss_grad_scale * (((1.0f - T_final) > target_alpha) ? 1.0f
             : (((1.0f - T_final) < target_alpha) ? -1.0f : 0.0f))
@@ -84,8 +93,6 @@ kernel void rasterize_backward_kernel(
     // Subtile-level early exit: compute max bin_final across all warps,
     // skip leading batches where all gaussians are beyond any pixel's bin_final.
     const uint warp_id = tr / warp_size;
-    constexpr uint NUM_WARPS = RAST_BLOCK_SIZE / 32;
-    threadgroup int warp_max_finals[NUM_WARPS];
     if (wr == 0) warp_max_finals[warp_id] = warp_bin_final;
     threadgroup_barrier(mem_flags::mem_threadgroup);
     int tile_max_bin_final = warp_max_finals[0];
@@ -121,7 +128,10 @@ kernel void rasterize_backward_kernel(
 
         // process gaussians in the current batch for this pixel
         // 0 index is the furthest back gaussian in the batch
-        for (int t = max(0,batch_end - warp_bin_final); t < batch_size; ++t) {
+        const int first_t = use_warp_merge
+            ? max(0, batch_end - tile_max_bin_final)
+            : max(0, batch_end - warp_bin_final);
+        for (int t = first_t; t < batch_size; ++t) {
             // Broadcast batch data from lane 0 → all lanes in SIMD group.
             // All threads read the same index t, so one threadgroup read +
             // simd_broadcast replaces 32 redundant threadgroup reads.
@@ -168,7 +178,8 @@ kernel void rasterize_backward_kernel(
                 }
             }
             // if all threads are inactive in this warp, skip this loop
-            if (!warp_reduce_all_or(valid, warp_size)) {
+            const bool warp_has_valid = warp_reduce_all_or(valid, warp_size);
+            if (!warp_has_valid && !use_warp_merge) {
                 continue;
             }
 
@@ -215,7 +226,51 @@ kernel void rasterize_backward_kernel(
             v_opacity_local = warpSum(v_opacity_local, warp_size, wr);
             v_refine_local = warpSum(v_refine_local, warp_size, wr);
 
-            if (wr == 0) {
+            if (use_warp_merge) {
+                if (wr == 0) {
+                    warp_merge_active[warp_id] = warp_has_valid ? 1u : 0u;
+                    warp_merge_rgb[warp_id] = v_rgb_local;
+                    warp_merge_conic[warp_id] = v_conic_local;
+                    warp_merge_xy[warp_id] = v_xy_local;
+                    warp_merge_opacity[warp_id] = v_opacity_local;
+                    warp_merge_refine[warp_id] = v_refine_local;
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+
+                if (tr == 0) {
+                    uint active_warps = 0u;
+                    float3 v_rgb_merged = float3(0.0f);
+                    float3 v_conic_merged = float3(0.0f);
+                    float2 v_xy_merged = float2(0.0f);
+                    float v_opacity_merged = 0.0f;
+                    float v_refine_merged = 0.0f;
+                    for (uint w = 0; w < NUM_WARPS; ++w) {
+                        active_warps += warp_merge_active[w];
+                        v_rgb_merged += warp_merge_rgb[w];
+                        v_conic_merged += warp_merge_conic[w];
+                        v_xy_merged += warp_merge_xy[w];
+                        v_opacity_merged += warp_merge_opacity[w];
+                        v_refine_merged += warp_merge_refine[w];
+                    }
+                    if (active_warps != 0u) {
+                        // Fused clamp_min backward: zero gradient where raw_color + 0.5 < 0
+                        if (b_rgb.x + 0.5f >= 0.f) atomic_fetch_add_explicit(v_rgb + 3*b_id + 0, v_rgb_merged.x, memory_order_relaxed);
+                        if (b_rgb.y + 0.5f >= 0.f) atomic_fetch_add_explicit(v_rgb + 3*b_id + 1, v_rgb_merged.y, memory_order_relaxed);
+                        if (b_rgb.z + 0.5f >= 0.f) atomic_fetch_add_explicit(v_rgb + 3*b_id + 2, v_rgb_merged.z, memory_order_relaxed);
+
+                        atomic_fetch_add_explicit(v_conic + 3*b_id + 0, v_conic_merged.x, memory_order_relaxed);
+                        atomic_fetch_add_explicit(v_conic + 3*b_id + 1, v_conic_merged.y, memory_order_relaxed);
+                        atomic_fetch_add_explicit(v_conic + 3*b_id + 2, v_conic_merged.z, memory_order_relaxed);
+
+                        atomic_fetch_add_explicit(v_xy + 2*b_id + 0, v_xy_merged.x, memory_order_relaxed);
+                        atomic_fetch_add_explicit(v_xy + 2*b_id + 1, v_xy_merged.y, memory_order_relaxed);
+
+                        atomic_fetch_add_explicit(v_opacity + b_id, v_opacity_merged, memory_order_relaxed);
+                        atomic_fetch_add_explicit(v_refine + b_id, v_refine_merged, memory_order_relaxed);
+                    }
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+            } else if (wr == 0) {
                 // Fused clamp_min backward: zero gradient where raw_color + 0.5 < 0
                 if (b_rgb.x + 0.5f >= 0.f) atomic_fetch_add_explicit(v_rgb + 3*b_id + 0, v_rgb_local.x, memory_order_relaxed);
                 if (b_rgb.y + 0.5f >= 0.f) atomic_fetch_add_explicit(v_rgb + 3*b_id + 1, v_rgb_local.y, memory_order_relaxed);

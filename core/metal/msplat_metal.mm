@@ -624,23 +624,35 @@ static bool raster_backward_specialization_enabled() {
     return enabled;
 }
 
+static bool raster_backward_warp_merge_enabled() {
+    static const bool enabled = [] {
+        const char *value = std::getenv("MSPLAT_ENABLE_RASTER_BACKWARD_WARP_MERGE");
+        return value != nullptr && std::strcmp(value, "1") == 0;
+    }();
+    return enabled;
+}
+
 static uint32_t raster_backward_specialization_key(uint32_t use_alpha_loss,
-                                                   uint32_t use_half_sorted_buffers) {
+                                                   uint32_t use_half_sorted_buffers,
+                                                   bool use_warp_merge) {
     return (use_alpha_loss ? 1u : 0u)
-        | (use_half_sorted_buffers ? (1u << 1) : 0u);
+        | (use_half_sorted_buffers ? (1u << 1) : 0u)
+        | (use_warp_merge ? (1u << 2) : 0u);
 }
 
 static id<MTLComputePipelineState> make_raster_backward_specialization(
     MetalContext *ctx,
     NSString *function_name,
     uint32_t use_alpha_loss,
-    uint32_t use_half_sorted_buffers
+    uint32_t use_half_sorted_buffers,
+    bool use_warp_merge
 ) {
     MTLFunctionConstantValues *constants = [[MTLFunctionConstantValues alloc] init];
     bool alpha = use_alpha_loss != 0u;
     bool half = use_half_sorted_buffers != 0u;
     [constants setConstantValue:&alpha type:MTLDataTypeBool atIndex:6];
     [constants setConstantValue:&half type:MTLDataTypeBool atIndex:7];
+    [constants setConstantValue:&use_warp_merge type:MTLDataTypeBool atIndex:8];
 
     NSError *function_error = nil;
     id<MTLFunction> fn = [ctx->metal_library newFunctionWithName:function_name
@@ -672,18 +684,19 @@ static id<MTLComputePipelineState> raster_backward_pipeline(
     std::unordered_map<uint32_t, id<MTLComputePipelineState>> &cache,
     NSString *function_name,
     uint32_t use_alpha_loss,
-    uint32_t use_half_sorted_buffers
+    uint32_t use_half_sorted_buffers,
+    bool use_warp_merge
 ) {
-    if (!raster_backward_specialization_enabled()) {
+    if (!raster_backward_specialization_enabled() && !use_warp_merge) {
         return default_pso;
     }
-    uint32_t key = raster_backward_specialization_key(use_alpha_loss, use_half_sorted_buffers);
+    uint32_t key = raster_backward_specialization_key(use_alpha_loss, use_half_sorted_buffers, use_warp_merge);
     auto it = cache.find(key);
     if (it != cache.end()) {
         return it->second;
     }
     id<MTLComputePipelineState> pso = make_raster_backward_specialization(
-        ctx, function_name, use_alpha_loss, use_half_sorted_buffers);
+        ctx, function_name, use_alpha_loss, use_half_sorted_buffers, use_warp_merge);
     if (!pso) {
         return default_pso;
     }
@@ -2674,7 +2687,7 @@ std::tuple<MTensor, float> msplat_train_step(
                 ctx, ctx->rasterize_backward_persplat_kernel_cpso,
                 ctx->raster_backward_persplat_specializations,
                 @"rasterize_backward_persplat_kernel",
-                use_alpha_loss_u32, use_half_sorted_buffers_u32);
+                use_alpha_loss_u32, use_half_sorted_buffers_u32, false);
             [enc setComputePipelineState:pso];
             [enc setBytes:rast_tb.data() length:sizeof(rast_tb) atIndex:0];
             [enc setBytes:rast_isz.data() length:sizeof(rast_isz) atIndex:1];
@@ -2702,7 +2715,8 @@ std::tuple<MTensor, float> msplat_train_step(
                 ctx, ctx->rasterize_backward_kernel_cpso,
                 ctx->raster_backward_specializations,
                 @"rasterize_backward_kernel",
-                use_alpha_loss_u32, use_half_sorted_buffers_u32);
+                use_alpha_loss_u32, use_half_sorted_buffers_u32,
+                raster_backward_warp_merge_enabled());
             [enc setComputePipelineState:pso];
             [enc setBytes:rast_tb.data() length:sizeof(rast_tb) atIndex:0];
             [enc setBytes:rast_isz.data() length:sizeof(rast_isz) atIndex:1];
@@ -2740,7 +2754,7 @@ std::tuple<MTensor, float> msplat_train_step(
                 ctx, ctx->rasterize_backward_chunked_kernel_cpso,
                 ctx->raster_backward_chunked_specializations,
                 @"rasterize_backward_chunked_kernel",
-                use_alpha_loss_u32, use_half_sorted_buffers_u32);
+                use_alpha_loss_u32, use_half_sorted_buffers_u32, false);
             [enc setComputePipelineState:pso];
             [enc setBytes:rast_tb.data() length:sizeof(rast_tb) atIndex:0];
             [enc setBytes:rast_isz.data() length:sizeof(rast_isz) atIndex:1];

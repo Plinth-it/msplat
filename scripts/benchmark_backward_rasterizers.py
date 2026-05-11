@@ -72,6 +72,12 @@ def parse_args() -> argparse.Namespace:
         help="A/B the opt-in MSPLAT_HALF_SORTED_BUFFERS hook.",
     )
     parser.add_argument(
+        "--warp-merge",
+        choices=["off", "on", "both"],
+        default="off",
+        help="A/B the opt-in MSPLAT_ENABLE_RASTER_BACKWARD_WARP_MERGE hook.",
+    )
+    parser.add_argument(
         "--intersection-key-bits",
         nargs="+",
         default=["default"],
@@ -211,6 +217,7 @@ def run_mode(
     mode: str,
     raster_specialization: bool,
     half_sorted_buffers: bool,
+    warp_merge: bool,
     intersection_key_bits: str,
     output_dir: Path,
     extra_args: list[str],
@@ -220,6 +227,8 @@ def run_mode(
         run_name += "-rb-spec"
     if half_sorted_buffers:
         run_name += "-half"
+    if warp_merge:
+        run_name += "-warp-merge"
     if intersection_key_bits != "default":
         run_name += f"-key-{intersection_key_bits}"
     mode_dir = output_dir / run_name
@@ -253,6 +262,10 @@ def run_mode(
         env["MSPLAT_HALF_SORTED_BUFFERS"] = "1"
     else:
         env.pop("MSPLAT_HALF_SORTED_BUFFERS", None)
+    if warp_merge:
+        env["MSPLAT_ENABLE_RASTER_BACKWARD_WARP_MERGE"] = "1"
+    else:
+        env.pop("MSPLAT_ENABLE_RASTER_BACKWARD_WARP_MERGE", None)
     if intersection_key_bits == "default":
         env.pop("MSPLAT_INTERSECTION_KEY_BITS", None)
     else:
@@ -275,6 +288,8 @@ def run_mode(
         labels.append("raster-backward specialization")
     if half_sorted_buffers:
         labels.append("half sorted buffers")
+    if warp_merge:
+        labels.append("warp-merge atomics")
     if intersection_key_bits != "default":
         labels.append(f"{intersection_key_bits}-bit intersection keys" if intersection_key_bits != "auto" else "auto intersection keys")
     suffix = f" + {' + '.join(labels)}" if labels else ""
@@ -314,6 +329,12 @@ def raster_specialization_variants(value: str) -> list[bool]:
 
 
 def half_sorted_buffer_variants(value: str) -> list[bool]:
+    if value == "both":
+        return [False, True]
+    return [value == "on"]
+
+
+def warp_merge_variants(value: str) -> list[bool]:
     if value == "both":
         return [False, True]
     return [value == "on"]
@@ -444,6 +465,7 @@ def write_summary(args: argparse.Namespace, results: list[dict[str, object]], ou
         "profile_stages": args.profile_stages,
         "debug": args.debug,
         "quality_metrics": args.quality_metrics,
+        "warp_merge": args.warp_merge,
         "msplat_args": args.msplat_args,
         "results": [json_result(row) for row in results],
         "quality_warnings": quality_warning_rows(results),
@@ -460,10 +482,11 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     results = [
-        run_mode(args, mode, raster_specialization, half_sorted_buffers, intersection_key_bits, output_dir, extra_args)
+        run_mode(args, mode, raster_specialization, half_sorted_buffers, warp_merge, intersection_key_bits, output_dir, extra_args)
         for mode in args.modes
         for raster_specialization in raster_specialization_variants(args.raster_backward_specialization)
         for half_sorted_buffers in half_sorted_buffer_variants(args.half_sorted_buffers)
+        for warp_merge in warp_merge_variants(args.warp_merge)
         for intersection_key_bits in intersection_key_bit_variants(args.intersection_key_bits)
     ]
     print_table(results, output_dir)

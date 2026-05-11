@@ -420,16 +420,20 @@ def test_raster_backward_has_opt_in_function_constant_specialization():
 
     assert "fc_raster_use_alpha_loss [[function_constant(6)]]" in shader_source
     assert "fc_raster_use_half_sorted_buffers [[function_constant(7)]]" in shader_source
+    assert "fc_raster_use_warp_merge [[function_constant(8)]]" in shader_source
     assert "raster_use_alpha_loss(use_alpha_loss)" in shader_source
     assert "raster_use_half_sorted_buffers(use_half_sorted_buffers)" in shader_source
+    assert "raster_use_warp_merge()" in shader_source
 
     assert "MSPLAT_ENABLE_RASTER_BACKWARD_SPECIALIZATION" in host_source
+    assert "MSPLAT_ENABLE_RASTER_BACKWARD_WARP_MERGE" in host_source
     assert "raster_backward_specializations" in host_source
     assert "raster_backward_persplat_specializations" in host_source
     assert "raster_backward_chunked_specializations" in host_source
     assert "loadWithEmptyConstants(@\"rasterize_backward_kernel\")" in host_source
     assert "raster_backward_pipeline(" in host_source
     assert "MSPLAT_ENABLE_RASTER_BACKWARD_SPECIALIZATION=1" in readme
+    assert "MSPLAT_ENABLE_RASTER_BACKWARD_WARP_MERGE=1" in readme
 
 
 def test_quaternion_rotation_uses_named_wxyz_layout():
@@ -530,6 +534,9 @@ def test_backward_rasterizer_benchmark_script_supports_production_ab():
     assert "--half-sorted-buffers" in script
     assert "MSPLAT_HALF_SORTED_BUFFERS" in script
     assert "half_sorted_buffer_variants" in script
+    assert "--warp-merge" in script
+    assert "MSPLAT_ENABLE_RASTER_BACKWARD_WARP_MERGE" in script
+    assert "warp_merge_variants" in script
     assert "--intersection-key-bits" in script
     assert "MSPLAT_INTERSECTION_KEY_BITS" in script
     assert "intersection_key_bit_variants" in script
@@ -559,6 +566,7 @@ output.parent.mkdir(parents=True, exist_ok=True)
 (output.parent / "env.json").write_text(json.dumps({
     "raster_specialization": os.environ.get("MSPLAT_ENABLE_RASTER_BACKWARD_SPECIALIZATION"),
     "half_sorted_buffers": os.environ.get("MSPLAT_HALF_SORTED_BUFFERS"),
+    "warp_merge": os.environ.get("MSPLAT_ENABLE_RASTER_BACKWARD_WARP_MERGE"),
     "intersection_key_bits": os.environ.get("MSPLAT_INTERSECTION_KEY_BITS"),
 }), encoding="utf-8")
 key_mode = os.environ.get("MSPLAT_INTERSECTION_KEY_BITS")
@@ -596,6 +604,8 @@ print(f"  train L1:        {l1:.5f}")
                 "both",
                 "--half-sorted-buffers",
                 "both",
+                "--warp-merge",
+                "both",
                 "--intersection-key-bits",
                 "default",
                 "auto",
@@ -614,6 +624,7 @@ print(f"  train L1:        {l1:.5f}")
         base_env = json.loads((output_dir / "auto" / "env.json").read_text(encoding="utf-8"))
         half_env = json.loads((output_dir / "auto-half" / "env.json").read_text(encoding="utf-8"))
         key_env = json.loads((output_dir / "auto-key-auto" / "env.json").read_text(encoding="utf-8"))
+        warp_env = json.loads((output_dir / "auto-warp-merge" / "env.json").read_text(encoding="utf-8"))
         half_key_env = json.loads((output_dir / "auto-half-key-auto" / "env.json").read_text(encoding="utf-8"))
         specialized_env = json.loads((output_dir / "auto-rb-spec" / "env.json").read_text(encoding="utf-8"))
         combined_env = json.loads((output_dir / "auto-rb-spec-half" / "env.json").read_text(encoding="utf-8"))
@@ -632,6 +643,8 @@ print(f"  train L1:        {l1:.5f}")
     assert half_env["half_sorted_buffers"] == "1"
     assert half_env["intersection_key_bits"] is None
     assert key_env["intersection_key_bits"] == "auto"
+    assert warp_env["warp_merge"] == "1"
+    assert warp_env["intersection_key_bits"] is None
     assert half_key_env["half_sorted_buffers"] == "1"
     assert half_key_env["intersection_key_bits"] == "auto"
     assert specialized_env["raster_specialization"] == "1"
@@ -647,6 +660,7 @@ print(f"  train L1:        {l1:.5f}")
     assert "auto-rb-spec" in result.stdout
     assert "auto-half" in result.stdout
     assert "auto-rb-spec-half" in result.stdout
+    assert "auto-warp-merge" in result.stdout
     assert "auto-key-auto" in result.stdout
     assert "auto-rb-spec-half-key-auto" in result.stdout
     assert "Baseline deltas vs auto" in result.stdout
@@ -659,16 +673,25 @@ print(f"  train L1:        {l1:.5f}")
     assert summary["dataset"] == "/tmp/dataset"
     assert summary["iters"] == 120
     assert summary["quality_metrics"] is True
+    assert summary["warp_merge"] == "both"
     assert summary["msplat_args"] == ["--alpha-mode", "transparent"]
     assert [row["mode"] for row in summary["results"]] == [
         "auto",
         "auto-key-auto",
+        "auto-warp-merge",
+        "auto-warp-merge-key-auto",
         "auto-half",
         "auto-half-key-auto",
+        "auto-half-warp-merge",
+        "auto-half-warp-merge-key-auto",
         "auto-rb-spec",
         "auto-rb-spec-key-auto",
+        "auto-rb-spec-warp-merge",
+        "auto-rb-spec-warp-merge-key-auto",
         "auto-rb-spec-half",
         "auto-rb-spec-half-key-auto",
+        "auto-rb-spec-half-warp-merge",
+        "auto-rb-spec-half-warp-merge-key-auto",
     ]
     assert summary["results"][0]["log"].endswith("/auto/run.log")
     assert summary["quality_warnings"][0]["mode"] == "auto-key-auto"

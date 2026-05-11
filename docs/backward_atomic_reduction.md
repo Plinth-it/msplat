@@ -54,6 +54,17 @@ as an ambiguous crossover case until a full quality-gated run shows a clear win.
    subbatch needs around 10 KB and could reduce atomics across warps, but it adds
    more barriers and repeated subbatch passes. Earlier subtile merge experiments
    regressed, so this should not become production code without a clear A/B win.
+   The current `MSPLAT_ENABLE_RASTER_BACKWARD_WARP_MERGE=1` prototype is the
+   smallest version of this idea: it merges the existing per-warp reductions for
+   one gaussian across the 8 warps in the pixel kernel before flushing atomics.
+   It adds two threadgroup barriers per active gaussian, so it is explicitly a
+   benchmark hook until stage timings prove the atomic savings beat the barrier
+   cost.
+
+   Initial 128px playroom smoke results show the expected risk: the hook matched
+   quality in a 60-step run, but a 70-step synchronized stage profile regressed
+   `rast_bwd` from 0.669 ms to 0.915 ms. Keep it opt-in unless larger scenes
+   show a clear stage-median win.
 
 4. Consider a two-pass contribution compaction only for large/full-resolution
    scenes. Emitting per-tile or per-gaussian contribution records and segmented
@@ -72,6 +83,7 @@ python3 scripts/benchmark_backward_rasterizers.py DATASET \
   --binary build/msplat \
   --iters 600 \
   --modes pixel persplat \
+  --warp-merge both \
   --quality-metrics \
   --debug \
   --profile-stages \

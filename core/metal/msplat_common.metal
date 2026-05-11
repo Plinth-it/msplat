@@ -47,6 +47,7 @@ constant bool fc_project_sh_use_mip_splatting [[function_constant(1)]];
 constant bool fc_project_sh_reduce_second_moment [[function_constant(2)]];
 constant bool fc_raster_use_alpha_loss [[function_constant(6)]];
 constant bool fc_raster_use_half_sorted_buffers [[function_constant(7)]];
+constant bool fc_raster_use_warp_merge [[function_constant(8)]];
 
 static inline uint project_sh_degrees_to_use(const uint runtime_value) {
     return is_function_constant_defined(fc_project_sh_degrees_to_use)
@@ -76,6 +77,11 @@ static inline uint raster_use_half_sorted_buffers(const uint runtime_value) {
     return is_function_constant_defined(fc_raster_use_half_sorted_buffers)
         ? (fc_raster_use_half_sorted_buffers ? 1u : 0u)
         : runtime_value;
+}
+
+static inline bool raster_use_warp_merge() {
+    return is_function_constant_defined(fc_raster_use_warp_merge)
+        && fc_raster_use_warp_merge;
 }
 
 static inline float packed_gt_alpha(constant uint *gt_packed, const uint pixel) {
