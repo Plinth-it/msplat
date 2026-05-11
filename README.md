@@ -346,14 +346,18 @@ default because local A/B runs should prove a win before changing production
 defaults. On the
 600-step garden production smoke shape, half sorted buffers were slower
 (`pixel-half` 263.76 it/s vs `pixel` 275.75 it/s), so that path remains
-benchmark-only. A 600-step garden raster/backward matrix with stage profiling
-and final-quality checks kept the default path ahead enough to leave all raster
-prototypes opt-in: `auto` ran 124.77 it/s with `rast_bwd` 1.676 ms and GPU stage
-total 4.323 ms; `auto-rb-spec` was only noise-level faster in `rast_bwd` at
-1.663 ms with GPU stage total 4.337 ms; `auto-rb-spec-half` reached 1.659 ms
-`rast_bwd` but lower throughput at 123.75 it/s; every warp-merge variant
-regressed `rast_bwd` to roughly 2.77-2.79 ms and throughput to roughly
-110-112 it/s. The larger-scene regression gate was not run in this checkout
+benchmark-only. Two 600-step garden raster/backward matrices with stage
+profiling and final-quality checks kept the default path ahead enough to leave
+all raster prototypes opt-in. The first run had `auto` at 124.77 it/s,
+`rast_bwd` 1.676 ms, and GPU stage total 4.323 ms; `auto-rb-spec` was only
+noise-level faster in `rast_bwd` at 1.663 ms with GPU stage total 4.337 ms; and
+`auto-rb-spec-half` reached 1.659 ms `rast_bwd` but lower throughput at
+123.75 it/s. The repeat had `auto` at 130.61 it/s, `rast_bwd` 1.881 ms, and GPU
+stage total 4.233 ms; `auto-rb-spec` reached 146.91 it/s and `rast_bwd`
+1.844 ms, but still only improved GPU stage total by 1.6%; and
+`auto-rb-spec-half` regressed iteration median despite matching the `rast_bwd`
+1.844 ms. Every warp-merge variant regressed `rast_bwd` by roughly 58-67%
+across the two runs. The larger-scene regression gate was not run in this checkout
 because `datasets/mipnerf360/garden` is the only local valid training dataset.
 Do not default any raster/backward or command-stream optimization unless it
 improves median stage timing on two garden repeats and one larger scene, keeps
