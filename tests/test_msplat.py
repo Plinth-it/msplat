@@ -18,6 +18,22 @@ HAS_GARDEN = os.path.isdir(GARDEN)
 NATIVE_CLI = Path(__file__).resolve().parents[1] / "build" / "msplat"
 
 
+def _read_metal_sources(repo_root):
+    metal_dir = repo_root / "core" / "metal"
+    sources = [
+        "msplat_common.metal",
+        "msplat_project.metal",
+        "msplat_raster_backward.metal",
+        "msplat_project_backward.metal",
+        "msplat_project_sh.metal",
+        "msplat_sort.metal",
+        "msplat_loss.metal",
+        "msplat_chunked_raster.metal",
+        "msplat_densify.metal",
+    ]
+    return "\n".join((metal_dir / name).read_text(encoding="utf-8") for name in sources)
+
+
 @pytest.fixture(autouse=True)
 def _release_msplat_gpu_cache_after_test():
     yield
@@ -266,7 +282,7 @@ def test_native_cli_exposes_quality_presets():
 def test_metal_uses_dynamic_global_intersections():
     repo_root = Path(__file__).resolve().parents[1]
     host_source = (repo_root / "core" / "metal" / "msplat_metal.mm").read_text(encoding="utf-8")
-    shader_source = (repo_root / "core" / "metal" / "msplat_metal.metal").read_text(encoding="utf-8")
+    shader_source = _read_metal_sources(repo_root)
 
     assert "map_gaussian_to_intersects_kernel_cpso" in host_source
     assert "radix_sort_histogram_kernel_cpso" in host_source
@@ -283,7 +299,7 @@ def test_metal_uses_dynamic_global_intersections():
 
 def test_tile_bin_edges_close_last_tile_transition():
     repo_root = Path(__file__).resolve().parents[1]
-    shader_source = (repo_root / "core" / "metal" / "msplat_metal.metal").read_text(encoding="utf-8")
+    shader_source = _read_metal_sources(repo_root)
 
     def kernel_body(name):
         body = shader_source.split(f"kernel void {name}", 1)[1]
@@ -306,7 +322,7 @@ def test_tile_bin_edges_close_last_tile_transition():
 def test_metal_exposes_brush_style_persplat_backward():
     repo_root = Path(__file__).resolve().parents[1]
     host_source = (repo_root / "core" / "metal" / "msplat_metal.mm").read_text(encoding="utf-8")
-    shader_source = (repo_root / "core" / "metal" / "msplat_metal.metal").read_text(encoding="utf-8")
+    shader_source = _read_metal_sources(repo_root)
 
     assert "return std::max(img_width, img_height) > 2560 || num_tiles > 25000;" in host_source
     assert "rasterize_backward_persplat_kernel_cpso" in host_source
@@ -325,7 +341,7 @@ def test_metal_exposes_brush_style_persplat_backward():
 
 def test_persplat_backward_scales_loss_gradient_before_half_pack():
     repo_root = Path(__file__).resolve().parents[1]
-    shader_source = (repo_root / "core" / "metal" / "msplat_metal.metal").read_text(encoding="utf-8")
+    shader_source = _read_metal_sources(repo_root)
     start = shader_source.index("kernel void rasterize_backward_persplat_kernel")
     end = shader_source.index("kernel void nd_rasterize_backward_kernel", start)
     body = shader_source[start:end]
@@ -339,7 +355,7 @@ def test_persplat_backward_scales_loss_gradient_before_half_pack():
 def test_project_sh_kernels_use_function_constant_specialization():
     repo_root = Path(__file__).resolve().parents[1]
     host_source = (repo_root / "core" / "metal" / "msplat_metal.mm").read_text(encoding="utf-8")
-    shader_source = (repo_root / "core" / "metal" / "msplat_metal.metal").read_text(encoding="utf-8")
+    shader_source = _read_metal_sources(repo_root)
 
     assert "fc_project_sh_degrees_to_use [[function_constant(0)]]" in shader_source
     assert "fc_project_sh_use_mip_splatting [[function_constant(1)]]" in shader_source
@@ -358,7 +374,7 @@ def test_project_sh_kernels_use_function_constant_specialization():
 def test_metal_supports_opt_in_half_sorted_buffers():
     repo_root = Path(__file__).resolve().parents[1]
     host_source = (repo_root / "core" / "metal" / "msplat_metal.mm").read_text(encoding="utf-8")
-    shader_source = (repo_root / "core" / "metal" / "msplat_metal.metal").read_text(encoding="utf-8")
+    shader_source = _read_metal_sources(repo_root)
     tensor_header = (repo_root / "core" / "include" / "metal_tensor.hpp").read_text(encoding="utf-8")
 
     assert "Float16" in tensor_header
@@ -374,6 +390,24 @@ def test_metal_supports_opt_in_half_sorted_buffers():
     assert "constant half* packed_conic_half" in shader_source
     assert "device half* packed_conic_half" in shader_source
     assert "constant uint& use_half_sorted_buffers" in shader_source
+
+
+def test_metal_sources_compile_as_logical_units():
+    repo_root = Path(__file__).resolve().parents[1]
+    cmake_source = (repo_root / "CMakeLists.txt").read_text(encoding="utf-8")
+    manifest = (repo_root / "core" / "metal" / "msplat_metal.metal").read_text(encoding="utf-8")
+
+    assert "METAL_SOURCES" in cmake_source
+    assert "METAL_COMMON_SOURCE" in cmake_source
+    assert "foreach(METAL_SOURCE ${METAL_SOURCES})" in cmake_source
+    assert "metallib" in cmake_source
+    assert "msplat_project.metal" in cmake_source
+    assert "msplat_loss.metal" in cmake_source
+    assert "msplat_densify.metal" in cmake_source
+    assert "msplat_metal.metal" not in cmake_source
+
+    assert "Metal source manifest" in manifest
+    assert '#include "msplat_common.metal"' in manifest
 
 
 def test_backward_rasterizer_benchmark_script_wires_profile_ab():

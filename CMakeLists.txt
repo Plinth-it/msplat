@@ -55,22 +55,43 @@ find_library(COREGRAPHICS_FRAMEWORK CoreGraphics REQUIRED)
 
 # --- Compile Metal shaders ---
 
-set(METAL_SOURCE ${CMAKE_SOURCE_DIR}/core/metal/msplat_metal.metal)
-configure_file(${METAL_SOURCE} ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/msplat_metal.metal COPYONLY)
+set(METAL_COMMON_SOURCE ${CMAKE_SOURCE_DIR}/core/metal/msplat_common.metal)
+set(METAL_SOURCES
+    ${CMAKE_SOURCE_DIR}/core/metal/msplat_project.metal
+    ${CMAKE_SOURCE_DIR}/core/metal/msplat_raster_backward.metal
+    ${CMAKE_SOURCE_DIR}/core/metal/msplat_project_backward.metal
+    ${CMAKE_SOURCE_DIR}/core/metal/msplat_project_sh.metal
+    ${CMAKE_SOURCE_DIR}/core/metal/msplat_sort.metal
+    ${CMAKE_SOURCE_DIR}/core/metal/msplat_loss.metal
+    ${CMAKE_SOURCE_DIR}/core/metal/msplat_chunked_raster.metal
+    ${CMAKE_SOURCE_DIR}/core/metal/msplat_densify.metal
+)
 configure_file(${CMAKE_SOURCE_DIR}/core/resources/lpips_vgg.bin
                ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/lpips_vgg.bin COPYONLY)
+
+set(METAL_AIR_FILES)
+foreach(METAL_SOURCE ${METAL_SOURCES})
+    get_filename_component(METAL_NAME ${METAL_SOURCE} NAME_WE)
+    set(METAL_AIR ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/${METAL_NAME}.air)
+    add_custom_command(
+        OUTPUT ${METAL_AIR}
+        COMMAND xcrun -sdk macosx metal -O3 -c
+            ${METAL_SOURCE}
+            -I ${CMAKE_SOURCE_DIR}/core/metal
+            -o ${METAL_AIR}
+        DEPENDS ${METAL_SOURCE} ${METAL_COMMON_SOURCE}
+        COMMENT "Compiling Metal source ${METAL_NAME}.metal"
+    )
+    list(APPEND METAL_AIR_FILES ${METAL_AIR})
+endforeach()
+
 add_custom_command(
     OUTPUT ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/default.metallib
-    COMMAND xcrun -sdk macosx metal -O3 -c
-        ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/msplat_metal.metal
-        -o ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/msplat_metal.air
     COMMAND xcrun -sdk macosx metallib
-        ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/msplat_metal.air
+        ${METAL_AIR_FILES}
         -o ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/default.metallib
-    COMMAND rm -f ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/msplat_metal.air
-    COMMAND rm -f ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/msplat_metal.metal
-    DEPENDS ${METAL_SOURCE}
-    COMMENT "Compiling Metal kernels → default.metallib"
+    DEPENDS ${METAL_AIR_FILES}
+    COMMENT "Linking Metal kernels → default.metallib"
 )
 add_custom_target(metallib ALL
     DEPENDS ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/default.metallib)
