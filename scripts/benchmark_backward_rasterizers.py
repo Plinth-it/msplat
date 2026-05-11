@@ -143,6 +143,7 @@ def parse_metrics(log_text: str) -> dict[str, object]:
         r"pixel atomic estimate: warp_groups ([0-9.]+)M/sample, tile_merge_floor ([0-9.]+)M/sample, max_reduction ([0-9.]+)%",
         log_text,
     )
+    saturated_pixels = re.search(r"saturated pixels: ([0-9.]+)/sample", log_text)
 
     return {
         "iter_mean_ms": float(benchmark.group(1)) if benchmark else None,
@@ -166,6 +167,7 @@ def parse_metrics(log_text: str) -> dict[str, object]:
         "replay_active_m": float(replay.group(1)) if replay else None,
         "replay_diagonal_m": float(replay.group(2)) if replay else None,
         "replay_skip_m": float(replay.group(3)) if replay else None,
+        "saturated_pixels": float(saturated_pixels.group(1)) if saturated_pixels else None,
     }
 
 
@@ -301,14 +303,14 @@ def has_final_quality_arg(args: list[str]) -> bool:
 def print_table(results: list[dict[str, object]], output_dir: Path) -> None:
     print(f"Logs: {output_dir}")
     print()
-    print("| mode | train it/s | train s | iter median ms | rast_bwd median ms | PSNR | SSIM | L1 | splats | tile avg | pixel atomic M | merge ceiling % | replay active M |")
-    print("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
+    print("| mode | train it/s | train s | iter median ms | rast_bwd median ms | PSNR | SSIM | L1 | splats | tile avg | pixel atomic M | merge ceiling % | replay active M | replay diag M | replay skip M | sat px |")
+    print("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
     for row in results:
         tile_avg = "-"
         if row["tile_avg_before"] is not None and row["tile_avg_after"] is not None:
             tile_avg = f"{fmt(row['tile_avg_before'], 1)}->{fmt(row['tile_avg_after'], 1)}"
         print(
-            "| {mode} | {ips} | {train_s} | {iter_ms} | {bwd_ms} | {psnr} | {ssim} | {l1} | {splats} | {tile_avg} | {atomic_groups} | {merge_ceiling} | {replay} |".format(
+            "| {mode} | {ips} | {train_s} | {iter_ms} | {bwd_ms} | {psnr} | {ssim} | {l1} | {splats} | {tile_avg} | {atomic_groups} | {merge_ceiling} | {replay} | {replay_diag} | {replay_skip} | {sat_px} |".format(
                 mode=row["mode"],
                 ips=fmt(row["training_ips"], 2),
                 train_s=fmt(row["training_seconds"], 2),
@@ -322,6 +324,9 @@ def print_table(results: list[dict[str, object]], output_dir: Path) -> None:
                 atomic_groups=fmt(row["pixel_atomic_groups_m"], 1),
                 merge_ceiling=fmt(row["tile_merge_max_reduction"], 1),
                 replay=fmt(row["replay_active_m"], 1),
+                replay_diag=fmt(row["replay_diagonal_m"], 1),
+                replay_skip=fmt(row["replay_skip_m"], 1),
+                sat_px=fmt(row["saturated_pixels"], 1),
             )
         )
 

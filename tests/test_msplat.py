@@ -507,6 +507,10 @@ def test_backward_rasterizer_benchmark_script_wires_profile_ab():
     assert "--final-quality" in script
     assert "pixel_atomic_groups_m" in script
     assert "merge ceiling %" in script
+    assert "replay_diagonal_m" in script
+    assert "replay skip M" in script
+    assert "saturated_pixels" in script
+    assert "sat px" in script
     assert "rast_bwd" in script
     assert "train PSNR" in script
     assert "train SSIM" in script
