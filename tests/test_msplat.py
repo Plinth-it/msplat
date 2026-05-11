@@ -436,6 +436,14 @@ def test_raster_backward_has_opt_in_function_constant_specialization():
     assert "MSPLAT_ENABLE_RASTER_BACKWARD_WARP_MERGE=1" in readme
 
 
+def test_raster_backward_has_no_duplicate_refine_calculation():
+    repo_root = Path(__file__).resolve().parents[1]
+    shader_source = (repo_root / "core" / "metal" / "msplat_raster_backward.metal").read_text(encoding="utf-8")
+
+    refine_work = "v_refine_local = length(v_xy_local * float2((float)img_size.x, (float)img_size.y)) / final_alpha;"
+    assert shader_source.count(refine_work) == 1
+
+
 def test_quaternion_rotation_uses_named_wxyz_layout():
     repo_root = Path(__file__).resolve().parents[1]
     shader_source = _read_metal_sources(repo_root)
