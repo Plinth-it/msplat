@@ -319,7 +319,9 @@ export.
 Use `scripts/benchmark_backward_rasterizers.py` for controlled A/B runs. It can
 compare `auto`, `pixel`, and `persplat` directly, and `--quality-metrics` passes
 `--final-quality` through to the CLI so the output table includes final train
-metrics. Set `PROFILE_STAGES=1` to compare stage timings and
+metrics. It also writes `summary.json` in the output directory; compare multiple
+summary artifacts with `scripts/compare_benchmark_summaries.py`. Set
+`PROFILE_STAGES=1` to compare stage timings and
 `MSPLAT_BACKWARD_DEBUG=1` to print debug-only range/replay counters every 100
 completed training steps, including a pixel-path atomic-group estimate for
 cross-warp reduction experiments. Use `MSPLAT_BACKWARD_DEBUG_INTERVAL=N` to

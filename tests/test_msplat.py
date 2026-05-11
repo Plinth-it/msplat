@@ -675,6 +675,72 @@ print(f"  train L1:        {l1:.5f}")
     assert "PSNR -0.50 dB" in summary["quality_warnings"][0]["reasons"]
 
 
+def test_compare_benchmark_summaries_script_prints_cross_run_table():
+    repo_root = Path(__file__).resolve().parents[1]
+    script = repo_root / "scripts" / "compare_benchmark_summaries.py"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        summary_a = tmp_path / "garden" / "summary.json"
+        summary_b = tmp_path / "playroom" / "summary.json"
+        summary_a.parent.mkdir()
+        summary_b.parent.mkdir()
+        base_summary = {
+            "dataset": "/datasets/garden",
+            "output_dir": "/tmp/msplat-garden",
+            "results": [
+                {
+                    "mode": "pixel",
+                    "training_ips": 100.0,
+                    "iter_median_ms": 3.0,
+                    "rast_bwd_median_ms": 1.0,
+                    "psnr": 20.0,
+                    "ssim": 0.8,
+                    "l1": 0.04,
+                    "splats": 100,
+                },
+                {
+                    "mode": "pixel-key-auto",
+                    "training_ips": 110.0,
+                    "iter_median_ms": 2.7,
+                    "rast_bwd_median_ms": 0.9,
+                    "psnr": 19.7,
+                    "ssim": 0.79,
+                    "l1": 0.045,
+                    "splats": 106,
+                },
+            ],
+            "quality_warnings": [
+                {"mode": "pixel-key-auto", "reasons": ["PSNR -0.30 dB", "splats +6.0%"]}
+            ],
+        }
+        summary_a.write_text(json.dumps(base_summary), encoding="utf-8")
+        summary_b.write_text(
+            json.dumps(
+                {
+                    **base_summary,
+                    "dataset": "/datasets/playroom",
+                    "output_dir": "/tmp/msplat-playroom",
+                    "quality_warnings": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = subprocess.run(
+            ["python3", str(script), str(summary_a), str(summary_b)],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+    assert "## msplat-garden" in result.stdout
+    assert "dataset: /datasets/garden" in result.stdout
+    assert "| pixel-key-auto | 110.00 | +10.0% | -10.0% | -10.0% | -0.30 | -0.0100 | +12.5% | +6.0% | PSNR -0.30 dB, splats +6.0% |" in result.stdout
+    assert "## msplat-playroom" in result.stdout
+
+
 def test_stage_profiler_uses_synchronized_command_buffers():
     repo_root = Path(__file__).resolve().parents[1]
     host_source = (repo_root / "core" / "metal" / "msplat_metal.mm").read_text(encoding="utf-8")
