@@ -380,6 +380,29 @@ MetalContext* get_global_context() {
 #define ENC_ARRAY(encoder, x, i) [encoder setBytes:x length:sizeof(x) atIndex:i]
 #define ENC_BUF(encoder, x, i) [encoder setBuffer:x.buffer() offset:0 atIndex:i]
 
+static bool should_use_half_sorted_buffers() {
+    static const bool enabled = [] {
+        const char *mode = std::getenv("MSPLAT_HALF_SORTED_BUFFERS");
+        return mode && std::strcmp(mode, "1") == 0;
+    }();
+    return enabled;
+}
+
+static void bind_sorted_half_buffers(id<MTLComputeCommandEncoder> enc,
+                                     MTensor &packed_conic,
+                                     MTensor &packed_rgb,
+                                     MTensor &packed_opacity_comp,
+                                     uint32_t use_half_sorted_buffers,
+                                     NSUInteger conic_index,
+                                     NSUInteger rgb_index,
+                                     NSUInteger opacity_comp_index,
+                                     NSUInteger flag_index) {
+    [enc setBuffer:packed_conic.buffer() offset:0 atIndex:conic_index];
+    [enc setBuffer:packed_rgb.buffer() offset:0 atIndex:rgb_index];
+    [enc setBuffer:packed_opacity_comp.buffer() offset:0 atIndex:opacity_comp_index];
+    [enc setBytes:&use_half_sorted_buffers length:sizeof(use_half_sorted_buffers) atIndex:flag_index];
+}
+
 static bool project_sh_specialization_enabled() {
     static const bool enabled = std::getenv("MSPLAT_DISABLE_PROJECT_SH_SPECIALIZATION") == nullptr;
     return enabled;
@@ -601,6 +624,7 @@ static constexpr int64_t kFixedTileCapacityMultiplier = 16;
 struct FusedTensorCache {
     int fwd_num_points = 0, capacity = 0, img_height = 0, img_width = 0, num_tiles = 0;
     int bwd_num_points = 0, features_rest_bases = 0;
+    bool packed_sorted_half = false;
 
     // Forward intermediates
     MTensor xys, depths, radii_out, conics, opacity_comp, num_tiles_hit, cum_tiles_hit, colors, aabb;
@@ -649,6 +673,7 @@ struct FusedTensorCache {
     void ensure_forward(int np, int64_t cap, int ih, int iw, int nt,
                         bool needs_ssim_buffers, bool needs_lpips_buffers,
                         bool needs_fixed_tile_bins, bool needs_dynamic_u32_keys,
+                        bool use_half_sorted_buffers,
                         id<MTLDevice> dev) {
         if (np != fwd_num_points) {
             fwd_num_points = np;
@@ -667,8 +692,9 @@ struct FusedTensorCache {
         if (!block_totals.defined() || block_totals.size(0) < prefix_blocks) {
             block_totals = mtensor_empty(dev, {prefix_blocks}, DType::Int32);
         }
-        if (cap != capacity) {
+        if (cap != capacity || use_half_sorted_buffers != packed_sorted_half) {
             capacity = cap;
+            packed_sorted_half = use_half_sorted_buffers;
             gaussian_ids = mtensor_empty(dev, {cap}, DType::Int32);
             gaussian_ids_tmp = mtensor_empty(dev, {cap}, DType::Int32);
             isect_ids = mtensor_empty(dev, {cap}, DType::Int64);
@@ -681,9 +707,10 @@ struct FusedTensorCache {
                 isect_ids_u32_tmp.reset();
             }
             packed_xy_opac = mtensor_empty(dev, {cap, 3}, DType::Float32);
-            packed_conic = mtensor_empty(dev, {cap, 3}, DType::Float32);
-            packed_rgb = mtensor_empty(dev, {cap, 3}, DType::Float32);
-            packed_opacity_comp = mtensor_empty(dev, {cap}, DType::Float32);
+            DType sorted_dtype = use_half_sorted_buffers ? DType::Float16 : DType::Float32;
+            packed_conic = mtensor_empty(dev, {cap, 3}, sorted_dtype);
+            packed_rgb = mtensor_empty(dev, {cap, 3}, sorted_dtype);
+            packed_opacity_comp = mtensor_empty(dev, {cap}, sorted_dtype);
 
             int blocks = (int)((cap + 255) / 256);
             if (blocks != radix_block_capacity) {
@@ -1367,11 +1394,13 @@ static void forward_pipeline(
         : (int64_t)num_points * kFixedTileCapacityMultiplier;
     uint32_t channels = 3;
     uint32_t use_mip_splatting_u32 = use_mip_splatting ? 1u : 0u;
+    uint32_t use_half_sorted_buffers_u32 = should_use_half_sorted_buffers() ? 1u : 0u;
 
     // --- Cached buffer pool ---
     g_tcache.ensure_forward(num_points, capacity, img_height, img_width, num_tiles,
                             compute_loss, false, !use_dynamic_intersections,
-                            use_dynamic_u32_keys, ctx->device);
+                            use_dynamic_u32_keys, use_half_sorted_buffers_u32 != 0u,
+                            ctx->device);
     MTensor &xys = g_tcache.xys;
     MTensor &depths = g_tcache.depths;
     MTensor &radii_out = g_tcache.radii_out;
@@ -1589,6 +1618,8 @@ static void forward_pipeline(
         ENC_SCALAR(enc, capacity_u32, 10);
         ENC_BUF(enc, cum_tiles_hit, 11);
         ENC_SCALAR(enc, num_points_u32, 12);
+        bind_sorted_half_buffers(enc, packed_conic, packed_rgb, packed_opacity_comp,
+                                 use_half_sorted_buffers_u32, 13, 14, 15, 16);
         [enc dispatchThreads:MTLSizeMake(capacity_u32, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     };
 
@@ -1646,6 +1677,8 @@ static void forward_pipeline(
             ENC_BUF(enc, tile_bins, 14);
             ENC_SCALAR(enc, capacity_u32, 15);
             ENC_BUF(enc, g_tcache.overflow_flag, 16);
+            bind_sorted_half_buffers(enc, packed_conic, packed_rgb, packed_opacity_comp,
+                                     use_half_sorted_buffers_u32, 17, 18, 19, 20);
             [enc dispatchThreadgroups:MTLSizeMake(num_tiles, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
         }
     };
@@ -1666,6 +1699,8 @@ static void forward_pipeline(
         ENC_BUF(enc, final_Ts, 8); ENC_BUF(enc, final_idx, 9); ENC_BUF(enc, out_img, 10);
         ENC_BUF(enc, background, 11);
         [enc setBytes:block_size_dim2.data() length:sizeof(block_size_dim2) atIndex:12];
+        bind_sorted_half_buffers(enc, packed_conic, packed_rgb, packed_opacity_comp,
+                                 use_half_sorted_buffers_u32, 13, 14, 15, 16);
         [enc dispatchThreadgroups:num_tg threadsPerThreadgroup:tg_size];
     };
 
@@ -1686,6 +1721,8 @@ static void forward_pipeline(
         ENC_BUF(enc, g_tcache.chunk_T, 8); ENC_BUF(enc, g_tcache.chunk_C, 9); ENC_BUF(enc, g_tcache.chunk_final_idx, 10);
         ENC_SCALAR(enc, CHUNK_SIZE, 11); ENC_SCALAR(enc, K_max, 12);
         [enc setBytes:block_size_dim2.data() length:sizeof(block_size_dim2) atIndex:13];
+        bind_sorted_half_buffers(enc, packed_conic, packed_rgb, packed_opacity_comp,
+                                 use_half_sorted_buffers_u32, 14, 15, 16, 17);
         [enc dispatchThreadgroups:chunked_tg threadsPerThreadgroup:tg_size];
 
         // Phase 2: merge kernel — one thread per pixel
@@ -1752,7 +1789,8 @@ static void forward_pipeline(
         capacity = padded_dynamic_intersection_capacity(exact_intersections);
         capacity_u32 = (uint32_t)capacity;
         g_tcache.ensure_forward(num_points, capacity, img_height, img_width, num_tiles,
-                                compute_loss, false, false, use_dynamic_u32_keys, ctx->device);
+                                compute_loss, false, false, use_dynamic_u32_keys,
+                                use_half_sorted_buffers_u32 != 0u, ctx->device);
         g_tcache.mark_dynamic_capacity(num_points, img_height, img_width, num_tiles);
         did_dynamic_count_prepass = true;
     } else {
@@ -1905,11 +1943,13 @@ std::tuple<MTensor, float> msplat_train_step(
         : (int64_t)num_points * kFixedTileCapacityMultiplier;
     uint32_t channels = 3;
     uint32_t use_mip_splatting_u32 = use_mip_splatting ? 1u : 0u;
+    uint32_t use_half_sorted_buffers_u32 = should_use_half_sorted_buffers() ? 1u : 0u;
 
     // --- Cached buffer pool ---
     g_tcache.ensure_forward(num_points, capacity, img_height, img_width, num_tiles,
                             ssim_weight > 0.0f, lpips_loss_weight > 0.0f,
-                            !use_dynamic_intersections, use_dynamic_u32_keys, ctx->device);
+                            !use_dynamic_intersections, use_dynamic_u32_keys,
+                            use_half_sorted_buffers_u32 != 0u, ctx->device);
     g_tcache.ensure_backward(num_points, features_rest_bases, ctx->device);
     bool collect_backward_debug = should_collect_backward_debug();
     if (collect_backward_debug) {
@@ -2163,6 +2203,8 @@ std::tuple<MTensor, float> msplat_train_step(
         ENC_SCALAR(enc, capacity_u32, 10);
         ENC_BUF(enc, cum_tiles_hit, 11);
         ENC_SCALAR(enc, num_points_u32, 12);
+        bind_sorted_half_buffers(enc, packed_conic, packed_rgb, packed_opacity_comp,
+                                 use_half_sorted_buffers_u32, 13, 14, 15, 16);
         [enc dispatchThreads:MTLSizeMake(capacity_u32, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     };
 
@@ -2220,6 +2262,8 @@ std::tuple<MTensor, float> msplat_train_step(
             ENC_BUF(enc, tile_bins, 14);
             ENC_SCALAR(enc, capacity_u32, 15);
             ENC_BUF(enc, g_tcache.overflow_flag, 16);
+            bind_sorted_half_buffers(enc, packed_conic, packed_rgb, packed_opacity_comp,
+                                     use_half_sorted_buffers_u32, 17, 18, 19, 20);
             [enc dispatchThreadgroups:MTLSizeMake(num_tiles, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
         }
     };
@@ -2237,6 +2281,8 @@ std::tuple<MTensor, float> msplat_train_step(
             ENC_BUF(enc, final_Ts, 8); ENC_BUF(enc, final_idx, 9); ENC_BUF(enc, out_img, 10);
             ENC_BUF(enc, background, 11);
             [enc setBytes:block_size_dim2.data() length:sizeof(block_size_dim2) atIndex:12];
+            bind_sorted_half_buffers(enc, packed_conic, packed_rgb, packed_opacity_comp,
+                                     use_half_sorted_buffers_u32, 13, 14, 15, 16);
             [enc dispatchThreadgroups:num_tg threadsPerThreadgroup:MTLSizeMake(RAST_BLOCK_X, RAST_BLOCK_Y, 1)];
         } else {
             // Chunked
@@ -2253,6 +2299,8 @@ std::tuple<MTensor, float> msplat_train_step(
             ENC_BUF(enc, g_tcache.chunk_T, 8); ENC_BUF(enc, g_tcache.chunk_C, 9); ENC_BUF(enc, g_tcache.chunk_final_idx, 10);
             ENC_SCALAR(enc, CHUNK_SIZE, 11); ENC_SCALAR(enc, K_max, 12);
             [enc setBytes:block_size_dim2.data() length:sizeof(block_size_dim2) atIndex:13];
+            bind_sorted_half_buffers(enc, packed_conic, packed_rgb, packed_opacity_comp,
+                                     use_half_sorted_buffers_u32, 14, 15, 16, 17);
             [enc dispatchThreadgroups:MTLSizeMake(tile_x, tile_y, K_max) threadsPerThreadgroup:MTLSizeMake(RAST_BLOCK_X, RAST_BLOCK_Y, 1)];
             [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
             // Merge
@@ -2392,6 +2440,8 @@ std::tuple<MTensor, float> msplat_train_step(
             ENC_BUF(enc, v_refine, 16);
             ENC_BUF(enc, gt_packed, 17); ENC_SCALAR(enc, use_alpha_loss_u32, 18);
             ENC_SCALAR(enc, alpha_loss_grad_scale, 19);
+            bind_sorted_half_buffers(enc, packed_conic, packed_rgb, packed_opacity_comp,
+                                     use_half_sorted_buffers_u32, 20, 21, 22, 23);
             [enc dispatchThreadgroups:MTLSizeMake(rast_tb[0], rast_tb[1], 1)
                  threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
             return;
@@ -2413,6 +2463,8 @@ std::tuple<MTensor, float> msplat_train_step(
             ENC_BUF(enc, v_refine, 16);
             ENC_BUF(enc, gt_packed, 17); ENC_SCALAR(enc, use_alpha_loss_u32, 18);
             ENC_SCALAR(enc, alpha_loss_grad_scale, 19);
+            bind_sorted_half_buffers(enc, packed_conic, packed_rgb, packed_opacity_comp,
+                                     use_half_sorted_buffers_u32, 20, 21, 22, 23);
             [enc dispatchThreadgroups:num_tg threadsPerThreadgroup:MTLSizeMake(RAST_BLOCK_X, RAST_BLOCK_Y, 1)];
         } else {
             // Chunked backward
@@ -2448,6 +2500,8 @@ std::tuple<MTensor, float> msplat_train_step(
             ENC_SCALAR(enc, BWD_CHUNK_SIZE, 20); ENC_SCALAR(enc, bwd_K_max, 21);
             ENC_BUF(enc, gt_packed, 22); ENC_SCALAR(enc, use_alpha_loss_u32, 23);
             ENC_SCALAR(enc, alpha_loss_grad_scale, 24);
+            bind_sorted_half_buffers(enc, packed_conic, packed_rgb, packed_opacity_comp,
+                                     use_half_sorted_buffers_u32, 25, 26, 27, 28);
             [enc dispatchThreadgroups:MTLSizeMake(tile_x, tile_y, bwd_K_max) threadsPerThreadgroup:MTLSizeMake(RAST_BLOCK_X, RAST_BLOCK_Y, 1)];
         }
     };
@@ -2597,7 +2651,8 @@ std::tuple<MTensor, float> msplat_train_step(
         capacity_u32 = (uint32_t)capacity;
         g_tcache.ensure_forward(num_points, capacity, img_height, img_width, num_tiles,
                                 ssim_weight > 0.0f, lpips_loss_weight > 0.0f,
-                                false, use_dynamic_u32_keys, ctx->device);
+                                false, use_dynamic_u32_keys,
+                                use_half_sorted_buffers_u32 != 0u, ctx->device);
         g_tcache.mark_dynamic_capacity(num_points, img_height, img_width, num_tiles);
         did_dynamic_count_prepass = true;
     } else {

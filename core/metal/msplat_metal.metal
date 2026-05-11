@@ -526,6 +526,57 @@ inline void write_packed_float3(device float* arr, int idx, float3 val) {
     arr[3*idx+2] = val.z;
 }
 
+inline float3 read_packed_sorted_float3(
+    constant float* packed_float,
+    constant half* packed_half,
+    int idx,
+    uint use_half_sorted_buffers
+) {
+    if (use_half_sorted_buffers != 0) {
+        return float3(packed_half[3*idx], packed_half[3*idx+1], packed_half[3*idx+2]);
+    }
+    return read_packed_float3(packed_float, idx);
+}
+
+inline float read_packed_sorted_float(
+    constant float* packed_float,
+    constant half* packed_half,
+    int idx,
+    uint use_half_sorted_buffers
+) {
+    return use_half_sorted_buffers != 0 ? float(packed_half[idx]) : packed_float[idx];
+}
+
+inline void write_packed_sorted_float3(
+    device float* packed_float,
+    device half* packed_half,
+    int idx,
+    float3 val,
+    uint use_half_sorted_buffers
+) {
+    if (use_half_sorted_buffers != 0) {
+        packed_half[3*idx] = half(val.x);
+        packed_half[3*idx+1] = half(val.y);
+        packed_half[3*idx+2] = half(val.z);
+    } else {
+        write_packed_float3(packed_float, idx, val);
+    }
+}
+
+inline void write_packed_sorted_float(
+    device float* packed_float,
+    device half* packed_half,
+    int idx,
+    float val,
+    uint use_half_sorted_buffers
+) {
+    if (use_half_sorted_buffers != 0) {
+        packed_half[idx] = half(val);
+    } else {
+        packed_float[idx] = val;
+    }
+}
+
 inline float4 read_packed_float4(constant float* arr, int idx) {
     return float4(arr[4*idx], arr[4*idx+1], arr[4*idx+2], arr[4*idx+3]);
 }
@@ -648,6 +699,10 @@ kernel void nd_rasterize_forward_kernel(
     device float* out_img,
     constant float* background,
     constant uint2& blockDim,
+    constant half* packed_conic_half,
+    constant half* packed_rgb_half,
+    constant half* packed_opacity_comp_half,
+    constant uint& use_half_sorted_buffers,
     uint2 blockIdx [[threadgroup_position_in_grid]],
     uint2 threadIdx [[thread_position_in_threadgroup]],
     uint tr [[thread_index_in_threadgroup]]
@@ -696,11 +751,14 @@ kernel void nd_rasterize_forward_kernel(
         if (idx < range.y) {
             // Sequential reads from packed sorted-order buffers
             xy_opacity_batch[tr] = read_packed_float3(packed_xy_opac, idx);
-            conic_batch[tr] = read_packed_float3(packed_conic, idx);
+            conic_batch[tr] = read_packed_sorted_float3(
+                packed_conic, packed_conic_half, idx, use_half_sorted_buffers);
             // packed_rgb has raw SH output — clamp_min(raw + 0.5, 0)
-            const float3 raw_c = read_packed_float3(packed_rgb, idx);
+            const float3 raw_c = read_packed_sorted_float3(
+                packed_rgb, packed_rgb_half, idx, use_half_sorted_buffers);
             rgbs_batch[tr] = max(raw_c + 0.5f, 0.0f);
-            opacity_comp_batch[tr] = packed_opacity_comp[idx];
+            opacity_comp_batch[tr] = read_packed_sorted_float(
+                packed_opacity_comp, packed_opacity_comp_half, idx, use_half_sorted_buffers);
         }
         // wait for all threads to finish loading
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -1192,6 +1250,10 @@ kernel void rasterize_backward_kernel(
     constant uint* gt_packed,
     constant uint& use_alpha_loss,
     constant float& alpha_loss_grad_scale,
+    constant half* packed_conic_half,
+    constant half* packed_rgb_half,
+    constant half* packed_opacity_comp_half,
+    constant uint& use_half_sorted_buffers,
     uint3 gp [[thread_position_in_grid]],
     uint3 blockIdx [[threadgroup_position_in_grid]],
     uint tr [[thread_index_in_threadgroup]],
@@ -1274,9 +1336,12 @@ kernel void rasterize_backward_kernel(
             id_batch[tr] = gaussian_ids_sorted[idx];
             // Sequential reads from packed sorted-order buffers
             xy_opacity_batch[tr] = read_packed_float3(packed_xy_opac, idx);
-            conic_batch[tr] = read_packed_float3(packed_conic, idx);
-            rgbs_batch[tr] = read_packed_float3(packed_rgb, idx);
-            opacity_comp_batch[tr] = packed_opacity_comp[idx];
+            conic_batch[tr] = read_packed_sorted_float3(
+                packed_conic, packed_conic_half, idx, use_half_sorted_buffers);
+            rgbs_batch[tr] = read_packed_sorted_float3(
+                packed_rgb, packed_rgb_half, idx, use_half_sorted_buffers);
+            opacity_comp_batch[tr] = read_packed_sorted_float(
+                packed_opacity_comp, packed_opacity_comp_half, idx, use_half_sorted_buffers);
         }
         // wait for other threads to collect the gaussians in batch
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -1422,6 +1487,10 @@ kernel void rasterize_backward_persplat_kernel(
     constant uint* gt_packed,
     constant uint& use_alpha_loss,
     constant float& alpha_loss_grad_scale,
+    constant half* packed_conic_half,
+    constant half* packed_rgb_half,
+    constant half* packed_opacity_comp_half,
+    constant uint& use_half_sorted_buffers,
     uint3 blockIdx [[threadgroup_position_in_grid]],
     uint thread_rank [[thread_index_in_threadgroup]]
 ) {
@@ -1498,9 +1567,12 @@ kernel void rasterize_backward_persplat_kernel(
         if (splat_active) {
             gaussian_id = gaussian_ids_sorted[sorted_idx];
             xy_opac = read_packed_float3(packed_xy_opac, sorted_idx);
-            conic = read_packed_float3(packed_conic, sorted_idx);
-            raw_rgb = read_packed_float3(packed_rgb, sorted_idx);
-            opacity_comp = packed_opacity_comp[sorted_idx];
+            conic = read_packed_sorted_float3(
+                packed_conic, packed_conic_half, sorted_idx, use_half_sorted_buffers);
+            raw_rgb = read_packed_sorted_float3(
+                packed_rgb, packed_rgb_half, sorted_idx, use_half_sorted_buffers);
+            opacity_comp = read_packed_sorted_float(
+                packed_opacity_comp, packed_opacity_comp_half, sorted_idx, use_half_sorted_buffers);
         }
 
         uint num_splats_this_batch = min(SPLAT_BATCH, num_splats_in_tile - batch_idx * SPLAT_BATCH);
@@ -2684,6 +2756,10 @@ kernel void pack_sorted_gaussians_kernel(
     constant uint& N                 [[buffer(10)]],
     constant int32_t* cum_tiles_hit  [[buffer(11)]],
     constant uint& num_points        [[buffer(12)]],
+    device half* packed_conic_half   [[buffer(13)]],
+    device half* packed_rgb_half     [[buffer(14)]],
+    device half* packed_opacity_comp_half [[buffer(15)]],
+    constant uint& use_half_sorted_buffers [[buffer(16)]],
     uint idx [[thread_position_in_grid]]
 ) {
     uint actual_N = min(N, (uint)cum_tiles_hit[num_points - 1]);
@@ -2694,9 +2770,13 @@ kernel void pack_sorted_gaussians_kernel(
     float3 conic = read_packed_float3(conics, g_id);
     float3 rgb = read_packed_float3(colors, g_id);
     write_packed_float3(packed_xy_opac, idx, {xy.x, xy.y, opac});
-    write_packed_float3(packed_conic, idx, conic);
-    write_packed_float3(packed_rgb, idx, rgb);
-    packed_opacity_comp[idx] = opacity_comp[g_id];
+    write_packed_sorted_float3(
+        packed_conic, packed_conic_half, idx, conic, use_half_sorted_buffers);
+    write_packed_sorted_float3(
+        packed_rgb, packed_rgb_half, idx, rgb, use_half_sorted_buffers);
+    write_packed_sorted_float(
+        packed_opacity_comp, packed_opacity_comp_half, idx,
+        opacity_comp[g_id], use_half_sorted_buffers);
 }
 
 // ===== Tile-Local Sorting Kernels =====
@@ -2777,6 +2857,10 @@ kernel void bitonic_sort_per_tile_kernel(
     device int* tile_bins               [[buffer(14)]],
     constant uint& pack_capacity        [[buffer(15)]],
     device atomic_uint* overflow_flag   [[buffer(16)]],
+    device half* packed_conic_half      [[buffer(17)]],
+    device half* packed_rgb_half        [[buffer(18)]],
+    device half* packed_opacity_comp_half [[buffer(19)]],
+    constant uint& use_half_sorted_buffers [[buffer(20)]],
     uint tg_id [[threadgroup_position_in_grid]],
     uint tid [[thread_position_in_threadgroup]]
 ) {
@@ -2840,9 +2924,15 @@ kernel void bitonic_sort_per_tile_kernel(
         float2 xy = read_packed_float2(xys, g_id);
         float opac = 1.f / (1.f + exp(-opacities[g_id]));
         write_packed_float3(packed_xy_opac, global_idx, {xy.x, xy.y, opac});
-        write_packed_float3(packed_conic, global_idx, read_packed_float3(conics, g_id));
-        write_packed_float3(packed_rgb, global_idx, read_packed_float3(colors, g_id));
-        packed_opacity_comp[global_idx] = opacity_comp[g_id];
+        write_packed_sorted_float3(
+            packed_conic, packed_conic_half, global_idx,
+            read_packed_float3(conics, g_id), use_half_sorted_buffers);
+        write_packed_sorted_float3(
+            packed_rgb, packed_rgb_half, global_idx,
+            read_packed_float3(colors, g_id), use_half_sorted_buffers);
+        write_packed_sorted_float(
+            packed_opacity_comp, packed_opacity_comp_half, global_idx,
+            opacity_comp[g_id], use_half_sorted_buffers);
     }
 }
 
@@ -3489,6 +3579,10 @@ kernel void rasterize_forward_chunked_kernel(
     constant uint& chunk_size,
     constant uint& K_max,
     constant uint2& blockDim,
+    constant half* packed_conic_half,
+    constant half* packed_rgb_half,
+    constant half* packed_opacity_comp_half,
+    constant uint& use_half_sorted_buffers,
     uint3 blockIdx [[threadgroup_position_in_grid]],
     uint tr [[thread_index_in_threadgroup]]
 ) {
@@ -3545,10 +3639,13 @@ kernel void rasterize_forward_chunked_kernel(
         int idx = batch_start + tr;
         if (idx < chunk_end) {
             xy_opacity_batch[tr] = read_packed_float3(packed_xy_opac, idx);
-            conic_batch[tr] = read_packed_float3(packed_conic, idx);
-            const float3 raw_c = read_packed_float3(packed_rgb, idx);
+            conic_batch[tr] = read_packed_sorted_float3(
+                packed_conic, packed_conic_half, idx, use_half_sorted_buffers);
+            const float3 raw_c = read_packed_sorted_float3(
+                packed_rgb, packed_rgb_half, idx, use_half_sorted_buffers);
             rgbs_batch[tr] = max(raw_c + 0.5f, 0.0f);
-            opacity_comp_batch[tr] = packed_opacity_comp[idx];
+            opacity_comp_batch[tr] = read_packed_sorted_float(
+                packed_opacity_comp, packed_opacity_comp_half, idx, use_half_sorted_buffers);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -3719,6 +3816,10 @@ kernel void rasterize_backward_chunked_kernel(
     constant uint* gt_packed,
     constant uint& use_alpha_loss,
     constant float& alpha_loss_grad_scale,
+    constant half* packed_conic_half,
+    constant half* packed_rgb_half,
+    constant half* packed_opacity_comp_half,
+    constant uint& use_half_sorted_buffers,
     uint3 gp [[thread_position_in_grid]],
     uint3 blockIdx [[threadgroup_position_in_grid]],
     uint tr [[thread_index_in_threadgroup]],
@@ -3804,9 +3905,12 @@ kernel void rasterize_backward_chunked_kernel(
         if (idx >= chunk_start) {
             id_batch[tr] = gaussian_ids_sorted[idx];
             xy_opacity_batch[tr] = read_packed_float3(packed_xy_opac, idx);
-            conic_batch[tr] = read_packed_float3(packed_conic, idx);
-            rgbs_batch[tr] = read_packed_float3(packed_rgb, idx);
-            opacity_comp_batch[tr] = packed_opacity_comp[idx];
+            conic_batch[tr] = read_packed_sorted_float3(
+                packed_conic, packed_conic_half, idx, use_half_sorted_buffers);
+            rgbs_batch[tr] = read_packed_sorted_float3(
+                packed_rgb, packed_rgb_half, idx, use_half_sorted_buffers);
+            opacity_comp_batch[tr] = read_packed_sorted_float(
+                packed_opacity_comp, packed_opacity_comp_half, idx, use_half_sorted_buffers);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 

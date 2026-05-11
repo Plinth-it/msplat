@@ -21,6 +21,7 @@ typedef void* MTLBufferRef;  // opaque handle in pure C++
 
 enum class DType : uint8_t {
     Float32,
+    Float16,
     Int32,
     Int64,
     UInt8,
@@ -31,6 +32,7 @@ enum class DType : uint8_t {
 inline size_t dtypeSize(DType dt) {
     switch (dt) {
         case DType::Float32: return 4;
+        case DType::Float16: return 2;
         case DType::Int32:   return 4;
         case DType::Int64:   return 8;
         case DType::UInt8:   return 1;

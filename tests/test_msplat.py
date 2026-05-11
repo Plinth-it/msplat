@@ -278,7 +278,7 @@ def test_metal_uses_dynamic_global_intersections():
     assert "did_dynamic_count_prepass" in host_source
     assert "padded_dynamic_intersection_capacity" in host_source
     assert "(tile_id << 32) | depth_bits" in shader_source
-    assert "packed_opacity_comp[idx] = opacity_comp[g_id]" in shader_source
+    assert "write_packed_sorted_float(" in shader_source
 
 
 def test_tile_bin_edges_close_last_tile_transition():
@@ -353,6 +353,27 @@ def test_project_sh_kernels_use_function_constant_specialization():
     assert "project_sh_forward_pipeline(" in host_source
     assert "project_sh_backward_pipeline(" in host_source
     assert "newFunctionWithName:function_name" in host_source
+
+
+def test_metal_supports_opt_in_half_sorted_buffers():
+    repo_root = Path(__file__).resolve().parents[1]
+    host_source = (repo_root / "core" / "metal" / "msplat_metal.mm").read_text(encoding="utf-8")
+    shader_source = (repo_root / "core" / "metal" / "msplat_metal.metal").read_text(encoding="utf-8")
+    tensor_header = (repo_root / "core" / "include" / "metal_tensor.hpp").read_text(encoding="utf-8")
+
+    assert "Float16" in tensor_header
+    assert "case DType::Float16: return 2;" in tensor_header
+    assert "MSPLAT_HALF_SORTED_BUFFERS" in host_source
+    assert "packed_sorted_half" in host_source
+    assert "bind_sorted_half_buffers" in host_source
+    assert "use_half_sorted_buffers_u32" in host_source
+    assert "DType sorted_dtype = use_half_sorted_buffers ? DType::Float16 : DType::Float32" in host_source
+
+    assert "read_packed_sorted_float3" in shader_source
+    assert "write_packed_sorted_float3" in shader_source
+    assert "constant half* packed_conic_half" in shader_source
+    assert "device half* packed_conic_half" in shader_source
+    assert "constant uint& use_half_sorted_buffers" in shader_source
 
 
 def test_backward_rasterizer_benchmark_script_wires_profile_ab():
