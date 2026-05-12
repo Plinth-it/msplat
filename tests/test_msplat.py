@@ -560,6 +560,9 @@ def test_backward_rasterizer_benchmark_script_supports_production_ab():
     assert "PROFILE_STAGES_REPORT_EVERY" in script
     assert "parse_duration" in script
     assert "training_ips" in script
+    assert "Sync diagnostics" in script
+    assert "flag_sync_readback_max_ms" in script
+    assert "cpu_pre_refine_drain_max_ms" in script
 
 
 def test_benchmark_script_supports_async_submit_timing_mode():
@@ -590,6 +593,7 @@ def test_benchmark_script_supports_async_submit_timing_mode():
     assert "CPU submit phases" in cli
     assert "full_iteration" in cli
     assert "pre_refine_drain" in cli
+    assert "flag_sync_readback" in script
     assert "shouldRefineAfterTrain" in model_header
     assert "after_train refine subphases" in cli
     assert "refine_prepare_flags" in cli
@@ -665,6 +669,81 @@ print("  training loop: 1.0 s (1 steps, 1.0 it/s)")
     assert summary["timing_mode"] == "wall-only"
     assert summary["drain_interval"] == 16
     assert summary["pre_refine_drain"] is False
+
+
+def test_backward_rasterizer_summary_extracts_sync_diagnostics():
+    repo_root = Path(__file__).resolve().parents[1]
+    script = repo_root / "scripts" / "benchmark_backward_rasterizers.py"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        fake_binary = tmp_path / "fake_msplat.py"
+        fake_binary.write_text(
+            """#!/usr/bin/env python3
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+output = Path(args[args.index("--output") + 1])
+output.parent.mkdir(parents=True, exist_ok=True)
+print("=== Benchmark (1 iters, 0 warmup, 1.0s total) ===")
+print("  mean:   3.0 ms/iter")
+print("  median: 0.5 ms/iter")
+print("  forced syncs:  9")
+print("  forced sync reasons:")
+print("    overflow-check: 3")
+print("    pre-refine-drain: 2")
+print("    refine-flags-readback: 2")
+print("")
+print("  --- CPU submit phases ---")
+print("  full_iteration: mean=1.0  median=0.1  p95=2.0  max=99.0 ms")
+print("  after_train: mean=0.2  median=0.0  p95=0.0  max=8.0 ms")
+print("  pre_refine_drain: mean=0.3  median=0.0  p95=0.0  max=123.0 ms")
+print("")
+print("  --- refine flag preparation subphases (refine events only) ---")
+print("  flag_sync_readback: mean=5.0  median=5.0  p95=7.0  max=7.0 ms")
+print("Progress: 100.0% (1/1)  10 gaussians  1.0 it/s")
+print("  training loop: 1.0 s (1 steps, 1.0 it/s)")
+""",
+            encoding="utf-8",
+        )
+        os.chmod(fake_binary, 0o755)
+        output_dir = tmp_path / "bench"
+
+        result = subprocess.run(
+            [
+                "python3",
+                str(script),
+                "/tmp/dataset",
+                "--binary",
+                str(fake_binary),
+                "--output-dir",
+                str(output_dir),
+                "--modes",
+                "auto",
+                "--timing-mode",
+                "async-submit",
+                "--pre-refine-drain",
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        summary = json.loads((output_dir / "summary.json").read_text(encoding="utf-8"))
+
+    row = summary["results"][0]
+    assert summary["pre_refine_drain"] is True
+    assert row["forced_syncs"] == 9
+    assert row["forced_sync_reasons"]["pre-refine-drain"] == 2
+    assert row["cpu_pre_refine_drain_max_ms"] == 123.0
+    assert row["cpu_after_train_max_ms"] == 8.0
+    assert row["cpu_full_iteration_max_ms"] == 99.0
+    assert row["flag_sync_readback_mean_ms"] == 5.0
+    assert row["flag_sync_readback_max_ms"] == 7.0
+    assert "Sync diagnostics" in result.stdout
+    assert "| auto | 9 | 7.000 | 123.000 | 8.000 | 99.000 | 3 | 2 | 2 |" in result.stdout
 
 
 def test_backward_rasterizer_stage_report_interval_enables_stage_profile():

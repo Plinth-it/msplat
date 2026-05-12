@@ -234,6 +234,12 @@ def parse_metrics(log_text: str) -> dict[str, object]:
         "cpu_after_train_max_ms": parse_phase_stat(log_text, "after_train", "max"),
         "cpu_commit_p95_ms": parse_phase_stat(log_text, "commit", "p95"),
         "cpu_commit_max_ms": parse_phase_stat(log_text, "commit", "max"),
+        "cpu_pre_refine_drain_p95_ms": parse_phase_stat(log_text, "pre_refine_drain", "p95"),
+        "cpu_pre_refine_drain_max_ms": parse_phase_stat(log_text, "pre_refine_drain", "max"),
+        "refine_prepare_flags_mean_ms": parse_phase_stat(log_text, "refine_prepare_flags", "mean"),
+        "refine_prepare_flags_max_ms": parse_phase_stat(log_text, "refine_prepare_flags", "max"),
+        "flag_sync_readback_mean_ms": parse_phase_stat(log_text, "flag_sync_readback", "mean"),
+        "flag_sync_readback_max_ms": parse_phase_stat(log_text, "flag_sync_readback", "max"),
         "gpu_stage_total_median_ms": parse_float(r"^\s*TOTAL \(sum medians\)\s+([0-9.]+)ms", log_text),
         "loss_fwd_bwd_median_ms": parse_float(r"^\s*loss_fwd_bwd\s+median=([0-9.]+)ms", log_text),
         "rast_bwd_median_ms": parse_float(r"^\s*rast_bwd\s+median=([0-9.]+)ms", log_text),
@@ -495,8 +501,46 @@ def print_table(results: list[dict[str, object]], output_dir: Path) -> None:
                 sat_px=fmt(row["saturated_pixels"], 1),
             )
         )
+    print_sync_diagnostics(results)
     print_baseline_deltas(results)
     print_quality_warnings(results)
+
+
+def forced_sync_reason_count(row: dict[str, object], reason: str) -> int | None:
+    reasons = row.get("forced_sync_reasons")
+    if not isinstance(reasons, dict):
+        return None
+    count = reasons.get(reason)
+    return int(count) if isinstance(count, int) else None
+
+
+def print_sync_diagnostics(results: list[dict[str, object]]) -> None:
+    if not any(
+        row.get("forced_syncs")
+        or row.get("flag_sync_readback_max_ms") is not None
+        or row.get("cpu_pre_refine_drain_max_ms") is not None
+        for row in results
+    ):
+        return
+
+    print()
+    print("Sync diagnostics:")
+    print("| mode | forced syncs | flag sync max ms | pre-drain max ms | after_train max ms | full_iteration max ms | overflow checks | flag readbacks | pre-drains |")
+    print("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
+    for row in results:
+        print(
+            "| {mode} | {forced} | {flag_sync} | {pre_drain} | {after_train} | {full_iter} | {overflow} | {flag_reads} | {pre_drains} |".format(
+                mode=row["mode"],
+                forced=fmt(row.get("forced_syncs"), 0),
+                flag_sync=fmt(row.get("flag_sync_readback_max_ms")),
+                pre_drain=fmt(row.get("cpu_pre_refine_drain_max_ms")),
+                after_train=fmt(row.get("cpu_after_train_max_ms")),
+                full_iter=fmt(row.get("cpu_full_iteration_max_ms")),
+                overflow=fmt(forced_sync_reason_count(row, "overflow-check"), 0),
+                flag_reads=fmt(forced_sync_reason_count(row, "refine-flags-readback"), 0),
+                pre_drains=fmt(forced_sync_reason_count(row, "pre-refine-drain"), 0),
+            )
+        )
 
 
 def print_baseline_deltas(results: list[dict[str, object]]) -> None:
