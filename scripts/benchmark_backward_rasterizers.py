@@ -42,9 +42,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--timing-mode",
-        choices=["drain-each-iter", "async-submit", "drain-every-n"],
-        default="async-submit",
-        help="Benchmark per-iteration GPU drains, fully async submit, or bounded async submit with periodic drains.",
+        choices=["wall-only", "drain-each-iter", "async-submit", "drain-every-n"],
+        default="wall-only",
+        help="Benchmark wall-clock production throughput, per-iteration GPU drains, async submit, or bounded async submit.",
     )
     parser.add_argument(
         "--drain-interval",
@@ -188,6 +188,11 @@ def parse_metrics(log_text: str) -> dict[str, object]:
         log_text,
         re.DOTALL,
     )
+    wall_only_benchmark = re.search(
+        r"=== Benchmark .*?wall mean:\s+([0-9.]+) ms/iter",
+        log_text,
+        re.DOTALL,
+    )
     training = re.search(
         r"training loop:\s+(.+?)\s+\(([0-9]+) steps,\s+([0-9.]+) it/s\)",
         log_text,
@@ -207,7 +212,7 @@ def parse_metrics(log_text: str) -> dict[str, object]:
     saturated_pixels = re.search(r"saturated pixels: ([0-9.]+)/sample", log_text)
 
     return {
-        "iter_mean_ms": float(benchmark.group(1)) if benchmark else None,
+        "iter_mean_ms": float(benchmark.group(1)) if benchmark else (float(wall_only_benchmark.group(1)) if wall_only_benchmark else None),
         "iter_median_ms": float(benchmark.group(2)) if benchmark else None,
         "training_seconds": parse_duration(training.group(1).strip()) if training else None,
         "training_steps": int(training.group(2)) if training else None,

@@ -834,9 +834,11 @@ int main(int argc, char *argv[]) {
         const char *timingModeEnv = std::getenv("MSPLAT_BENCHMARK_TIMING_MODE");
         const std::string benchmarkTimingMode = timingModeEnv != nullptr
             ? std::string(timingModeEnv)
-            : std::string("drain-each-iter");
+            : std::string("wall-only");
+        const bool benchmarkWallOnly = benchmarkTimingMode == "wall-only";
         const bool benchmarkAsyncSubmit = benchmarkTimingMode == "async-submit";
         const bool benchmarkDrainEveryN = benchmarkTimingMode == "drain-every-n";
+        const bool benchmarkCollectSamples = benchmarking && !benchmarkWallOnly;
         int benchmarkDrainInterval = 16;
         if (const char *drainIntervalEnv = std::getenv("MSPLAT_BENCHMARK_DRAIN_INTERVAL")) {
             int parsed = std::atoi(drainIntervalEnv);
@@ -848,7 +850,7 @@ int main(int argc, char *argv[]) {
         std::vector<double> bench_iter_ms, bench_cpu_ms, bench_drain_ms;
         std::vector<double> bench_prepare_ms, bench_full_iteration_ms;
         std::vector<double> bench_schedulers_ms, bench_after_train_ms, bench_commit_ms;
-        if (benchmarking) {
+        if (benchmarkCollectSamples) {
             bench_iter_ms.reserve(numIters);
             bench_cpu_ms.reserve(numIters);
             bench_drain_ms.reserve(numIters);
@@ -865,7 +867,13 @@ int main(int argc, char *argv[]) {
         for (; step <= (size_t)numIters; step++) {
             Camera &cam = cams[camsPrefetcher.next()];
 
-            auto iter_start = cpu_now();
+            std::chrono::high_resolution_clock::time_point iter_start;
+            std::chrono::high_resolution_clock::time_point after_prepare;
+            std::chrono::high_resolution_clock::time_point after_full_iteration;
+            std::chrono::high_resolution_clock::time_point after_schedulers;
+            std::chrono::high_resolution_clock::time_point after_train;
+            std::chrono::high_resolution_clock::time_point after_commit;
+            if (benchmarkCollectSamples) iter_start = cpu_now();
             int downscale = model.getDownscaleFactor(step);
             std::array<float, 3> stepBg = sampleBackground();
             MTensor &gtPacked = cam.getGPUPackedImage(downscale);
@@ -877,19 +885,19 @@ int main(int argc, char *argv[]) {
             bool useAlphaLoss = !useLossMask && cam.imageHasAlpha();
             bool compositeGt = cam.hasCompositeAlpha()
                 && (stepBg[0] != 0.0f || stepBg[1] != 0.0f || stepBg[2] != 0.0f);
-            auto after_prepare = cpu_now();
+            if (benchmarkCollectSamples) after_prepare = cpu_now();
             model.fullIteration(cam, step, gtPacked, useLossMask, lossMaskMean,
                                 useAlphaLoss, matchAlphaWeight, stepBg.data(), compositeGt,
                                 ssimWeight, lpipsLossWeight);
-            auto after_full_iteration = cpu_now();
+            if (benchmarkCollectSamples) after_full_iteration = cpu_now();
             model.schedulersStep(step);
-            auto after_schedulers = cpu_now();
+            if (benchmarkCollectSamples) after_schedulers = cpu_now();
             model.afterTrain(step);
-            auto after_train = cpu_now();
+            if (benchmarkCollectSamples) after_train = cpu_now();
             msplat_commit();
-            auto after_commit = cpu_now();
+            if (benchmarkCollectSamples) after_commit = cpu_now();
 
-            if (benchmarking && step > (size_t)bench_warmup) {
+            if (benchmarkCollectSamples && step > (size_t)bench_warmup) {
                 auto pre_sync = after_commit;
                 bool shouldDrain = !benchmarkAsyncSubmit
                     && (!benchmarkDrainEveryN
@@ -950,14 +958,37 @@ int main(int argc, char *argv[]) {
                 imwriteRGB((fs::path(valRender) / (std::to_string(step) + ".png")).string(), valImg);
             }
         }
-        if (benchmarking && (benchmarkAsyncSubmit || benchmarkDrainEveryN)) {
+        if (benchmarking && (benchmarkWallOnly || benchmarkAsyncSubmit || benchmarkDrainEveryN)) {
             msplat_gpu_sync();
             msplat_consume_training_overflow_flag_after_sync();
         }
         const auto trainingEnd = CliClock::now();
         const auto finalizationStart = CliClock::now();
 
-        if (benchmarking && !bench_iter_ms.empty()) {
+        if (benchmarking && benchmarkWallOnly) {
+            clearImageLoadingStatusLine();
+            const double total_s = secondsBetween(trainingStart, trainingEnd);
+            const size_t wallSteps = plannedTrainingSteps;
+            const double mean_ms = wallSteps > 0 ? total_s * 1000.0 / static_cast<double>(wallSteps) : 0.0;
+            std::cout << "\n=== Benchmark (" << wallSteps << " iters, wall-only, " << total_s << "s total) ===\n";
+            std::cout << "  wall mean: " << mean_ms << " ms/iter\n";
+            std::cout << "  wall:      " << total_s << "s for " << wallSteps << " iters\n";
+            std::cout << "  timing mode: wall-only production throughput (no per-iteration CPU samples; includes final GPU drain)\n";
+
+            std::vector<ForcedSyncStat> forcedSyncStats = msplat_drain_forced_sync_counts();
+            uint64_t forcedSyncs = 0;
+            for (const auto &stat : forcedSyncStats) {
+                forcedSyncs += stat.count;
+            }
+            std::cout << "\n  --- Forced syncs ---\n";
+            std::cout << "  forced syncs:  " << forcedSyncs << "\n";
+            if (!forcedSyncStats.empty()) {
+                std::cout << "  forced sync reasons:\n";
+                for (const auto &stat : forcedSyncStats) {
+                    std::cout << "    " << stat.reason << ": " << stat.count << "\n";
+                }
+            }
+        } else if (benchmarking && !bench_iter_ms.empty()) {
             clearImageLoadingStatusLine();
             auto bench_end = cpu_now();
             double total_s = std::chrono::duration_cast<std::chrono::milliseconds>(bench_end - bench_start).count() / 1000.0;
