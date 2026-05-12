@@ -836,6 +836,14 @@ int main(int argc, char *argv[]) {
             ? std::string(timingModeEnv)
             : std::string("drain-each-iter");
         const bool benchmarkAsyncSubmit = benchmarkTimingMode == "async-submit";
+        const bool benchmarkDrainEveryN = benchmarkTimingMode == "drain-every-n";
+        int benchmarkDrainInterval = 16;
+        if (const char *drainIntervalEnv = std::getenv("MSPLAT_BENCHMARK_DRAIN_INTERVAL")) {
+            int parsed = std::atoi(drainIntervalEnv);
+            if (parsed > 0) {
+                benchmarkDrainInterval = parsed;
+            }
+        }
         int bench_warmup = 50;
         std::vector<double> bench_iter_ms, bench_cpu_ms, bench_drain_ms;
         std::vector<double> bench_prepare_ms, bench_full_iteration_ms;
@@ -883,8 +891,12 @@ int main(int argc, char *argv[]) {
 
             if (benchmarking && step > (size_t)bench_warmup) {
                 auto pre_sync = after_commit;
-                if (!benchmarkAsyncSubmit) {
+                bool shouldDrain = !benchmarkAsyncSubmit
+                    && (!benchmarkDrainEveryN
+                        || ((step - firstTrainingStep + 1) % static_cast<size_t>(benchmarkDrainInterval)) == 0);
+                if (shouldDrain) {
                     msplat_gpu_sync();
+                    msplat_consume_training_overflow_flag_after_sync();
                 }
                 auto iter_end = cpu_now();
                 double iter_ms = std::chrono::duration_cast<std::chrono::microseconds>(iter_end - iter_start).count() / 1000.0;
@@ -938,8 +950,9 @@ int main(int argc, char *argv[]) {
                 imwriteRGB((fs::path(valRender) / (std::to_string(step) + ".png")).string(), valImg);
             }
         }
-        if (benchmarking && benchmarkAsyncSubmit) {
+        if (benchmarking && (benchmarkAsyncSubmit || benchmarkDrainEveryN)) {
             msplat_gpu_sync();
+            msplat_consume_training_overflow_flag_after_sync();
         }
         const auto trainingEnd = CliClock::now();
         const auto finalizationStart = CliClock::now();
@@ -970,6 +983,8 @@ int main(int argc, char *argv[]) {
             std::cout << "  timing mode: " << benchmarkTimingMode;
             if (benchmarkAsyncSubmit) {
                 std::cout << " (per-iter samples measure CPU submit; wall includes final GPU drain)";
+            } else if (benchmarkDrainEveryN) {
+                std::cout << " (bounded async submit; drains every " << benchmarkDrainInterval << " iterations)";
             }
             std::cout << "\n";
 

@@ -42,9 +42,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--timing-mode",
-        choices=["drain-each-iter", "async-submit"],
+        choices=["drain-each-iter", "async-submit", "drain-every-n"],
         default="async-submit",
-        help="Benchmark either per-iteration GPU drain timing or async CPU submit throughput.",
+        help="Benchmark per-iteration GPU drains, fully async submit, or bounded async submit with periodic drains.",
+    )
+    parser.add_argument(
+        "--drain-interval",
+        type=int,
+        default=16,
+        help="Iteration interval for --timing-mode drain-every-n.",
     )
     parser.add_argument(
         "--debug",
@@ -121,6 +127,8 @@ def parse_args() -> argparse.Namespace:
     args.msplat_args = clean_extra_args(extra_args)
     if args.stage_report_every is not None:
         args.profile_stages = True
+    if args.drain_interval <= 0:
+        parser.error("--drain-interval must be positive")
     return args
 
 
@@ -309,6 +317,7 @@ def run_mode(
     env = os.environ.copy()
     env["BENCHMARK"] = "1"
     env["MSPLAT_BENCHMARK_TIMING_MODE"] = args.timing_mode
+    env["MSPLAT_BENCHMARK_DRAIN_INTERVAL"] = str(args.drain_interval)
     if args.profile_stages:
         env["PROFILE_STAGES"] = "1"
         if args.stage_report_every:
@@ -560,6 +569,7 @@ def write_summary(args: argparse.Namespace, results: list[dict[str, object]], ou
         "profile_stages": args.profile_stages,
         "profile_mode": "stage" if args.profile_stages else "production",
         "timing_mode": args.timing_mode,
+        "drain_interval": args.drain_interval,
         "debug": args.debug,
         "quality_metrics": args.quality_metrics,
         "project_sh_specialization": args.project_sh_specialization,

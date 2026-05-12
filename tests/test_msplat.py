@@ -569,12 +569,18 @@ def test_benchmark_script_supports_async_submit_timing_mode():
     model_header = (repo_root / "core" / "include" / "model.hpp").read_text(encoding="utf-8")
 
     assert "--timing-mode" in script
+    assert "--drain-interval" in script
     assert "MSPLAT_BENCHMARK_TIMING_MODE" in script
+    assert "MSPLAT_BENCHMARK_DRAIN_INTERVAL" in script
     assert "MSPLAT_BENCHMARK_TIMING_MODE" in cli
+    assert "MSPLAT_BENCHMARK_DRAIN_INTERVAL" in cli
     assert "async-submit" in cli
     assert "drain-each-iter" in cli
+    assert "drain-every-n" in cli
     assert "timing mode:" in cli
     assert "wall includes final GPU drain" in cli
+    assert "bounded async submit" in cli
+    assert "msplat_consume_training_overflow_flag_after_sync" in cli
     assert "CPU submit phases" in cli
     assert "full_iteration" in cli
     assert "after_train refine subphases" in cli
@@ -607,6 +613,7 @@ output.parent.mkdir(parents=True, exist_ok=True)
     "profile_stages": os.environ.get("PROFILE_STAGES"),
     "backward_debug": os.environ.get("MSPLAT_BACKWARD_DEBUG"),
     "timing_mode": os.environ.get("MSPLAT_BENCHMARK_TIMING_MODE"),
+    "drain_interval": os.environ.get("MSPLAT_BENCHMARK_DRAIN_INTERVAL"),
 }), encoding="utf-8")
 print("=== Benchmark fake ===")
 print("mean: 1.0 ms/iter")
@@ -643,10 +650,12 @@ print("  training loop: 1.0 s (1 steps, 1.0 it/s)")
     assert env["profile_stages"] is None
     assert env["backward_debug"] is None
     assert env["timing_mode"] == "async-submit"
+    assert env["drain_interval"] == "16"
     assert summary["profile_stages"] is False
     assert summary["profile_mode"] == "production"
     assert summary["debug"] is False
     assert summary["timing_mode"] == "async-submit"
+    assert summary["drain_interval"] == 16
 
 
 def test_backward_rasterizer_stage_report_interval_enables_stage_profile():
