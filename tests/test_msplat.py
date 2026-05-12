@@ -579,7 +579,11 @@ def test_benchmark_script_supports_async_submit_timing_mode():
     assert "full_iteration" in cli
     assert "after_train refine subphases" in cli
     assert "refine_prepare_flags" in cli
+    assert "refine flag preparation subphases" in cli
+    assert "flag_sync_readback" in cli
+    assert "flag_grow_sample" in cli
     assert "benchmarkRefinePrepareFlagsMs" in model_header
+    assert "benchmarkRefineFlagGrowSampleMs" in model_header
 
 
 def test_backward_rasterizer_benchmark_defaults_to_production_throughput():

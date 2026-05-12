@@ -529,14 +529,27 @@ void weightedSampleWithoutReplacement(
 }
 
 float Model::prepareBrushRefineFlags(int step, int checkScreen, bool allowGrowth, float cullCenter[3]) {
+    bool benchmarkRefine = benchmarkRefinePhasesEnabled();
+    auto now = []() { return std::chrono::high_resolution_clock::now(); };
+    auto elapsedMs = [](auto start, auto end) {
+        return std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
+    };
+    auto mark = [&]() {
+        return benchmarkRefine ? now() : std::chrono::high_resolution_clock::time_point{};
+    };
+
+    auto tSync0 = mark();
     msplat_gpu_sync_named("refine-flags-readback");
     msplat_consume_training_overflow_flag_after_sync();
+    auto tSync1 = mark();
 
     int N = num_active;
     int32_t *split = densify_split_flag.data<int32_t>();
     int32_t *dup = densify_dup_flag.data<int32_t>();
+    auto tZero0 = mark();
     std::fill(split, split + N, 0);
     std::fill(dup, dup + N, 0);
+    auto tZero1 = mark();
 
     const float *meansPtr = means.data<float>();
     const float *scalesPtr = scales.data<float>();
@@ -547,6 +560,7 @@ float Model::prepareBrushRefineFlags(int step, int checkScreen, bool allowGrowth
     const float *gradPtr = xysGradNorm.data<float>();
     const float *screenPtr = max2DSize.data<float>();
 
+    auto tBounds0 = mark();
     auto &xs = refineScratchX;
     auto &ys = refineScratchY;
     auto &zs = refineScratchZ;
@@ -576,6 +590,7 @@ float Model::prepareBrushRefineFlags(int step, int checkScreen, bool allowGrowth
     } else {
         cullCenter[0] = cullCenter[1] = cullCenter[2] = 0.0f;
     }
+    auto tBounds1 = mark();
 
     auto &pruned = refineScratchPruned;
     auto &selected = refineScratchSelected;
@@ -621,9 +636,11 @@ float Model::prepareBrushRefineFlags(int step, int checkScreen, bool allowGrowth
             thresholdCount++;
         }
     }
+    auto tClassify1 = mark();
 
     std::mt19937 rng((uint32_t)step);
 
+    auto tPruneSample0 = mark();
     auto &weights = refineScratchWeights;
     weights.assign(N, 0.0f);
     for (int i = 0; i < N; ++i) {
@@ -632,7 +649,9 @@ float Model::prepareBrushRefineFlags(int step, int checkScreen, bool allowGrowth
         weights[i] = std::isfinite(opacity) ? opacity * visPtr[i] : 0.0f;
     }
     weightedSampleWithoutReplacement(weights, prunedCount, selected, rng, refineScratchSampleKeys);
+    auto tPruneSample1 = mark();
 
+    auto tScreenSelect0 = mark();
     int selectedCount = 0;
     for (uint8_t flag : selected) selectedCount += flag ? 1 : 0;
     int currentAfterPrune = N - prunedCount + selectedCount;
@@ -647,7 +666,9 @@ float Model::prepareBrushRefineFlags(int step, int checkScreen, bool allowGrowth
             }
         }
     }
+    auto tScreenSelect1 = mark();
 
+    auto tGrowSample0 = mark();
     int growCount = 0;
     if (allowGrowth) {
         growCount = (int)std::round((float)thresholdCount * growthSelectFraction);
@@ -665,10 +686,24 @@ float Model::prepareBrushRefineFlags(int step, int checkScreen, bool allowGrowth
         }
         weightedSampleWithoutReplacement(weights, growCount, selected, rng, refineScratchSampleKeys);
     }
+    auto tGrowSample1 = mark();
 
+    auto tWrite0 = mark();
     for (int i = 0; i < N; ++i) {
         split[i] = selected[i] ? 1 : 0;
         dup[i] = 0;
+    }
+    auto tWrite1 = mark();
+
+    if (benchmarkRefine) {
+        benchmarkRefineFlagSyncMs.push_back(elapsedMs(tSync0, tSync1));
+        benchmarkRefineFlagZeroMs.push_back(elapsedMs(tZero0, tZero1));
+        benchmarkRefineFlagBoundsMs.push_back(elapsedMs(tBounds0, tBounds1));
+        benchmarkRefineFlagClassifyMs.push_back(elapsedMs(tBounds1, tClassify1));
+        benchmarkRefineFlagPruneSampleMs.push_back(elapsedMs(tPruneSample0, tPruneSample1));
+        benchmarkRefineFlagScreenSelectMs.push_back(elapsedMs(tScreenSelect0, tScreenSelect1));
+        benchmarkRefineFlagGrowSampleMs.push_back(elapsedMs(tGrowSample0, tGrowSample1));
+        benchmarkRefineFlagWriteMs.push_back(elapsedMs(tWrite0, tWrite1));
     }
 
     return maxAllowedBounds;

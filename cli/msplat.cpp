@@ -1032,6 +1032,17 @@ int main(int argc, char *argv[]) {
                 print_phase("refine_reset_opacity", model.benchmarkRefineResetOpacityMs);
                 print_phase("refine_apply_decay", model.benchmarkRefineApplyDecayMs);
             }
+            if (!model.benchmarkRefineFlagSyncMs.empty()) {
+                std::cout << "\n  --- refine flag preparation subphases (refine events only) ---\n";
+                print_phase("flag_sync_readback", model.benchmarkRefineFlagSyncMs);
+                print_phase("flag_zero", model.benchmarkRefineFlagZeroMs);
+                print_phase("flag_bounds", model.benchmarkRefineFlagBoundsMs);
+                print_phase("flag_classify", model.benchmarkRefineFlagClassifyMs);
+                print_phase("flag_prune_sample", model.benchmarkRefineFlagPruneSampleMs);
+                print_phase("flag_screen_select", model.benchmarkRefineFlagScreenSelectMs);
+                print_phase("flag_grow_sample", model.benchmarkRefineFlagGrowSampleMs);
+                print_phase("flag_write", model.benchmarkRefineFlagWriteMs);
+            }
 
             // GPU timing from completion handlers (PROFILE_GPU=1)
             std::vector<double> gpu_times;

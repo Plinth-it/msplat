@@ -56,6 +56,14 @@ struct Model{
   std::vector<double> benchmarkRefineUpdateSceneScaleMs;
   std::vector<double> benchmarkRefineResetOpacityMs;
   std::vector<double> benchmarkRefineApplyDecayMs;
+  std::vector<double> benchmarkRefineFlagSyncMs;
+  std::vector<double> benchmarkRefineFlagZeroMs;
+  std::vector<double> benchmarkRefineFlagBoundsMs;
+  std::vector<double> benchmarkRefineFlagClassifyMs;
+  std::vector<double> benchmarkRefineFlagPruneSampleMs;
+  std::vector<double> benchmarkRefineFlagScreenSelectMs;
+  std::vector<double> benchmarkRefineFlagGrowSampleMs;
+  std::vector<double> benchmarkRefineFlagWriteMs;
   struct CamSetup {
     float fx, fy, cx, cy;
     int height, width, degree, degreesToUse;
