@@ -730,8 +730,8 @@ void Model::afterTrain(int step, int phaseStep, int phaseTotal){
             constexpr float resetLogit = -1.3862943611198906f;
             msplat_reset_opacity(num_active, opacities, resetLogit);
 
-            adam_exp_avg[5].zero();
-            adam_exp_avg_sq[5].zero();
+            msplat_zero_tensor(adam_exp_avg[5]);
+            msplat_zero_tensor(adam_exp_avg_sq[5]);
             fprintf(stderr, "Opacity reset at step %d\n", step);
         }
 

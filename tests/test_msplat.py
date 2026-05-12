@@ -758,7 +758,11 @@ def test_opacity_reset_runs_on_gpu_without_readback_sync():
 
     assert 'msplat_gpu_sync_named("opacity-reset-readback")' not in model_source
     assert "msplat_reset_opacity(num_active, opacities, resetLogit)" in model_source
+    assert "msplat_zero_tensor(adam_exp_avg[5])" in model_source
+    assert "adam_exp_avg[5].zero()" not in model_source
     assert "void msplat_reset_opacity" in bindings
+    assert "void msplat_zero_tensor" in bindings
+    assert "void msplat_zero_tensor(MTensor &tensor)" in host
     assert "reset_opacity_kernel_cpso" in host
     assert "kernel void reset_opacity_kernel" in shader
 

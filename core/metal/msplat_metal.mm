@@ -899,6 +899,18 @@ void msplat_reset_opacity(int num_points, MTensor &opacities, float reset_logit)
     [enc endEncoding];
 }
 
+void msplat_zero_tensor(MTensor &tensor) {
+    if (!tensor.defined() || tensor.nbytes() == 0) {
+        return;
+    }
+
+    MetalContext* ctx = get_global_context();
+    id<MTLCommandBuffer> command_buffer = ctx->getCommandBuffer();
+    id<MTLBlitCommandEncoder> blit = [command_buffer blitCommandEncoder];
+    [blit fillBuffer:tensor.buffer() range:NSMakeRange(0, tensor.nbytes()) value:0];
+    [blit endEncoding];
+}
+
 #define RAST_BLOCK_X 8
 #define RAST_BLOCK_Y 8
 static constexpr int kMaxTileElems = 4096;

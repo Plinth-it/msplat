@@ -54,6 +54,7 @@ void msplat_apply_refine_decay(
     float minus_opacity, float log_scale_delta
 );
 void msplat_reset_opacity(int num_points, MTensor &opacities, float reset_logit);
+void msplat_zero_tensor(MTensor &tensor);
 
 // Render-only forward pass (no loss computation)
 // Returns: out_img (H, W, 3) as MTensor
