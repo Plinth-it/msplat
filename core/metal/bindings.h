@@ -2,8 +2,15 @@
 #define MSPLAT_BINDINGS_H
 
 #include <cstdint>
+#include <string>
 #include <tuple>
+#include <vector>
 #include "metal_tensor.hpp"
+
+struct ForcedSyncStat {
+    std::string reason;
+    uint64_t count;
+};
 
 // Release all cached GPU tensors (call before exit to prevent GPU memory leak)
 void cleanup_msplat_metal();
@@ -24,6 +31,8 @@ void msplat_commit();
 
 // Synchronize (commit + wait for completion)
 void msplat_gpu_sync();
+void msplat_gpu_sync_named(const char *reason);
+void msplat_consume_training_overflow_flag_after_sync();
 
 // GPU timing — non-invasive, uses completion handlers on committed CBs
 void msplat_enable_gpu_timing(bool enable);
@@ -33,10 +42,16 @@ void msplat_drain_gpu_times(std::vector<double>& out);
 void msplat_drain_stage_times(std::vector<double> stage_times[], int max_stages, int& n_stages,
                               const char** stage_names);
 uint64_t msplat_drain_forced_sync_count();
+std::vector<ForcedSyncStat> msplat_drain_forced_sync_counts();
 
 void msplat_apply_mean_noise(
     int num_points, MTensor &means3d, MTensor &opacities, MTensor &radii,
     float noise_scale, float max_noise, uint32_t seed
+);
+
+void msplat_apply_refine_decay(
+    int num_points, MTensor &opacities, MTensor &scales,
+    float minus_opacity, float log_scale_delta
 );
 
 // Render-only forward pass (no loss computation)

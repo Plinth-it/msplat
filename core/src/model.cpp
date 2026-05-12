@@ -524,7 +524,8 @@ void weightedSampleWithoutReplacement(
 }
 
 float Model::prepareBrushRefineFlags(int step, int checkScreen, bool allowGrowth, float cullCenter[3]) {
-    msplat_gpu_sync();
+    msplat_gpu_sync_named("refine-flags-readback");
+    msplat_consume_training_overflow_flag_after_sync();
 
     int N = num_active;
     int32_t *split = densify_split_flag.data<int32_t>();
@@ -726,7 +727,7 @@ void Model::afterTrain(int step, int phaseStep, int phaseTotal){
         }
 
         if (resetEnabled && step < stopSplitAt && refineStep % resetInterval == refineEvery){
-            msplat_gpu_sync();
+            msplat_gpu_sync_named("opacity-reset-readback");
             constexpr float resetLogit = -1.3862943611198906f;
             float *op = opacities.data<float>();
             for (int64_t i = 0; i < opacities.numel(); i++)
@@ -753,24 +754,8 @@ void Model::applyRefineDecay(int step) {
     float scaleFactor = 1.0f - std::max(scaleDecay, 0.0f) * shrinkStrength;
     if (minusOpacity <= 0.0f && scaleFactor >= 1.0f) return;
 
-    msplat_gpu_sync();
-
-    if (minusOpacity > 0.0f) {
-        float *op = opacities.data<float>();
-        for (int64_t i = 0; i < opacities.numel(); ++i) {
-            float alpha = 1.0f / (1.0f + std::exp(-op[i]));
-            alpha = std::clamp(alpha - minusOpacity, 1e-12f, 1.0f - 1e-12f);
-            op[i] = std::log(alpha / (1.0f - alpha));
-        }
-    }
-
-    if (scaleFactor < 1.0f) {
-        float logScaleDelta = std::log(std::max(scaleFactor, 1e-12f));
-        float *sc = scales.data<float>();
-        for (int64_t i = 0; i < scales.numel(); ++i) {
-            sc[i] += logScaleDelta;
-        }
-    }
+    float logScaleDelta = scaleFactor < 1.0f ? std::log(std::max(scaleFactor, 1e-12f)) : 0.0f;
+    msplat_apply_refine_decay(num_active, opacities, scales, minusOpacity, logScaleDelta);
 }
 
 void Model::save(const std::string &filename, int step) {

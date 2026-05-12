@@ -322,3 +322,26 @@ kernel void zero_buffer_kernel(
 ) {
     if (idx < count) buf[idx] = 0;
 }
+
+kernel void apply_refine_decay_kernel(
+    constant uint& N                 [[buffer(0)]],
+    device float* opacities          [[buffer(1)]],
+    device float* scales             [[buffer(2)]],
+    constant float& minus_opacity    [[buffer(3)]],
+    constant float& log_scale_delta  [[buffer(4)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= N) return;
+
+    if (minus_opacity > 0.0f) {
+        float alpha = 1.0f / (1.0f + exp(-opacities[idx]));
+        alpha = clamp(alpha - minus_opacity, 1.0e-12f, 1.0f - 1.0e-12f);
+        opacities[idx] = log(alpha / (1.0f - alpha));
+    }
+
+    if (log_scale_delta != 0.0f) {
+        scales[idx * 3] += log_scale_delta;
+        scales[idx * 3 + 1] += log_scale_delta;
+        scales[idx * 3 + 2] += log_scale_delta;
+    }
+}

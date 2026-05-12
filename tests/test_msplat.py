@@ -574,6 +574,8 @@ def test_benchmark_script_supports_async_submit_timing_mode():
     assert "drain-each-iter" in cli
     assert "timing mode:" in cli
     assert "wall includes final GPU drain" in cli
+    assert "CPU submit phases" in cli
+    assert "full_iteration" in cli
 
 
 def test_backward_rasterizer_benchmark_defaults_to_production_throughput():
@@ -707,9 +709,15 @@ def test_train_step_forced_syncs_are_named_and_counted():
 
     assert "record_forced_sync" in host
     assert "msplat_drain_forced_sync_count" in host
+    assert "msplat_drain_forced_sync_counts" in host
     assert "msplat_drain_forced_sync_count" in bindings
+    assert "msplat_drain_forced_sync_counts" in bindings
+    assert "ForcedSyncStat" in bindings
+    assert "msplat_gpu_sync_named" in bindings
+    assert "msplat_consume_training_overflow_flag_after_sync" in bindings
     assert 'record_forced_sync("overflow-check")' in host
     assert 'record_forced_sync("dynamic-count-prepass")' in host
+    assert 'record_forced_sync("densify-count-readback")' in host
 
 
 def test_overflow_check_uses_delayed_polling_window():
@@ -717,8 +725,28 @@ def test_overflow_check_uses_delayed_polling_window():
     host = (repo_root / "core" / "metal" / "msplat_metal.mm").read_text(encoding="utf-8")
 
     assert "kOverflowPollInterval" in host
-    assert "pending_overflow_poll" in host
+    assert "g_pending_train_overflow_poll" in host
     assert "overflow_poll_due" in host
+    assert "msplat_consume_training_overflow_flag_after_sync" in host
+    assert "constexpr int kOverflowPollInterval = 100" in host
+
+
+def test_refine_decay_runs_on_gpu_without_readback_sync():
+    repo_root = Path(__file__).resolve().parents[1]
+    model_header = (repo_root / "core" / "include" / "model.hpp").read_text(encoding="utf-8")
+    model_source = (repo_root / "core" / "src" / "model.cpp").read_text(encoding="utf-8")
+    host = (repo_root / "core" / "metal" / "msplat_metal.mm").read_text(encoding="utf-8")
+    shader = (repo_root / "core" / "metal" / "msplat_densify.metal").read_text(encoding="utf-8")
+    bindings = (repo_root / "core" / "metal" / "bindings.h").read_text(encoding="utf-8")
+
+    assert "applyRefineDecay(int step)" in model_header
+    assert "applyRefineDecay(step)" in model_source
+    assert "gpuAlreadySynced" not in model_source
+    assert "msplat_consume_training_overflow_flag_after_sync()" in model_source
+    assert "msplat_apply_refine_decay(num_active, opacities, scales" in model_source
+    assert "void msplat_apply_refine_decay" in bindings
+    assert "apply_refine_decay_kernel" in host
+    assert "kernel void apply_refine_decay_kernel" in shader
 
 
 def test_backward_rasterizer_benchmark_script_supports_auto_quality_metrics():

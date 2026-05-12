@@ -838,10 +838,17 @@ int main(int argc, char *argv[]) {
         const bool benchmarkAsyncSubmit = benchmarkTimingMode == "async-submit";
         int bench_warmup = 50;
         std::vector<double> bench_iter_ms, bench_cpu_ms, bench_drain_ms;
+        std::vector<double> bench_prepare_ms, bench_full_iteration_ms;
+        std::vector<double> bench_schedulers_ms, bench_after_train_ms, bench_commit_ms;
         if (benchmarking) {
             bench_iter_ms.reserve(numIters);
             bench_cpu_ms.reserve(numIters);
             bench_drain_ms.reserve(numIters);
+            bench_prepare_ms.reserve(numIters);
+            bench_full_iteration_ms.reserve(numIters);
+            bench_schedulers_ms.reserve(numIters);
+            bench_after_train_ms.reserve(numIters);
+            bench_commit_ms.reserve(numIters);
         }
         auto cpu_now = []() { return std::chrono::high_resolution_clock::now(); };
 
@@ -862,15 +869,20 @@ int main(int argc, char *argv[]) {
             bool useAlphaLoss = !useLossMask && cam.imageHasAlpha();
             bool compositeGt = cam.hasCompositeAlpha()
                 && (stepBg[0] != 0.0f || stepBg[1] != 0.0f || stepBg[2] != 0.0f);
+            auto after_prepare = cpu_now();
             model.fullIteration(cam, step, gtPacked, useLossMask, lossMaskMean,
                                 useAlphaLoss, matchAlphaWeight, stepBg.data(), compositeGt,
                                 ssimWeight, lpipsLossWeight);
+            auto after_full_iteration = cpu_now();
             model.schedulersStep(step);
+            auto after_schedulers = cpu_now();
             model.afterTrain(step);
+            auto after_train = cpu_now();
             msplat_commit();
+            auto after_commit = cpu_now();
 
             if (benchmarking && step > (size_t)bench_warmup) {
-                auto pre_sync = cpu_now();
+                auto pre_sync = after_commit;
                 if (!benchmarkAsyncSubmit) {
                     msplat_gpu_sync();
                 }
@@ -881,6 +893,11 @@ int main(int argc, char *argv[]) {
                 bench_iter_ms.push_back(iter_ms);
                 bench_cpu_ms.push_back(cpu_ms);
                 bench_drain_ms.push_back(drain_ms);
+                bench_prepare_ms.push_back(std::chrono::duration_cast<std::chrono::microseconds>(after_prepare - iter_start).count() / 1000.0);
+                bench_full_iteration_ms.push_back(std::chrono::duration_cast<std::chrono::microseconds>(after_full_iteration - after_prepare).count() / 1000.0);
+                bench_schedulers_ms.push_back(std::chrono::duration_cast<std::chrono::microseconds>(after_schedulers - after_full_iteration).count() / 1000.0);
+                bench_after_train_ms.push_back(std::chrono::duration_cast<std::chrono::microseconds>(after_train - after_schedulers).count() / 1000.0);
+                bench_commit_ms.push_back(std::chrono::duration_cast<std::chrono::microseconds>(after_commit - after_train).count() / 1000.0);
             }
 
             if (step == firstTrainingStep || step == static_cast<size_t>(numIters) ||
@@ -956,32 +973,66 @@ int main(int argc, char *argv[]) {
             }
             std::cout << "\n";
 
-            auto stats = [](std::vector<double> &v) {
+            struct BenchStats {
+                double mean;
+                double median;
+                double p95;
+                double max;
+            };
+            auto stats = [](const std::vector<double> &v) {
                 std::vector<double> s = v;
                 std::sort(s.begin(), s.end());
                 size_t n = s.size();
+                if (n == 0) {
+                    return BenchStats{0.0, 0.0, 0.0, 0.0};
+                }
                 double sum = std::accumulate(s.begin(), s.end(), 0.0);
                 double med = (n % 2 == 0) ? (s[n/2-1] + s[n/2]) / 2.0 : s[n/2];
-                return std::make_pair(sum / n, med);
+                return BenchStats{sum / n, med, s[(size_t)(n * 0.95)], s.back()};
             };
-            auto [cpu_mean, cpu_med] = stats(bench_cpu_ms);
-            auto [drain_mean, drain_med] = stats(bench_drain_ms);
+            auto cpu_stats = stats(bench_cpu_ms);
+            auto drain_stats = stats(bench_drain_ms);
             std::cout << "\n  --- CPU dispatch vs GPU drain ---\n";
-            std::cout << "  cpu dispatch:  mean=" << cpu_mean << "  median=" << cpu_med << " ms\n";
-            std::cout << "  gpu drain:     mean=" << drain_mean << "  median=" << drain_med << " ms\n";
-            std::cout << "  gpu fraction:  " << (drain_med / median * 100) << "%\n";
-            uint64_t forcedSyncs = msplat_drain_forced_sync_count();
+            std::cout << "  cpu dispatch:  mean=" << cpu_stats.mean << "  median=" << cpu_stats.median << " ms\n";
+            std::cout << "  gpu drain:     mean=" << drain_stats.mean << "  median=" << drain_stats.median << " ms\n";
+            std::cout << "  gpu fraction:  " << (drain_stats.median / median * 100) << "%\n";
+            std::vector<ForcedSyncStat> forcedSyncStats = msplat_drain_forced_sync_counts();
+            uint64_t forcedSyncs = 0;
+            for (const auto &stat : forcedSyncStats) {
+                forcedSyncs += stat.count;
+            }
             std::cout << "  forced syncs:  " << forcedSyncs << "\n";
+            if (!forcedSyncStats.empty()) {
+                std::cout << "  forced sync reasons:\n";
+                for (const auto &stat : forcedSyncStats) {
+                    std::cout << "    " << stat.reason << ": " << stat.count << "\n";
+                }
+            }
+
+            auto print_phase = [&](const char *name, const std::vector<double> &values) {
+                BenchStats phase_stats = stats(values);
+                std::cout << "  " << name
+                          << ": mean=" << phase_stats.mean
+                          << "  median=" << phase_stats.median
+                          << "  p95=" << phase_stats.p95
+                          << "  max=" << phase_stats.max << " ms\n";
+            };
+            std::cout << "\n  --- CPU submit phases ---\n";
+            print_phase("prepare", bench_prepare_ms);
+            print_phase("full_iteration", bench_full_iteration_ms);
+            print_phase("schedulers", bench_schedulers_ms);
+            print_phase("after_train", bench_after_train_ms);
+            print_phase("commit", bench_commit_ms);
 
             // GPU timing from completion handlers (PROFILE_GPU=1)
             std::vector<double> gpu_times;
             msplat_drain_gpu_times(gpu_times);
             if (!gpu_times.empty()) {
-                auto [gpu_mean, gpu_med] = stats(gpu_times);
+                BenchStats gpu_stats = stats(gpu_times);
                 std::vector<double> gs = gpu_times;
                 std::sort(gs.begin(), gs.end());
                 std::cout << "\n  --- GPU kernel time (from CB completion handlers) ---\n";
-                std::cout << "  gpu exec:   mean=" << gpu_mean << "  median=" << gpu_med << " ms\n";
+                std::cout << "  gpu exec:   mean=" << gpu_stats.mean << "  median=" << gpu_stats.median << " ms\n";
                 std::cout << "  gpu p5:     " << gs[(size_t)(gs.size() * 0.05)] << " ms\n";
                 std::cout << "  gpu p95:    " << gs[(size_t)(gs.size() * 0.95)] << " ms\n";
                 std::cout << "  gpu min:    " << gs.front() << " ms\n";
@@ -1003,11 +1054,11 @@ int main(int argc, char *argv[]) {
                     double total_med = 0;
                     for (int i = 0; i < n_stages; i++) {
                         if (stage_times[i].empty()) continue;
-                        auto [s_mean, s_med] = stats(stage_times[i]);
-                        total_med += s_med;
+                        BenchStats stage_stats = stats(stage_times[i]);
+                        total_med += stage_stats.median;
                         std::cout << "  " << std::left << std::setw(22) << stage_names[i]
-                                  << "median=" << std::fixed << std::setprecision(3) << s_med
-                                  << "ms  mean=" << s_mean << "ms  (" << stage_times[i].size() << " samples)\n";
+                                  << "median=" << std::fixed << std::setprecision(3) << stage_stats.median
+                                  << "ms  mean=" << stage_stats.mean << "ms  (" << stage_times[i].size() << " samples)\n";
                     }
                     std::cout << "  " << std::left << std::setw(22) << "TOTAL (sum medians)"
                               << std::fixed << std::setprecision(3) << total_med << "ms\n";

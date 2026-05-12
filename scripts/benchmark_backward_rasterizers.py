@@ -148,6 +148,32 @@ def parse_duration(text: str) -> float | None:
     return None
 
 
+def parse_phase_stat(log_text: str, phase: str, stat: str) -> float | None:
+    match = re.search(
+        rf"^\s*{re.escape(phase)}:\s+mean=([0-9.e+-]+)\s+median=([0-9.e+-]+)\s+p95=([0-9.e+-]+)\s+max=([0-9.e+-]+) ms",
+        log_text,
+        re.MULTILINE,
+    )
+    if not match:
+        return None
+    field_index = {"mean": 1, "median": 2, "p95": 3, "max": 4}[stat]
+    return float(match.group(field_index))
+
+
+def parse_forced_sync_reasons(log_text: str) -> dict[str, int]:
+    section = re.search(
+        r"^\s*forced sync reasons:\n((?:^\s{4}.+\n?)+)",
+        log_text,
+        re.MULTILINE,
+    )
+    if not section:
+        return {}
+    reasons: dict[str, int] = {}
+    for reason, count in re.findall(r"^\s{4}([^:]+):\s+([0-9]+)", section.group(1), re.MULTILINE):
+        reasons[reason] = int(count)
+    return reasons
+
+
 def parse_metrics(log_text: str) -> dict[str, object]:
     benchmark = re.search(
         r"=== Benchmark .*?mean:\s+([0-9.]+) ms/iter\s+median:\s+([0-9.]+) ms/iter",
@@ -178,6 +204,18 @@ def parse_metrics(log_text: str) -> dict[str, object]:
         "training_seconds": parse_duration(training.group(1).strip()) if training else None,
         "training_steps": int(training.group(2)) if training else None,
         "training_ips": float(training.group(3)) if training else None,
+        "forced_syncs": parse_int(r"forced syncs:\s+([0-9]+)", log_text),
+        "forced_sync_reasons": parse_forced_sync_reasons(log_text),
+        "cpu_prepare_p95_ms": parse_phase_stat(log_text, "prepare", "p95"),
+        "cpu_prepare_max_ms": parse_phase_stat(log_text, "prepare", "max"),
+        "cpu_full_iteration_p95_ms": parse_phase_stat(log_text, "full_iteration", "p95"),
+        "cpu_full_iteration_max_ms": parse_phase_stat(log_text, "full_iteration", "max"),
+        "cpu_schedulers_p95_ms": parse_phase_stat(log_text, "schedulers", "p95"),
+        "cpu_schedulers_max_ms": parse_phase_stat(log_text, "schedulers", "max"),
+        "cpu_after_train_p95_ms": parse_phase_stat(log_text, "after_train", "p95"),
+        "cpu_after_train_max_ms": parse_phase_stat(log_text, "after_train", "max"),
+        "cpu_commit_p95_ms": parse_phase_stat(log_text, "commit", "p95"),
+        "cpu_commit_max_ms": parse_phase_stat(log_text, "commit", "max"),
         "gpu_stage_total_median_ms": parse_float(r"^\s*TOTAL \(sum medians\)\s+([0-9.]+)ms", log_text),
         "loss_fwd_bwd_median_ms": parse_float(r"^\s*loss_fwd_bwd\s+median=([0-9.]+)ms", log_text),
         "rast_bwd_median_ms": parse_float(r"^\s*rast_bwd\s+median=([0-9.]+)ms", log_text),

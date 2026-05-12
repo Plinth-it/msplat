@@ -330,6 +330,8 @@ estimate for cross-warp reduction experiments. Use `--debug-interval N` to
 change that report interval, `--timing-mode drain-each-iter` to include a GPU
 drain in every iteration sample, or keep `--timing-mode async-submit` to measure
 CPU submit cost without draining the GPU after every benchmark iteration,
+including CPU submit phase stats and forced-sync reason counts for host-side
+outliers,
 `--project-sh-specialization both` to A/B the projection/SH function-constant
 hook, `--loss-specialization both` to A/B the loss function-constant hook, and
 `--raster-backward-specialization both` to A/B

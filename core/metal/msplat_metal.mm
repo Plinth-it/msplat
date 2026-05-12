@@ -35,11 +35,12 @@ static std::vector<double> g_gpu_times_ms;
 
 static std::mutex g_forced_sync_mutex;
 static uint64_t g_forced_sync_count = 0;
+static std::unordered_map<std::string, uint64_t> g_forced_sync_counts;
 
 static void record_forced_sync(const char *reason) {
-    (void)reason;
     std::lock_guard<std::mutex> lock(g_forced_sync_mutex);
     g_forced_sync_count++;
+    g_forced_sync_counts[reason != nullptr ? reason : "unknown"]++;
 }
 
 // Per-stage profiling
@@ -159,6 +160,7 @@ struct MetalContext {
     id<MTLComputePipelineState> densify_cull_classify_kernel_cpso;
     id<MTLComputePipelineState> compact_scatter_kernel_cpso;
     id<MTLComputePipelineState> compact_copy_back_kernel_cpso;
+    id<MTLComputePipelineState> apply_refine_decay_kernel_cpso;
     std::unordered_map<uint32_t, id<MTLComputePipelineState>> project_sh_forward_specializations;
     std::unordered_map<uint32_t, id<MTLComputePipelineState>> project_sh_backward_specializations;
     std::unordered_map<uint32_t, id<MTLComputePipelineState>> loss_l1_specializations;
@@ -346,6 +348,7 @@ MetalContext* init_msplat_metal_context() {
     ctx->densify_cull_classify_kernel_cpso        = load(@"densify_cull_classify_kernel");
     ctx->compact_scatter_kernel_cpso              = load(@"compact_scatter_kernel");
     ctx->compact_copy_back_kernel_cpso            = load(@"compact_copy_back_kernel");
+    ctx->apply_refine_decay_kernel_cpso           = load(@"apply_refine_decay_kernel");
 
     auto requireThreadgroupSize = [&](id<MTLComputePipelineState> pso, NSString *name, NSUInteger required) {
         if (pso && pso.maxTotalThreadsPerThreadgroup < required) {
@@ -775,6 +778,11 @@ void msplat_gpu_sync() {
     get_global_context()->syncCB();
 }
 
+void msplat_gpu_sync_named(const char *reason) {
+    record_forced_sync(reason);
+    get_global_context()->syncCB();
+}
+
 void msplat_enable_gpu_timing(bool enable) {
     g_gpu_timing_enabled = enable;
     g_gpu_timing_checked = true;
@@ -801,7 +809,23 @@ uint64_t msplat_drain_forced_sync_count() {
     std::lock_guard<std::mutex> lock(g_forced_sync_mutex);
     uint64_t count = g_forced_sync_count;
     g_forced_sync_count = 0;
+    g_forced_sync_counts.clear();
     return count;
+}
+
+std::vector<ForcedSyncStat> msplat_drain_forced_sync_counts() {
+    std::lock_guard<std::mutex> lock(g_forced_sync_mutex);
+    std::vector<ForcedSyncStat> stats;
+    stats.reserve(g_forced_sync_counts.size());
+    for (const auto &entry : g_forced_sync_counts) {
+        stats.push_back({entry.first, entry.second});
+    }
+    std::sort(stats.begin(), stats.end(), [](const ForcedSyncStat &a, const ForcedSyncStat &b) {
+        return a.reason < b.reason;
+    });
+    g_forced_sync_count = 0;
+    g_forced_sync_counts.clear();
+    return stats;
 }
 
 void msplat_apply_mean_noise(
@@ -826,6 +850,30 @@ void msplat_apply_mean_noise(
     ENC_SCALAR(enc, noise_scale, 4);
     ENC_SCALAR(enc, max_noise, 5);
     ENC_SCALAR(enc, seed, 6);
+    [enc dispatchThreads:MTLSizeMake(num_points, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+    [enc endEncoding];
+}
+
+void msplat_apply_refine_decay(
+    int num_points, MTensor &opacities, MTensor &scales,
+    float minus_opacity, float log_scale_delta
+) {
+    if (num_points <= 0 || (minus_opacity <= 0.0f && log_scale_delta == 0.0f)) {
+        return;
+    }
+
+    MetalContext* ctx = get_global_context();
+    id<MTLCommandBuffer> command_buffer = ctx->getCommandBuffer();
+    id<MTLComputeCommandEncoder> enc = [command_buffer computeCommandEncoder];
+    NSUInteger tpg = MIN(ctx->apply_refine_decay_kernel_cpso.maxTotalThreadsPerThreadgroup,
+                         (NSUInteger)num_points);
+    uint32_t n = (uint32_t)num_points;
+    [enc setComputePipelineState:ctx->apply_refine_decay_kernel_cpso];
+    ENC_SCALAR(enc, n, 0);
+    ENC_BUF(enc, opacities, 1);
+    ENC_BUF(enc, scales, 2);
+    ENC_SCALAR(enc, minus_opacity, 3);
+    ENC_SCALAR(enc, log_scale_delta, 4);
     [enc dispatchThreads:MTLSizeMake(num_points, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
     [enc endEncoding];
 }
@@ -1048,12 +1096,39 @@ struct FusedTensorCache {
     }
 };
 static FusedTensorCache g_tcache;
+static bool g_train_overflow_warned = false;
+static bool g_pending_train_overflow_poll = false;
+
+static void handle_training_overflow_flag(int32_t flag_val) {
+    if (flag_val <= 0) return;
+    if (g_tcache.last_sort_path_dynamic) {
+        g_tcache.invalidate_dynamic_capacity();
+    } else {
+        g_tcache.force_dynamic_intersections = true;
+    }
+    if (!g_train_overflow_warned) {
+        fprintf(stderr, "WARNING: tile intersection overflow. "
+                "Switching to dynamic gaussian-tile intersections.\n");
+        g_train_overflow_warned = true;
+    }
+}
+
+void msplat_consume_training_overflow_flag_after_sync() {
+    if (!g_pending_train_overflow_poll || !g_tcache.overflow_flag.defined() || g_tcache.fwd_num_points <= 0) {
+        return;
+    }
+    int32_t flag_val = *g_tcache.overflow_flag.data<int32_t>();
+    g_pending_train_overflow_poll = false;
+    handle_training_overflow_flag(flag_val);
+}
 
 void cleanup_msplat_metal() {
     if (g_context) {
         g_context->syncCB();
     }
     g_tcache = FusedTensorCache{};
+    g_train_overflow_warned = false;
+    g_pending_train_overflow_poll = false;
 }
 
 struct LpipsTensorBlob {
@@ -2170,36 +2245,21 @@ std::tuple<MTensor, float> msplat_train_step(
 
     // --- Overflow check: detect mismatched dynamic intersection counts ---
     // Only warn once; the dynamic path should size buffers to the exact GPU count.
-    static bool overflow_warned = false;
     static int iter_count_oc = 0;
-    static bool pending_overflow_poll = false;
     constexpr int kOverflowPollInterval = 100;
     iter_count_oc++;
     bool num_points_changed = (num_points != g_tcache.fwd_num_points && g_tcache.fwd_num_points > 0);
     bool overflow_poll_due = num_points_changed || (iter_count_oc % kOverflowPollInterval) == 1;
     if (num_points_changed) {
-        pending_overflow_poll = true;
+        g_pending_train_overflow_poll = true;
     }
     if (g_tcache.overflow_flag.defined() && g_tcache.fwd_num_points > 0
-        && overflow_poll_due && pending_overflow_poll) {
+        && overflow_poll_due && g_pending_train_overflow_poll) {
         if (ctx->_currentCB) {
             record_forced_sync("overflow-check");
             ctx->syncCB();
         }
-        int32_t flag_val = *g_tcache.overflow_flag.data<int32_t>();
-        pending_overflow_poll = false;
-        if (flag_val > 0) {
-            if (g_tcache.last_sort_path_dynamic) {
-                g_tcache.invalidate_dynamic_capacity();
-            } else {
-                g_tcache.force_dynamic_intersections = true;
-            }
-            if (!overflow_warned) {
-                fprintf(stderr, "WARNING: tile intersection overflow. "
-                        "Switching to dynamic gaussian-tile intersections.\n");
-                overflow_warned = true;
-            }
-        }
+        msplat_consume_training_overflow_flag_after_sync();
     }
     bool use_dynamic_intersections = should_use_dynamic_intersections(
         img_width, img_height, num_tiles, g_tcache.force_dynamic_intersections);
@@ -3197,7 +3257,7 @@ std::tuple<MTensor, float> msplat_train_step(
         }];
     }
 
-    pending_overflow_poll = true;
+    g_pending_train_overflow_poll = true;
 
     // Callers currently use the returned radii only. Reading loss_sum here would
     // force a stale shared-memory read before this command buffer is committed.
@@ -3496,6 +3556,7 @@ int msplat_densify(
     });
 
     // Single GPU→CPU sync: read new_count from keep_prefix[worst_case - 1]
+    record_forced_sync("densify-count-readback");
     ctx->syncCB();
     int new_count = keep_prefix.data<int32_t>()[worst_case - 1];
     return new_count;
