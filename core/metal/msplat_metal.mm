@@ -3317,8 +3317,7 @@ int msplat_densify(
     MTensor &split_flag, MTensor &dup_flag,
     MTensor &split_prefix, MTensor &dup_prefix,
     MTensor &keep_flag, MTensor &keep_prefix,
-    MTensor &block_totals, MTensor &compact_scratch,
-    MTensor &random_samples
+    MTensor &block_totals, MTensor &compact_scratch
 ) {
     MetalContext* ctx = get_global_context();
 
@@ -3441,7 +3440,7 @@ int msplat_densify(
             ENC_SCALAR(enc, N_u32, 0);
             ENC_BUF(enc, split_flag, 1);
             ENC_BUF(enc, split_prefix, 2);
-            ENC_BUF(enc, random_samples, 3);
+            ENC_SCALAR(enc, growth_seed_u32, 3);
             ENC_SCALAR(enc, split_log_scale_factor, 4);
             ENC_BUF(enc, means_buf, 5);
             ENC_BUF(enc, scales_buf, 6);

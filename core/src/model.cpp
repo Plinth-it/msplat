@@ -379,7 +379,6 @@ void Model::setupOptimizers(){
     densify_block_totals = gpu_zeros({max_blocks}, DType::Int32);
     int64_t fr_stride = featuresRest.numel() / featuresRest.size(0);
     densify_compact_scratch = gpu_zeros({(int64_t)buf_capacity * fr_stride}, DType::Float32);
-    densify_random_samples = gpu_zeros({buf_capacity, 3}, DType::Float32);
 
     refreshViews();
 }
@@ -394,7 +393,7 @@ void Model::releaseOptimizers(){
     densify_split_flag.reset(); densify_dup_flag.reset();
     densify_split_prefix.reset(); densify_dup_prefix.reset();
     densify_keep_flag.reset(); densify_keep_prefix.reset();
-    densify_block_totals.reset(); densify_compact_scratch.reset(); densify_random_samples.reset();
+    densify_block_totals.reset(); densify_compact_scratch.reset();
 }
 
 void Model::ensureLoadedShCapacity() {
@@ -464,7 +463,6 @@ void Model::ensureCapacity(int needed){
     densify_block_totals = gpu_zeros({max_blocks}, DType::Int32);
     int64_t fr_stride = featuresRest_buf.stride0();
     densify_compact_scratch = gpu_zeros({(int64_t)new_cap * fr_stride}, DType::Float32);
-    densify_random_samples = gpu_zeros({new_cap, 3}, DType::Float32);
 
     buf_capacity = new_cap;
     refreshViews();
@@ -683,15 +681,6 @@ void Model::afterTrain(int step, int phaseStep, int phaseTotal){
             int numPointsBefore = num_active;
             ensureCapacity(3 * num_active);  // worst case: every gaussian splits
 
-            // Fill random samples for splits (CPU randn, shared memory)
-            {
-                std::mt19937 rng(step);
-                static constexpr float splitOffsetStd = 0.7071067811865476f;
-                std::normal_distribution<float> dist(0.0f, splitOffsetStd);
-                float *p = densify_random_samples.data<float>();
-                for (int64_t i = 0; i < num_active * 3; i++) p[i] = dist(rng);
-            }
-
             float half_max_dim = 0.5f * static_cast<float>((std::max)(lastWidth, lastHeight));
             int check_screen = (allowGrowth && step < stopScreenSizeAt) ? 1 : 0;
             bool checkHuge = resetEnabled && step > refineEvery * resetAlphaEvery;
@@ -713,8 +702,7 @@ void Model::afterTrain(int step, int phaseStep, int phaseTotal){
                 densify_split_flag, densify_dup_flag,
                 densify_split_prefix, densify_dup_prefix,
                 densify_keep_flag, densify_keep_prefix,
-                densify_block_totals, densify_compact_scratch,
-                densify_random_samples
+                densify_block_totals, densify_compact_scratch
             );
 
             if (new_count <= 0 && numPointsBefore > 0) {
@@ -1116,8 +1104,6 @@ int Model::loadCheckpoint(const std::string &filename) {
     densify_block_totals = gpu_zeros({max_blocks}, DType::Int32);
     int64_t fr_stride = featuresRest.numel() / featuresRest.size(0);
     densify_compact_scratch = gpu_zeros({(int64_t)buf_capacity * fr_stride}, DType::Float32);
-    densify_random_samples = gpu_zeros({buf_capacity, 3}, DType::Float32);
-
     refreshViews();
     {
         float loadedMeansLrInit = means_lr_init;

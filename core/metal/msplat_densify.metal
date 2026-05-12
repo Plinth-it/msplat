@@ -58,7 +58,7 @@ kernel void densify_append_split_kernel(
     constant int& N,
     constant int* split_flag         [[buffer(1)]],
     constant int* split_prefix       [[buffer(2)]],  // inclusive prefix sum
-    constant float* random_samples   [[buffer(3)]],  // [N, 3] randn with Brush split std
+    constant uint& split_seed        [[buffer(3)]],
     constant float& log_scale_factor [[buffer(4)]],  // log(1/sqrt(2))
     device float* means_buf          [[buffer(5)]],
     device float* scales_buf         [[buffer(6)]],
@@ -104,9 +104,10 @@ kernel void densify_append_split_kernel(
     float new_raw_opacity = log(new_opacity / (1.0f - new_opacity));
 
     // Scale random sample by parent scale, then rotate by parent quaternion.
-    float r0 = random_samples[ord*3]   * sx;
-    float r1 = random_samples[ord*3+1] * sy;
-    float r2 = random_samples[ord*3+2] * sz;
+    const float split_offset_std = 0.7071067811865476f;
+    float r0 = msplat_normal_sample(split_seed, (uint)ord, 0u) * split_offset_std * sx;
+    float r1 = msplat_normal_sample(split_seed, (uint)ord, 1u) * split_offset_std * sy;
+    float r2 = msplat_normal_sample(split_seed, (uint)ord, 2u) * split_offset_std * sz;
     float v0 = (1-2*(qy*qy+qz*qz))*r0 + 2*(qx*qy-qw*qz)*r1 + 2*(qx*qz+qw*qy)*r2;
     float v1 = 2*(qx*qy+qw*qz)*r0 + (1-2*(qx*qx+qz*qz))*r1 + 2*(qy*qz-qw*qx)*r2;
     float v2 = 2*(qx*qz-qw*qy)*r0 + 2*(qy*qz+qw*qx)*r1 + (1-2*(qx*qx+qy*qy))*r2;

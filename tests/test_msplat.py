@@ -749,6 +749,22 @@ def test_refine_decay_runs_on_gpu_without_readback_sync():
     assert "kernel void apply_refine_decay_kernel" in shader
 
 
+def test_densify_split_offsets_generated_on_gpu():
+    repo_root = Path(__file__).resolve().parents[1]
+    model_header = (repo_root / "core" / "include" / "model.hpp").read_text(encoding="utf-8")
+    model_source = (repo_root / "core" / "src" / "model.cpp").read_text(encoding="utf-8")
+    host = (repo_root / "core" / "metal" / "msplat_metal.mm").read_text(encoding="utf-8")
+    shader = (repo_root / "core" / "metal" / "msplat_densify.metal").read_text(encoding="utf-8")
+    bindings = (repo_root / "core" / "metal" / "bindings.h").read_text(encoding="utf-8")
+
+    assert "densify_random_samples" not in model_header
+    assert "densify_random_samples" not in model_source
+    assert "densify_random_samples" not in bindings
+    assert "ENC_SCALAR(enc, growth_seed_u32, 3)" in host
+    assert "constant uint& split_seed" in shader
+    assert "msplat_normal_sample(split_seed" in shader
+
+
 def test_opacity_reset_runs_on_gpu_without_readback_sync():
     repo_root = Path(__file__).resolve().parents[1]
     model_source = (repo_root / "core" / "src" / "model.cpp").read_text(encoding="utf-8")
