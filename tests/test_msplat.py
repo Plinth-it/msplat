@@ -538,6 +538,7 @@ def test_backward_rasterizer_benchmark_script_supports_production_ab():
     script = (repo_root / "scripts" / "benchmark_backward_rasterizers.py").read_text(encoding="utf-8")
 
     assert "--no-profile-stages" in script
+    assert "--roofline-dimensions" in script
     assert "--no-debug" in script
     assert "--project-sh-specialization" in script
     assert "MSPLAT_ENABLE_PROJECT_SH_SPECIALIZATION" in script
@@ -621,9 +622,9 @@ def test_metal_benchmark_diagnostics_cache_env_lookup():
     repo_root = Path(__file__).resolve().parents[1]
     metal_source = (repo_root / "core" / "metal" / "msplat_metal.mm").read_text(encoding="utf-8")
 
-    assert "static bool benchmark_mode_enabled()" in metal_source
-    assert "static const bool enabled = std::getenv(\"BENCHMARK\") != nullptr" in metal_source
-    assert "benchmark_mode_enabled() && (diag_count == 100" in metal_source
+    assert "static bool roofline_diagnostics_enabled()" in metal_source
+    assert "static const bool enabled = std::getenv(\"MSPLAT_PRINT_ROOFLINE\") != nullptr" in metal_source
+    assert "roofline_diagnostics_enabled() && (diag_count == 100" in metal_source
 
 
 def test_backward_rasterizer_benchmark_defaults_to_production_throughput():
@@ -645,6 +646,7 @@ output = Path(args[args.index("--output") + 1])
 output.parent.mkdir(parents=True, exist_ok=True)
 (output.parent / "env.json").write_text(json.dumps({
     "profile_stages": os.environ.get("PROFILE_STAGES"),
+    "roofline": os.environ.get("MSPLAT_PRINT_ROOFLINE"),
     "backward_debug": os.environ.get("MSPLAT_BACKWARD_DEBUG"),
     "timing_mode": os.environ.get("MSPLAT_BENCHMARK_TIMING_MODE"),
     "drain_interval": os.environ.get("MSPLAT_BENCHMARK_DRAIN_INTERVAL"),
@@ -683,6 +685,7 @@ print("  training loop: 1.0 s (1 steps, 1.0 it/s)")
         summary = json.loads((output_dir / "summary.json").read_text(encoding="utf-8"))
 
     assert env["profile_stages"] is None
+    assert env["roofline"] is None
     assert env["backward_debug"] is None
     assert env["timing_mode"] == "wall-only"
     assert env["drain_interval"] == "4"
@@ -798,6 +801,7 @@ output.parent.mkdir(parents=True, exist_ok=True)
 (output.parent / "env.json").write_text(json.dumps({
     "profile_stages": os.environ.get("PROFILE_STAGES"),
     "stage_report_every": os.environ.get("PROFILE_STAGES_REPORT_EVERY"),
+    "roofline": os.environ.get("MSPLAT_PRINT_ROOFLINE"),
 }), encoding="utf-8")
 print("=== Benchmark fake ===")
 print("mean: 1.0 ms/iter")
@@ -835,6 +839,7 @@ print("  training loop: 1.0 s (1 steps, 1.0 it/s)")
 
     assert env["profile_stages"] == "1"
     assert env["stage_report_every"] == "600"
+    assert env["roofline"] == "1"
     assert summary["profile_stages"] is True
     assert summary["profile_mode"] == "stage"
 

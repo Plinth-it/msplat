@@ -70,8 +70,8 @@ static int stage_profile_report_interval() {
     return interval;
 }
 
-static bool benchmark_mode_enabled() {
-    static const bool enabled = std::getenv("BENCHMARK") != nullptr;
+static bool roofline_diagnostics_enabled() {
+    static const bool enabled = std::getenv("MSPLAT_PRINT_ROOFLINE") != nullptr;
     return enabled;
 }
 
@@ -1816,7 +1816,7 @@ static void forward_pipeline(
     // Periodic diagnostic: print key dimensions for roofline analysis
     static int diag_count = 0;
     diag_count++;
-    if (benchmark_mode_enabled() && (diag_count == 100 || diag_count == 500 || diag_count == 1500)) {
+    if (roofline_diagnostics_enabled() && (diag_count == 100 || diag_count == 500 || diag_count == 1500)) {
             fprintf(stderr, "\n=== Roofline Dimensions (iter %d) ===\n", diag_count);
             fprintf(stderr, "  num_points:     %d\n", num_points);
             fprintf(stderr, "  intersections:  %lld\n", (long long)capacity);

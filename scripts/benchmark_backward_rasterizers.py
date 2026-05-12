@@ -41,6 +41,11 @@ def parse_args() -> argparse.Namespace:
         help="PROFILE_STAGES_REPORT_EVERY value when stage profiling is enabled.",
     )
     parser.add_argument(
+        "--roofline-dimensions",
+        action="store_true",
+        help="Print periodic roofline dimension diagnostics. Stage profiling enables this automatically.",
+    )
+    parser.add_argument(
         "--timing-mode",
         choices=["wall-only", "drain-each-iter", "async-submit", "drain-every-n"],
         default="wall-only",
@@ -359,11 +364,16 @@ def run_mode(
         env.pop("MSPLAT_BENCHMARK_PRE_REFINE_DRAIN", None)
     if args.profile_stages:
         env["PROFILE_STAGES"] = "1"
+        env["MSPLAT_PRINT_ROOFLINE"] = "1"
         if args.stage_report_every:
             env["PROFILE_STAGES_REPORT_EVERY"] = str(args.stage_report_every)
     else:
         env.pop("PROFILE_STAGES", None)
         env.pop("PROFILE_STAGES_REPORT_EVERY", None)
+        if args.roofline_dimensions:
+            env["MSPLAT_PRINT_ROOFLINE"] = "1"
+        else:
+            env.pop("MSPLAT_PRINT_ROOFLINE", None)
     if args.debug:
         env["MSPLAT_BACKWARD_DEBUG"] = "1"
         env["MSPLAT_BACKWARD_DEBUG_INTERVAL"] = str(args.debug_interval or args.iters)
