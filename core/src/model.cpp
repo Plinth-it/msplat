@@ -551,8 +551,6 @@ float Model::prepareBrushRefineFlags(int step, int checkScreen, bool allowGrowth
     int32_t *split = densify_split_flag.data<int32_t>();
     int32_t *dup = densify_dup_flag.data<int32_t>();
     auto tZero0 = mark();
-    std::fill(split, split + N, 0);
-    std::fill(dup, dup + N, 0);
     auto tZero1 = mark();
 
     const float *meansPtr = means.data<float>();

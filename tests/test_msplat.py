@@ -778,6 +778,10 @@ def test_refine_flag_preparation_reuses_cpu_scratch():
     assert "auto growWeight = [&](int i)" in model_source
     assert "weightedSampleWithoutReplacement(N, prunedCount, selected, rng, refineScratchSampleKeys, pruneWeight)" in model_source
     assert "weightedSampleWithoutReplacement(N, growCount, selected, rng, refineScratchSampleKeys, growWeight)" in model_source
+    assert "std::fill(split, split + N, 0)" not in model_source
+    assert "std::fill(dup, dup + N, 0)" not in model_source
+    assert "split[i] = selected[i] ? 1 : 0;" in model_source
+    assert "dup[i] = 0;" in model_source
 
 
 def test_refine_reuses_bounds_for_scene_scale_update():
