@@ -58,6 +58,12 @@ def parse_args() -> argparse.Namespace:
         help="Drain at the end of the iteration before refine to diagnose queued GPU backlog.",
     )
     parser.add_argument(
+        "--refine-flag-mode",
+        choices=["brush", "gpu", "both"],
+        default="brush",
+        help="A/B CPU Brush-style refine flag preparation against GPU-native refine classification.",
+    )
+    parser.add_argument(
         "--debug",
         dest="debug",
         action="store_true",
@@ -316,6 +322,7 @@ def run_mode(
     half_sorted_buffers: bool,
     warp_merge: bool,
     intersection_key_bits: str,
+    refine_flag_mode: str,
     output_dir: Path,
     extra_args: list[str],
 ) -> dict[str, object]:
@@ -332,6 +339,8 @@ def run_mode(
         run_name += "-warp-merge"
     if intersection_key_bits != "default":
         run_name += f"-key-{intersection_key_bits}"
+    if refine_flag_mode == "gpu":
+        run_name += "-gpu-refine"
     mode_dir = output_dir / run_name
     mode_dir.mkdir(parents=True, exist_ok=True)
     log_path = mode_dir / "run.log"
@@ -385,6 +394,10 @@ def run_mode(
         env.pop("MSPLAT_INTERSECTION_KEY_BITS", None)
     else:
         env["MSPLAT_INTERSECTION_KEY_BITS"] = intersection_key_bits
+    if refine_flag_mode == "gpu":
+        env["MSPLAT_REFINE_FLAG_MODE"] = "gpu"
+    else:
+        env.pop("MSPLAT_REFINE_FLAG_MODE", None)
 
     cmd = [
         str(args.binary),
@@ -411,6 +424,8 @@ def run_mode(
         labels.append("warp-merge atomics")
     if intersection_key_bits != "default":
         labels.append(f"{intersection_key_bits}-bit intersection keys" if intersection_key_bits != "auto" else "auto intersection keys")
+    if refine_flag_mode == "gpu":
+        labels.append("GPU refine flags")
     suffix = f" + {' + '.join(labels)}" if labels else ""
     print(f"\n=== Running {mode}{suffix} ===", flush=True)
     process = subprocess.Popen(
@@ -473,6 +488,12 @@ def warp_merge_variants(value: str) -> list[bool]:
 
 def intersection_key_bit_variants(values: list[str]) -> list[str]:
     return list(dict.fromkeys(values))
+
+
+def refine_flag_mode_variants(value: str) -> list[str]:
+    if value == "both":
+        return ["brush", "gpu"]
+    return [value]
 
 
 def has_final_quality_arg(args: list[str]) -> bool:
@@ -651,6 +672,7 @@ def write_summary(args: argparse.Namespace, results: list[dict[str, object]], ou
         "half_sorted_buffers": args.half_sorted_buffers,
         "warp_merge": args.warp_merge,
         "intersection_key_bits": args.intersection_key_bits,
+        "refine_flag_mode": args.refine_flag_mode,
         "msplat_args": args.msplat_args,
         "results": [json_result(row) for row in results],
         "quality_warnings": quality_warning_rows(results),
@@ -676,6 +698,7 @@ def main() -> int:
             half_sorted_buffers,
             warp_merge,
             intersection_key_bits,
+            refine_flag_mode,
             output_dir,
             extra_args,
         )
@@ -686,6 +709,7 @@ def main() -> int:
         for half_sorted_buffers in half_sorted_buffer_variants(args.half_sorted_buffers)
         for warp_merge in warp_merge_variants(args.warp_merge)
         for intersection_key_bits in intersection_key_bit_variants(args.intersection_key_bits)
+        for refine_flag_mode in refine_flag_mode_variants(args.refine_flag_mode)
     ]
     print_table(results, output_dir)
     write_summary(args, results, output_dir)

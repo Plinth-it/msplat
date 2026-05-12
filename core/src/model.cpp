@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include "model.hpp"
 #include "kdtree_tensor.hpp"
@@ -101,6 +102,11 @@ static float estimateMedianExtent(const float *xyz, int64_t count) {
 
 static bool benchmarkRefinePhasesEnabled() {
     return std::getenv("BENCHMARK") != nullptr;
+}
+
+static bool gpuRefineFlagsEnabled() {
+    const char *mode = std::getenv("MSPLAT_REFINE_FLAG_MODE");
+    return mode != nullptr && std::string(mode) == "gpu";
 }
 
 static float scheduledLr(float start, float end, int step, int maxSteps) {
@@ -755,7 +761,11 @@ void Model::afterTrain(int step, int phaseStep, int phaseTotal){
             int fr_stride = (int)featuresRest_buf.stride0();
             float cullCenter[3] = {};
             float refineSceneScale = currentMeanLrSceneScale;
-            float maxAllowedBounds = prepareBrushRefineFlags(step, check_screen, allowGrowth, cullCenter, &refineSceneScale);
+            bool useGpuRefineFlags = gpuRefineFlagsEnabled();
+            float maxAllowedBounds = std::numeric_limits<float>::max();
+            if (!useGpuRefineFlags) {
+                maxAllowedBounds = prepareBrushRefineFlags(step, check_screen, allowGrowth, cullCenter, &refineSceneScale);
+            }
             auto t2 = now();
             int densifyMaxCount = std::max(maxSplats, 2 * num_active);
             double densifyCountReadbackMs = 0.0;
@@ -765,7 +775,7 @@ void Model::afterTrain(int step, int phaseStep, int phaseTotal){
                 densifyGradThresh, densifySizeThresh, splitScreenSize, check_screen,
                 growthSelectFraction, (uint32_t)step, densifyMaxCount,
                 MIN_OPACITY, maxAllowedBounds, 0.15f, checkHuge ? 1 : 0,
-                cullCenter, maxAllowedBounds, 1,
+                cullCenter, maxAllowedBounds, useGpuRefineFlags ? 0 : 1,
                 xysGradNorm, visCounts, max2DSize, half_max_dim,
                 means_buf, scales_buf, quats_buf,
                 featuresDc_buf, featuresRest_buf, opacities_buf, fr_stride,

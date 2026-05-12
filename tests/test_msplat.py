@@ -557,6 +557,9 @@ def test_backward_rasterizer_benchmark_script_supports_production_ab():
     assert "--intersection-key-bits" in script
     assert "MSPLAT_INTERSECTION_KEY_BITS" in script
     assert "intersection_key_bit_variants" in script
+    assert "--refine-flag-mode" in script
+    assert "MSPLAT_REFINE_FLAG_MODE" in script
+    assert "refine_flag_mode_variants" in script
     assert "PROFILE_STAGES_REPORT_EVERY" in script
     assert "parse_duration" in script
     assert "training_ips" in script
@@ -572,6 +575,7 @@ def test_benchmark_script_supports_async_submit_timing_mode():
     script = (repo_root / "scripts" / "benchmark_backward_rasterizers.py").read_text(encoding="utf-8")
     cli = (repo_root / "cli" / "msplat.cpp").read_text(encoding="utf-8")
     model_header = (repo_root / "core" / "include" / "model.hpp").read_text(encoding="utf-8")
+    model_source = (repo_root / "core" / "src" / "model.cpp").read_text(encoding="utf-8")
 
     assert "--timing-mode" in script
     assert "--drain-interval" in script
@@ -580,6 +584,7 @@ def test_benchmark_script_supports_async_submit_timing_mode():
     assert "MSPLAT_BENCHMARK_TIMING_MODE" in script
     assert "MSPLAT_BENCHMARK_DRAIN_INTERVAL" in script
     assert "MSPLAT_BENCHMARK_PRE_REFINE_DRAIN" in script
+    assert "MSPLAT_REFINE_FLAG_MODE" in script
     assert "MSPLAT_BENCHMARK_TIMING_MODE" in cli
     assert "MSPLAT_BENCHMARK_DRAIN_INTERVAL" in cli
     assert "MSPLAT_BENCHMARK_PRE_REFINE_DRAIN" in cli
@@ -606,6 +611,8 @@ def test_benchmark_script_supports_async_submit_timing_mode():
     assert "benchmarkRefinePrepareFlagsMs" in model_header
     assert "benchmarkRefineDensifyCountReadbackMs" in model_header
     assert "benchmarkRefineFlagGrowSampleMs" in model_header
+    assert "gpuRefineFlagsEnabled" in model_source
+    assert "useGpuRefineFlags ? 0 : 1" in model_source
 
 def test_backward_rasterizer_benchmark_defaults_to_production_throughput():
     repo_root = Path(__file__).resolve().parents[1]
@@ -630,6 +637,7 @@ output.parent.mkdir(parents=True, exist_ok=True)
     "timing_mode": os.environ.get("MSPLAT_BENCHMARK_TIMING_MODE"),
     "drain_interval": os.environ.get("MSPLAT_BENCHMARK_DRAIN_INTERVAL"),
     "pre_refine_drain": os.environ.get("MSPLAT_BENCHMARK_PRE_REFINE_DRAIN"),
+    "refine_flag_mode": os.environ.get("MSPLAT_REFINE_FLAG_MODE"),
 }), encoding="utf-8")
 print("=== Benchmark fake ===")
 print("wall mean: 1.0 ms/iter")
@@ -667,12 +675,14 @@ print("  training loop: 1.0 s (1 steps, 1.0 it/s)")
     assert env["timing_mode"] == "wall-only"
     assert env["drain_interval"] == "4"
     assert env["pre_refine_drain"] is None
+    assert env["refine_flag_mode"] is None
     assert summary["profile_stages"] is False
     assert summary["profile_mode"] == "production"
     assert summary["debug"] is False
     assert summary["timing_mode"] == "wall-only"
     assert summary["drain_interval"] == 4
     assert summary["pre_refine_drain"] is False
+    assert summary["refine_flag_mode"] == "brush"
 
 
 def test_backward_rasterizer_summary_extracts_sync_diagnostics():
