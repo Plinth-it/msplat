@@ -746,6 +746,7 @@ def test_overflow_check_uses_delayed_polling_window():
     assert "overflow_poll_due" in host
     assert "msplat_consume_training_overflow_flag_after_sync" in host
     assert "constexpr int kOverflowPollInterval = 100" in host
+    assert "num_points_changed || (iter_count_oc % kOverflowPollInterval)" not in host
 
 
 def test_refine_decay_runs_on_gpu_without_readback_sync():

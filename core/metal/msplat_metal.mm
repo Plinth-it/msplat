@@ -2281,11 +2281,7 @@ std::tuple<MTensor, float> msplat_train_step(
     static int iter_count_oc = 0;
     constexpr int kOverflowPollInterval = 100;
     iter_count_oc++;
-    bool num_points_changed = (num_points != g_tcache.fwd_num_points && g_tcache.fwd_num_points > 0);
-    bool overflow_poll_due = num_points_changed || (iter_count_oc % kOverflowPollInterval) == 1;
-    if (num_points_changed) {
-        g_pending_train_overflow_poll = true;
-    }
+    bool overflow_poll_due = (iter_count_oc % kOverflowPollInterval) == 1;
     if (g_tcache.overflow_flag.defined() && g_tcache.fwd_num_points > 0
         && overflow_poll_due && g_pending_train_overflow_poll) {
         if (ctx->_currentCB) {
