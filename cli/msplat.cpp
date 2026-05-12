@@ -1023,6 +1023,15 @@ int main(int argc, char *argv[]) {
             print_phase("schedulers", bench_schedulers_ms);
             print_phase("after_train", bench_after_train_ms);
             print_phase("commit", bench_commit_ms);
+            if (!model.benchmarkRefineEnsureCapacityMs.empty()) {
+                std::cout << "\n  --- after_train refine subphases (refine events only) ---\n";
+                print_phase("refine_ensure_capacity", model.benchmarkRefineEnsureCapacityMs);
+                print_phase("refine_prepare_flags", model.benchmarkRefinePrepareFlagsMs);
+                print_phase("refine_densify", model.benchmarkRefineDensifyMs);
+                print_phase("refine_update_scene_scale", model.benchmarkRefineUpdateSceneScaleMs);
+                print_phase("refine_reset_opacity", model.benchmarkRefineResetOpacityMs);
+                print_phase("refine_apply_decay", model.benchmarkRefineApplyDecayMs);
+            }
 
             // GPU timing from completion handlers (PROFILE_GPU=1)
             std::vector<double> gpu_times;

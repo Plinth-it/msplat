@@ -566,6 +566,7 @@ def test_benchmark_script_supports_async_submit_timing_mode():
     repo_root = Path(__file__).resolve().parents[1]
     script = (repo_root / "scripts" / "benchmark_backward_rasterizers.py").read_text(encoding="utf-8")
     cli = (repo_root / "cli" / "msplat.cpp").read_text(encoding="utf-8")
+    model_header = (repo_root / "core" / "include" / "model.hpp").read_text(encoding="utf-8")
 
     assert "--timing-mode" in script
     assert "MSPLAT_BENCHMARK_TIMING_MODE" in script
@@ -576,6 +577,9 @@ def test_benchmark_script_supports_async_submit_timing_mode():
     assert "wall includes final GPU drain" in cli
     assert "CPU submit phases" in cli
     assert "full_iteration" in cli
+    assert "after_train refine subphases" in cli
+    assert "refine_prepare_flags" in cli
+    assert "benchmarkRefinePrepareFlagsMs" in model_header
 
 
 def test_backward_rasterizer_benchmark_defaults_to_production_throughput():

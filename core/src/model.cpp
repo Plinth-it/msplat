@@ -3,7 +3,9 @@
 #include <iostream>
 #include <random>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <stdexcept>
 #include <utility>
@@ -94,6 +96,10 @@ static float estimateRandomInitSceneScale(const std::vector<Camera>& cameras) {
 
 static float estimateMedianExtent(const float *xyz, int64_t count) {
     return std::max(PointsTensor::percentileMedianSize(xyz, count, BOUND_PERCENTILE), 0.01f);
+}
+
+static bool benchmarkRefinePhasesEnabled() {
+    return std::getenv("BENCHMARK") != nullptr;
 }
 
 static float scheduledLr(float start, float end, int step, int maxSteps) {
@@ -671,6 +677,12 @@ float Model::prepareBrushRefineFlags(int step, int checkScreen, bool allowGrowth
 void Model::afterTrain(int step, int phaseStep, int phaseTotal){
     if (!radii.defined()) return;
 
+    auto now = []() { return std::chrono::high_resolution_clock::now(); };
+    auto elapsedMs = [](auto start, auto end) {
+        return std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
+    };
+    bool benchmarkRefine = benchmarkRefinePhasesEnabled();
+
     int refineStep = phaseStep > 0 ? phaseStep : step;
     int totalForPhase = phaseTotal > 0 ? phaseTotal : maxSteps;
     float phaseProgress = totalForPhase > 0
@@ -686,7 +698,9 @@ void Model::afterTrain(int step, int phaseStep, int phaseTotal){
 
         {
             int numPointsBefore = num_active;
+            auto t0 = now();
             ensureCapacity(3 * num_active);  // worst case: every gaussian splits
+            auto t1 = now();
 
             float half_max_dim = 0.5f * static_cast<float>((std::max)(lastWidth, lastHeight));
             int check_screen = (allowGrowth && step < stopScreenSizeAt) ? 1 : 0;
@@ -694,6 +708,7 @@ void Model::afterTrain(int step, int phaseStep, int phaseTotal){
             int fr_stride = (int)featuresRest_buf.stride0();
             float cullCenter[3] = {};
             float maxAllowedBounds = prepareBrushRefineFlags(step, check_screen, allowGrowth, cullCenter);
+            auto t2 = now();
             int densifyMaxCount = std::max(maxSplats, 2 * num_active);
 
             int new_count = msplat_densify(
@@ -711,6 +726,7 @@ void Model::afterTrain(int step, int phaseStep, int phaseTotal){
                 densify_keep_flag, densify_keep_prefix,
                 densify_block_totals, densify_compact_scratch
             );
+            auto t3 = now();
 
             if (new_count <= 0 && numPointsBefore > 0) {
                 throw std::runtime_error("Densification would cull all active Gaussians; aborting before the model becomes empty.");
@@ -718,19 +734,36 @@ void Model::afterTrain(int step, int phaseStep, int phaseTotal){
             num_active = new_count;
             refreshViews();
             updateMeanLrSceneScaleFromActive(step);
+            auto t4 = now();
+            if (benchmarkRefine) {
+                benchmarkRefineEnsureCapacityMs.push_back(elapsedMs(t0, t1));
+                benchmarkRefinePrepareFlagsMs.push_back(elapsedMs(t1, t2));
+                benchmarkRefineDensifyMs.push_back(elapsedMs(t2, t3));
+                benchmarkRefineUpdateSceneScaleMs.push_back(elapsedMs(t3, t4));
+            }
             std::cout << "Densified: " << numPointsBefore << " -> " << num_active << " gaussians" << std::endl;
         }
 
         if (resetEnabled && step < stopSplitAt && refineStep % resetInterval == refineEvery){
+            auto t0 = now();
             constexpr float resetLogit = -1.3862943611198906f;
             msplat_reset_opacity(num_active, opacities, resetLogit);
 
             msplat_zero_tensor(adam_exp_avg[5]);
             msplat_zero_tensor(adam_exp_avg_sq[5]);
+            auto t1 = now();
+            if (benchmarkRefine) {
+                benchmarkRefineResetOpacityMs.push_back(elapsedMs(t0, t1));
+            }
             fprintf(stderr, "Opacity reset at step %d\n", step);
         }
 
+        auto t0 = now();
         applyRefineDecay(step);
+        auto t1 = now();
+        if (benchmarkRefine) {
+            benchmarkRefineApplyDecayMs.push_back(elapsedMs(t0, t1));
+        }
 
         xysGradNorm.reset();
         visCounts.reset();

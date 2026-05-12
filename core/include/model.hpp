@@ -50,6 +50,12 @@ struct Model{
   int loadPly(const std::string &filename);
   void saveCheckpoint(const std::string &filename, int step);
   int loadCheckpoint(const std::string &filename);
+  std::vector<double> benchmarkRefineEnsureCapacityMs;
+  std::vector<double> benchmarkRefinePrepareFlagsMs;
+  std::vector<double> benchmarkRefineDensifyMs;
+  std::vector<double> benchmarkRefineUpdateSceneScaleMs;
+  std::vector<double> benchmarkRefineResetOpacityMs;
+  std::vector<double> benchmarkRefineApplyDecayMs;
   struct CamSetup {
     float fx, fy, cx, cy;
     int height, width, degree, degreesToUse;
