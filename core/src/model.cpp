@@ -493,11 +493,12 @@ void weightedSampleWithoutReplacement(
     const std::vector<float>& weights,
     int count,
     std::vector<uint8_t>& selected,
-    std::mt19937& rng
+    std::mt19937& rng,
+    std::vector<std::pair<float, int>>& keys
 ) {
     if (count <= 0) return;
 
-    std::vector<std::pair<float, int>> keys;
+    keys.clear();
     keys.reserve(weights.size());
     std::uniform_real_distribution<float> uniform(1e-12f, 1.0f);
     for (int i = 0; i < (int)weights.size(); ++i) {
@@ -540,7 +541,10 @@ float Model::prepareBrushRefineFlags(int step, int checkScreen, bool allowGrowth
     const float *gradPtr = xysGradNorm.data<float>();
     const float *screenPtr = max2DSize.data<float>();
 
-    std::vector<float> xs, ys, zs;
+    auto &xs = refineScratchX;
+    auto &ys = refineScratchY;
+    auto &zs = refineScratchZ;
+    xs.clear(); ys.clear(); zs.clear();
     xs.reserve(N); ys.reserve(N); zs.reserve(N);
     for (int i = 0; i < N; ++i) {
         float x = meansPtr[i * 3 + 0];
@@ -567,8 +571,10 @@ float Model::prepareBrushRefineFlags(int step, int checkScreen, bool allowGrowth
         cullCenter[0] = cullCenter[1] = cullCenter[2] = 0.0f;
     }
 
-    std::vector<uint8_t> pruned(N, 0);
-    std::vector<uint8_t> selected(N, 0);
+    auto &pruned = refineScratchPruned;
+    auto &selected = refineScratchSelected;
+    pruned.assign(N, 0);
+    selected.assign(N, 0);
     int prunedCount = 0;
     int thresholdCount = 0;
     float halfMaxDim = 0.5f * static_cast<float>((std::max)(lastWidth, lastHeight));
@@ -612,13 +618,14 @@ float Model::prepareBrushRefineFlags(int step, int checkScreen, bool allowGrowth
 
     std::mt19937 rng((uint32_t)step);
 
-    std::vector<float> weights(N, 0.0f);
+    auto &weights = refineScratchWeights;
+    weights.assign(N, 0.0f);
     for (int i = 0; i < N; ++i) {
         if (pruned[i] || visPtr[i] <= 0.0f) continue;
         float opacity = sigmoidf(opacPtr[i]);
         weights[i] = std::isfinite(opacity) ? opacity * visPtr[i] : 0.0f;
     }
-    weightedSampleWithoutReplacement(weights, prunedCount, selected, rng);
+    weightedSampleWithoutReplacement(weights, prunedCount, selected, rng, refineScratchSampleKeys);
 
     int selectedCount = 0;
     for (uint8_t flag : selected) selectedCount += flag ? 1 : 0;
@@ -650,7 +657,7 @@ float Model::prepareBrushRefineFlags(int step, int checkScreen, bool allowGrowth
                 weights[i] = refineWeight;
             }
         }
-        weightedSampleWithoutReplacement(weights, growCount, selected, rng);
+        weightedSampleWithoutReplacement(weights, growCount, selected, rng, refineScratchSampleKeys);
     }
 
     for (int i = 0; i < N; ++i) {

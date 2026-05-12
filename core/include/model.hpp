@@ -5,6 +5,7 @@
 #include "ssim.hpp"
 #include "input_data.hpp"
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 int numShBases(int degree);
@@ -99,6 +100,10 @@ struct Model{
   MTensor densify_keep_flag, densify_keep_prefix;
   MTensor densify_block_totals;
   MTensor densify_compact_scratch;
+  std::vector<float> refineScratchX, refineScratchY, refineScratchZ;
+  std::vector<float> refineScratchWeights;
+  std::vector<uint8_t> refineScratchPruned, refineScratchSelected;
+  std::vector<std::pair<float, int>> refineScratchSampleKeys;
 
   MTensor radii;
   int lastHeight;

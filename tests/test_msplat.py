@@ -749,6 +749,18 @@ def test_refine_decay_runs_on_gpu_without_readback_sync():
     assert "kernel void apply_refine_decay_kernel" in shader
 
 
+def test_refine_flag_preparation_reuses_cpu_scratch():
+    repo_root = Path(__file__).resolve().parents[1]
+    model_header = (repo_root / "core" / "include" / "model.hpp").read_text(encoding="utf-8")
+    model_source = (repo_root / "core" / "src" / "model.cpp").read_text(encoding="utf-8")
+
+    assert "refineScratchWeights" in model_header
+    assert "refineScratchSampleKeys" in model_header
+    assert "auto &weights = refineScratchWeights" in model_source
+    assert "weightedSampleWithoutReplacement(weights, prunedCount, selected, rng, refineScratchSampleKeys)" in model_source
+    assert "weightedSampleWithoutReplacement(weights, growCount, selected, rng, refineScratchSampleKeys)" in model_source
+
+
 def test_densify_split_offsets_generated_on_gpu():
     repo_root = Path(__file__).resolve().parents[1]
     model_header = (repo_root / "core" / "include" / "model.hpp").read_text(encoding="utf-8")
