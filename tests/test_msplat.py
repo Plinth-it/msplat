@@ -612,7 +612,19 @@ def test_benchmark_script_supports_async_submit_timing_mode():
     assert "benchmarkRefineDensifyCountReadbackMs" in model_header
     assert "benchmarkRefineFlagGrowSampleMs" in model_header
     assert "gpuRefineFlagsEnabled" in model_source
+    assert "static const bool enabled = std::getenv(\"BENCHMARK\") != nullptr" in model_source
+    assert "std::getenv(\"MSPLAT_REFINE_FLAG_MODE\")" in model_source
     assert "useGpuRefineFlags ? 0 : 1" in model_source
+
+
+def test_metal_benchmark_diagnostics_cache_env_lookup():
+    repo_root = Path(__file__).resolve().parents[1]
+    metal_source = (repo_root / "core" / "metal" / "msplat_metal.mm").read_text(encoding="utf-8")
+
+    assert "static bool benchmark_mode_enabled()" in metal_source
+    assert "static const bool enabled = std::getenv(\"BENCHMARK\") != nullptr" in metal_source
+    assert "benchmark_mode_enabled() && (diag_count == 100" in metal_source
+
 
 def test_backward_rasterizer_benchmark_defaults_to_production_throughput():
     repo_root = Path(__file__).resolve().parents[1]

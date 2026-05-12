@@ -101,12 +101,16 @@ static float estimateMedianExtent(const float *xyz, int64_t count) {
 }
 
 static bool benchmarkRefinePhasesEnabled() {
-    return std::getenv("BENCHMARK") != nullptr;
+    static const bool enabled = std::getenv("BENCHMARK") != nullptr;
+    return enabled;
 }
 
 static bool gpuRefineFlagsEnabled() {
-    const char *mode = std::getenv("MSPLAT_REFINE_FLAG_MODE");
-    return mode != nullptr && std::string(mode) == "gpu";
+    static const bool enabled = [] {
+        const char *mode = std::getenv("MSPLAT_REFINE_FLAG_MODE");
+        return mode != nullptr && std::string(mode) == "gpu";
+    }();
+    return enabled;
 }
 
 static float scheduledLr(float start, float end, int step, int maxSteps) {
