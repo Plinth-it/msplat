@@ -53,6 +53,11 @@ def parse_args() -> argparse.Namespace:
         help="Iteration interval for --timing-mode drain-every-n.",
     )
     parser.add_argument(
+        "--pre-refine-drain",
+        action="store_true",
+        help="Drain at the end of the iteration before refine to diagnose queued GPU backlog.",
+    )
+    parser.add_argument(
         "--debug",
         dest="debug",
         action="store_true",
@@ -323,6 +328,10 @@ def run_mode(
     env["BENCHMARK"] = "1"
     env["MSPLAT_BENCHMARK_TIMING_MODE"] = args.timing_mode
     env["MSPLAT_BENCHMARK_DRAIN_INTERVAL"] = str(args.drain_interval)
+    if args.pre_refine_drain:
+        env["MSPLAT_BENCHMARK_PRE_REFINE_DRAIN"] = "1"
+    else:
+        env.pop("MSPLAT_BENCHMARK_PRE_REFINE_DRAIN", None)
     if args.profile_stages:
         env["PROFILE_STAGES"] = "1"
         if args.stage_report_every:
@@ -575,6 +584,7 @@ def write_summary(args: argparse.Namespace, results: list[dict[str, object]], ou
         "profile_mode": "stage" if args.profile_stages else "production",
         "timing_mode": args.timing_mode,
         "drain_interval": args.drain_interval,
+        "pre_refine_drain": args.pre_refine_drain,
         "debug": args.debug,
         "quality_metrics": args.quality_metrics,
         "project_sh_specialization": args.project_sh_specialization,

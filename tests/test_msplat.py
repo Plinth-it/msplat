@@ -570,14 +570,18 @@ def test_benchmark_script_supports_async_submit_timing_mode():
 
     assert "--timing-mode" in script
     assert "--drain-interval" in script
+    assert "--pre-refine-drain" in script
     assert "drain-each-iter" in script
     assert "MSPLAT_BENCHMARK_TIMING_MODE" in script
     assert "MSPLAT_BENCHMARK_DRAIN_INTERVAL" in script
+    assert "MSPLAT_BENCHMARK_PRE_REFINE_DRAIN" in script
     assert "MSPLAT_BENCHMARK_TIMING_MODE" in cli
     assert "MSPLAT_BENCHMARK_DRAIN_INTERVAL" in cli
+    assert "MSPLAT_BENCHMARK_PRE_REFINE_DRAIN" in cli
     assert "wall-only" in cli
     assert "async-submit" in cli
     assert "drain-every-n" in cli
+    assert "pre-refine-drain" in cli
     assert "timing mode:" in cli
     assert "wall-only production throughput" in cli
     assert "wall includes final GPU drain" in cli
@@ -585,6 +589,8 @@ def test_benchmark_script_supports_async_submit_timing_mode():
     assert "msplat_consume_training_overflow_flag_after_sync" in cli
     assert "CPU submit phases" in cli
     assert "full_iteration" in cli
+    assert "pre_refine_drain" in cli
+    assert "shouldRefineAfterTrain" in model_header
     assert "after_train refine subphases" in cli
     assert "refine_prepare_flags" in cli
     assert "refine flag preparation subphases" in cli
@@ -615,6 +621,7 @@ output.parent.mkdir(parents=True, exist_ok=True)
     "backward_debug": os.environ.get("MSPLAT_BACKWARD_DEBUG"),
     "timing_mode": os.environ.get("MSPLAT_BENCHMARK_TIMING_MODE"),
     "drain_interval": os.environ.get("MSPLAT_BENCHMARK_DRAIN_INTERVAL"),
+    "pre_refine_drain": os.environ.get("MSPLAT_BENCHMARK_PRE_REFINE_DRAIN"),
 }), encoding="utf-8")
 print("=== Benchmark fake ===")
 print("wall mean: 1.0 ms/iter")
@@ -651,11 +658,13 @@ print("  training loop: 1.0 s (1 steps, 1.0 it/s)")
     assert env["backward_debug"] is None
     assert env["timing_mode"] == "wall-only"
     assert env["drain_interval"] == "16"
+    assert env["pre_refine_drain"] is None
     assert summary["profile_stages"] is False
     assert summary["profile_mode"] == "production"
     assert summary["debug"] is False
     assert summary["timing_mode"] == "wall-only"
     assert summary["drain_interval"] == 16
+    assert summary["pre_refine_drain"] is False
 
 
 def test_backward_rasterizer_stage_report_interval_enables_stage_profile():

@@ -37,6 +37,7 @@ struct Model{
 
   void schedulersStep(int step);
   int getDownscaleFactor(int step);
+  bool shouldRefineAfterTrain(int step, int phaseStep = -1, int phaseTotal = -1) const;
   void afterTrain(int step, int phaseStep = -1, int phaseTotal = -1);
   float prepareBrushRefineFlags(int step, int checkScreen, bool allowGrowth, float cullCenter[3], float *sceneScaleOut = nullptr);
   void applyRefineDecay(int step);

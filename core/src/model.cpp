@@ -716,6 +716,15 @@ float Model::prepareBrushRefineFlags(int step, int checkScreen, bool allowGrowth
     return maxAllowedBounds;
 }
 
+bool Model::shouldRefineAfterTrain(int step, int phaseStep, int phaseTotal) const {
+    int refineStep = phaseStep > 0 ? phaseStep : step;
+    int totalForPhase = phaseTotal > 0 ? phaseTotal : maxSteps;
+    float phaseProgress = totalForPhase > 0
+        ? std::clamp(static_cast<float>(refineStep) / static_cast<float>(totalForPhase), 0.0f, 1.0f)
+        : 0.0f;
+    return refineStep % refineEvery == 0 && refineStep > warmupLength && phaseProgress <= 0.95f;
+}
+
 void Model::afterTrain(int step, int phaseStep, int phaseTotal){
     if (!radii.defined()) return;
 
@@ -726,11 +735,7 @@ void Model::afterTrain(int step, int phaseStep, int phaseTotal){
     bool benchmarkRefine = benchmarkRefinePhasesEnabled();
 
     int refineStep = phaseStep > 0 ? phaseStep : step;
-    int totalForPhase = phaseTotal > 0 ? phaseTotal : maxSteps;
-    float phaseProgress = totalForPhase > 0
-        ? std::clamp(static_cast<float>(refineStep) / static_cast<float>(totalForPhase), 0.0f, 1.0f)
-        : 0.0f;
-    if (refineStep % refineEvery == 0 && refineStep > warmupLength && phaseProgress <= 0.95f){
+    if (shouldRefineAfterTrain(step, phaseStep, phaseTotal)){
         bool resetEnabled = resetAlphaEvery > 0;
         int resetInterval = resetEnabled ? resetAlphaEvery * refineEvery : 0;
         bool allowGrowth = step < stopSplitAt && num_active < maxSplats;

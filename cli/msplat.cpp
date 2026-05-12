@@ -839,6 +839,7 @@ int main(int argc, char *argv[]) {
         const bool benchmarkAsyncSubmit = benchmarkTimingMode == "async-submit";
         const bool benchmarkDrainEveryN = benchmarkTimingMode == "drain-every-n";
         const bool benchmarkCollectSamples = benchmarking && !benchmarkWallOnly;
+        const bool benchmarkPreRefineDrain = benchmarking && std::getenv("MSPLAT_BENCHMARK_PRE_REFINE_DRAIN") != nullptr;
         int benchmarkDrainInterval = 16;
         if (const char *drainIntervalEnv = std::getenv("MSPLAT_BENCHMARK_DRAIN_INTERVAL")) {
             int parsed = std::atoi(drainIntervalEnv);
@@ -849,7 +850,7 @@ int main(int argc, char *argv[]) {
         int bench_warmup = 50;
         std::vector<double> bench_iter_ms, bench_cpu_ms, bench_drain_ms;
         std::vector<double> bench_prepare_ms, bench_full_iteration_ms;
-        std::vector<double> bench_schedulers_ms, bench_after_train_ms, bench_commit_ms;
+        std::vector<double> bench_schedulers_ms, bench_after_train_ms, bench_commit_ms, bench_pre_refine_drain_ms;
         if (benchmarkCollectSamples) {
             bench_iter_ms.reserve(numIters);
             bench_cpu_ms.reserve(numIters);
@@ -859,6 +860,7 @@ int main(int argc, char *argv[]) {
             bench_schedulers_ms.reserve(numIters);
             bench_after_train_ms.reserve(numIters);
             bench_commit_ms.reserve(numIters);
+            bench_pre_refine_drain_ms.reserve(numIters);
         }
         auto cpu_now = []() { return std::chrono::high_resolution_clock::now(); };
 
@@ -873,6 +875,7 @@ int main(int argc, char *argv[]) {
             std::chrono::high_resolution_clock::time_point after_schedulers;
             std::chrono::high_resolution_clock::time_point after_train;
             std::chrono::high_resolution_clock::time_point after_commit;
+            std::chrono::high_resolution_clock::time_point after_pre_refine_drain;
             if (benchmarkCollectSamples) iter_start = cpu_now();
             int downscale = model.getDownscaleFactor(step);
             std::array<float, 3> stepBg = sampleBackground();
@@ -896,9 +899,23 @@ int main(int argc, char *argv[]) {
             if (benchmarkCollectSamples) after_train = cpu_now();
             msplat_commit();
             if (benchmarkCollectSamples) after_commit = cpu_now();
+            double preRefineDrainMs = 0.0;
+            if (benchmarkPreRefineDrain
+                && step < static_cast<size_t>(numIters)
+                && model.shouldRefineAfterTrain(static_cast<int>(step + 1))) {
+                auto preRefineDrainStart = benchmarkCollectSamples ? after_commit : cpu_now();
+                msplat_gpu_sync_named("pre-refine-drain");
+                msplat_consume_training_overflow_flag_after_sync();
+                auto preRefineDrainEnd = cpu_now();
+                preRefineDrainMs = std::chrono::duration_cast<std::chrono::microseconds>(
+                    preRefineDrainEnd - preRefineDrainStart).count() / 1000.0;
+                if (benchmarkCollectSamples) after_pre_refine_drain = preRefineDrainEnd;
+            } else if (benchmarkCollectSamples) {
+                after_pre_refine_drain = after_commit;
+            }
 
             if (benchmarkCollectSamples && step > (size_t)bench_warmup) {
-                auto pre_sync = after_commit;
+                auto pre_sync = after_pre_refine_drain;
                 bool shouldDrain = !benchmarkAsyncSubmit
                     && (!benchmarkDrainEveryN
                         || ((step - firstTrainingStep + 1) % static_cast<size_t>(benchmarkDrainInterval)) == 0);
@@ -918,6 +935,7 @@ int main(int argc, char *argv[]) {
                 bench_schedulers_ms.push_back(std::chrono::duration_cast<std::chrono::microseconds>(after_schedulers - after_full_iteration).count() / 1000.0);
                 bench_after_train_ms.push_back(std::chrono::duration_cast<std::chrono::microseconds>(after_train - after_schedulers).count() / 1000.0);
                 bench_commit_ms.push_back(std::chrono::duration_cast<std::chrono::microseconds>(after_commit - after_train).count() / 1000.0);
+                bench_pre_refine_drain_ms.push_back(preRefineDrainMs);
             }
 
             if (step == firstTrainingStep || step == static_cast<size_t>(numIters) ||
@@ -1069,6 +1087,9 @@ int main(int argc, char *argv[]) {
             print_phase("schedulers", bench_schedulers_ms);
             print_phase("after_train", bench_after_train_ms);
             print_phase("commit", bench_commit_ms);
+            if (benchmarkPreRefineDrain) {
+                print_phase("pre_refine_drain", bench_pre_refine_drain_ms);
+            }
             if (!model.benchmarkRefineEnsureCapacityMs.empty()) {
                 std::cout << "\n  --- after_train refine subphases (refine events only) ---\n";
                 print_phase("refine_ensure_capacity", model.benchmarkRefineEnsureCapacityMs);
