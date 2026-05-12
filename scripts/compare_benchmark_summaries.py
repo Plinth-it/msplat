@@ -80,17 +80,18 @@ def print_summary(path: Path) -> None:
     print(f"\n## {label}")
     print(f"dataset: {dataset}")
     print()
-    print("| mode | train it/s | it/s delta | iter median delta | GPU stage total delta | loss delta | rast_bwd delta | proj/SH/Adam delta | PSNR delta | SSIM delta | L1 delta | splats delta | warnings |")
-    print("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |")
+    print("| mode | train it/s | it/s delta | wall mean delta | iter median delta | GPU stage total delta | loss delta | rast_bwd delta | proj/SH/Adam delta | PSNR delta | SSIM delta | L1 delta | splats delta | warnings |")
+    print("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |")
     for row in results:
         if not isinstance(row, dict):
             continue
         mode = str(row.get("mode", "-"))
         print(
-            "| {mode} | {ips} | {ips_delta} | {iter_delta} | {gpu_total_delta} | {loss_delta} | {bwd_delta} | {proj_adam_delta} | {psnr_delta} | {ssim_delta} | {l1_delta} | {splat_delta} | {warnings} |".format(
+            "| {mode} | {ips} | {ips_delta} | {wall_delta} | {iter_delta} | {gpu_total_delta} | {loss_delta} | {bwd_delta} | {proj_adam_delta} | {psnr_delta} | {ssim_delta} | {l1_delta} | {splat_delta} | {warnings} |".format(
                 mode=mode,
                 ips=fmt(row.get("training_ips"), 2),
                 ips_delta=fmt_delta(row.get("training_ips"), baseline.get("training_ips")),
+                wall_delta=fmt_delta(row.get("wall_mean_ms"), baseline.get("wall_mean_ms")),
                 iter_delta=fmt_delta(row.get("iter_median_ms"), baseline.get("iter_median_ms")),
                 gpu_total_delta=fmt_delta(row.get("gpu_stage_total_median_ms"), baseline.get("gpu_stage_total_median_ms")),
                 loss_delta=fmt_delta(row.get("loss_fwd_bwd_median_ms"), baseline.get("loss_fwd_bwd_median_ms")),

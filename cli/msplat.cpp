@@ -840,7 +840,7 @@ int main(int argc, char *argv[]) {
         const bool benchmarkDrainEveryN = benchmarkTimingMode == "drain-every-n";
         const bool benchmarkCollectSamples = benchmarking && !benchmarkWallOnly;
         const bool benchmarkPreRefineDrain = benchmarking && std::getenv("MSPLAT_BENCHMARK_PRE_REFINE_DRAIN") != nullptr;
-        int benchmarkDrainInterval = 16;
+        int benchmarkDrainInterval = 4;
         if (const char *drainIntervalEnv = std::getenv("MSPLAT_BENCHMARK_DRAIN_INTERVAL")) {
             int parsed = std::atoi(drainIntervalEnv);
             if (parsed > 0) {
