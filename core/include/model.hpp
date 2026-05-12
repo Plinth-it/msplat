@@ -54,6 +54,7 @@ struct Model{
   std::vector<double> benchmarkRefineEnsureCapacityMs;
   std::vector<double> benchmarkRefinePrepareFlagsMs;
   std::vector<double> benchmarkRefineDensifyMs;
+  std::vector<double> benchmarkRefineDensifyCountReadbackMs;
   std::vector<double> benchmarkRefineUpdateSceneScaleMs;
   std::vector<double> benchmarkRefineResetOpacityMs;
   std::vector<double> benchmarkRefineApplyDecayMs;

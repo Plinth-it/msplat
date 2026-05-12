@@ -1095,6 +1095,7 @@ int main(int argc, char *argv[]) {
                 print_phase("refine_ensure_capacity", model.benchmarkRefineEnsureCapacityMs);
                 print_phase("refine_prepare_flags", model.benchmarkRefinePrepareFlagsMs);
                 print_phase("refine_densify", model.benchmarkRefineDensifyMs);
+                print_phase("densify_count_readback", model.benchmarkRefineDensifyCountReadbackMs);
                 print_phase("refine_update_scene_scale", model.benchmarkRefineUpdateSceneScaleMs);
                 print_phase("refine_reset_opacity", model.benchmarkRefineResetOpacityMs);
                 print_phase("refine_apply_decay", model.benchmarkRefineApplyDecayMs);

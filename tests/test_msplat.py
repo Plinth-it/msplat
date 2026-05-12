@@ -563,6 +563,7 @@ def test_backward_rasterizer_benchmark_script_supports_production_ab():
     assert "wall_mean_ms" in script
     assert "Sync diagnostics" in script
     assert "flag_sync_readback_max_ms" in script
+    assert "densify_count_readback_max_ms" in script
     assert "cpu_pre_refine_drain_max_ms" in script
 
 
@@ -598,10 +599,12 @@ def test_benchmark_script_supports_async_submit_timing_mode():
     assert "shouldRefineAfterTrain" in model_header
     assert "after_train refine subphases" in cli
     assert "refine_prepare_flags" in cli
+    assert "densify_count_readback" in cli
     assert "refine flag preparation subphases" in cli
     assert "flag_sync_readback" in cli
     assert "flag_grow_sample" in cli
     assert "benchmarkRefinePrepareFlagsMs" in model_header
+    assert "benchmarkRefineDensifyCountReadbackMs" in model_header
     assert "benchmarkRefineFlagGrowSampleMs" in model_header
 
 def test_backward_rasterizer_benchmark_defaults_to_production_throughput():
@@ -695,11 +698,15 @@ print("  forced sync reasons:")
 print("    overflow-check: 3")
 print("    pre-refine-drain: 2")
 print("    refine-flags-readback: 2")
+print("    densify-count-readback: 2")
 print("")
 print("  --- CPU submit phases ---")
 print("  full_iteration: mean=1.0  median=0.1  p95=2.0  max=99.0 ms")
 print("  after_train: mean=0.2  median=0.0  p95=0.0  max=8.0 ms")
 print("  pre_refine_drain: mean=0.3  median=0.0  p95=0.0  max=123.0 ms")
+print("")
+print("  --- after_train refine subphases (refine events only) ---")
+print("  densify_count_readback: mean=4.0  median=4.0  p95=6.0  max=6.0 ms")
 print("")
 print("  --- refine flag preparation subphases (refine events only) ---")
 print("  flag_sync_readback: mean=5.0  median=5.0  p95=7.0  max=7.0 ms")
@@ -743,8 +750,10 @@ print("  training loop: 1.0 s (1 steps, 1.0 it/s)")
     assert row["cpu_full_iteration_max_ms"] == 99.0
     assert row["flag_sync_readback_mean_ms"] == 5.0
     assert row["flag_sync_readback_max_ms"] == 7.0
+    assert row["densify_count_readback_mean_ms"] == 4.0
+    assert row["densify_count_readback_max_ms"] == 6.0
     assert "Sync diagnostics" in result.stdout
-    assert "| auto | 9 | 7.000 | 123.000 | 8.000 | 99.000 | 3 | 2 | 2 |" in result.stdout
+    assert "| auto | 9 | 7.000 | 6.000 | 123.000 | 8.000 | 99.000 | 3 | 2 | 2 | 2 |" in result.stdout
 
 
 def test_backward_rasterizer_stage_report_interval_enables_stage_profile():

@@ -240,6 +240,8 @@ def parse_metrics(log_text: str) -> dict[str, object]:
         "cpu_pre_refine_drain_max_ms": parse_phase_stat(log_text, "pre_refine_drain", "max"),
         "refine_prepare_flags_mean_ms": parse_phase_stat(log_text, "refine_prepare_flags", "mean"),
         "refine_prepare_flags_max_ms": parse_phase_stat(log_text, "refine_prepare_flags", "max"),
+        "densify_count_readback_mean_ms": parse_phase_stat(log_text, "densify_count_readback", "mean"),
+        "densify_count_readback_max_ms": parse_phase_stat(log_text, "densify_count_readback", "max"),
         "flag_sync_readback_mean_ms": parse_phase_stat(log_text, "flag_sync_readback", "mean"),
         "flag_sync_readback_max_ms": parse_phase_stat(log_text, "flag_sync_readback", "max"),
         "gpu_stage_total_median_ms": parse_float(r"^\s*TOTAL \(sum medians\)\s+([0-9.]+)ms", log_text),
@@ -527,6 +529,7 @@ def print_sync_diagnostics(results: list[dict[str, object]]) -> None:
     if not any(
         row.get("forced_syncs")
         or row.get("flag_sync_readback_max_ms") is not None
+        or row.get("densify_count_readback_max_ms") is not None
         or row.get("cpu_pre_refine_drain_max_ms") is not None
         for row in results
     ):
@@ -534,19 +537,21 @@ def print_sync_diagnostics(results: list[dict[str, object]]) -> None:
 
     print()
     print("Sync diagnostics:")
-    print("| mode | forced syncs | flag sync max ms | pre-drain max ms | after_train max ms | full_iteration max ms | overflow checks | flag readbacks | pre-drains |")
-    print("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
+    print("| mode | forced syncs | flag sync max ms | densify count max ms | pre-drain max ms | after_train max ms | full_iteration max ms | overflow checks | flag readbacks | densify readbacks | pre-drains |")
+    print("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
     for row in results:
         print(
-            "| {mode} | {forced} | {flag_sync} | {pre_drain} | {after_train} | {full_iter} | {overflow} | {flag_reads} | {pre_drains} |".format(
+            "| {mode} | {forced} | {flag_sync} | {densify_count} | {pre_drain} | {after_train} | {full_iter} | {overflow} | {flag_reads} | {densify_reads} | {pre_drains} |".format(
                 mode=row["mode"],
                 forced=fmt(row.get("forced_syncs"), 0),
                 flag_sync=fmt(row.get("flag_sync_readback_max_ms")),
+                densify_count=fmt(row.get("densify_count_readback_max_ms")),
                 pre_drain=fmt(row.get("cpu_pre_refine_drain_max_ms")),
                 after_train=fmt(row.get("cpu_after_train_max_ms")),
                 full_iter=fmt(row.get("cpu_full_iteration_max_ms")),
                 overflow=fmt(forced_sync_reason_count(row, "overflow-check"), 0),
                 flag_reads=fmt(forced_sync_reason_count(row, "refine-flags-readback"), 0),
+                densify_reads=fmt(forced_sync_reason_count(row, "densify-count-readback"), 0),
                 pre_drains=fmt(forced_sync_reason_count(row, "pre-refine-drain"), 0),
             )
         )

@@ -3313,7 +3313,8 @@ int msplat_densify(
     MTensor &split_flag, MTensor &dup_flag,
     MTensor &split_prefix, MTensor &dup_prefix,
     MTensor &keep_flag, MTensor &keep_prefix,
-    MTensor &block_totals, MTensor &compact_scratch
+    MTensor &block_totals, MTensor &compact_scratch,
+    double *count_readback_ms
 ) {
     MetalContext* ctx = get_global_context();
 
@@ -3584,8 +3585,14 @@ int msplat_densify(
     });
 
     // Single GPU→CPU sync: read new_count from keep_prefix[worst_case - 1]
+    auto readback_start = std::chrono::high_resolution_clock::now();
     record_forced_sync("densify-count-readback");
     ctx->syncCB();
     int new_count = keep_prefix.data<int32_t>()[worst_case - 1];
+    if (count_readback_ms) {
+        auto readback_end = std::chrono::high_resolution_clock::now();
+        *count_readback_ms = std::chrono::duration_cast<std::chrono::microseconds>(
+            readback_end - readback_start).count() / 1000.0;
+    }
     return new_count;
 }

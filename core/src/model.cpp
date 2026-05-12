@@ -758,6 +758,7 @@ void Model::afterTrain(int step, int phaseStep, int phaseTotal){
             float maxAllowedBounds = prepareBrushRefineFlags(step, check_screen, allowGrowth, cullCenter, &refineSceneScale);
             auto t2 = now();
             int densifyMaxCount = std::max(maxSplats, 2 * num_active);
+            double densifyCountReadbackMs = 0.0;
 
             int new_count = msplat_densify(
                 num_active, buf_capacity,
@@ -772,7 +773,8 @@ void Model::afterTrain(int step, int phaseStep, int phaseTotal){
                 densify_split_flag, densify_dup_flag,
                 densify_split_prefix, densify_dup_prefix,
                 densify_keep_flag, densify_keep_prefix,
-                densify_block_totals, densify_compact_scratch
+                densify_block_totals, densify_compact_scratch,
+                benchmarkRefine ? &densifyCountReadbackMs : nullptr
             );
             auto t3 = now();
 
@@ -787,6 +789,7 @@ void Model::afterTrain(int step, int phaseStep, int phaseTotal){
                 benchmarkRefineEnsureCapacityMs.push_back(elapsedMs(t0, t1));
                 benchmarkRefinePrepareFlagsMs.push_back(elapsedMs(t1, t2));
                 benchmarkRefineDensifyMs.push_back(elapsedMs(t2, t3));
+                benchmarkRefineDensifyCountReadbackMs.push_back(densifyCountReadbackMs);
                 benchmarkRefineUpdateSceneScaleMs.push_back(elapsedMs(t3, t4));
             }
             std::cout << "Densified: " << numPointsBefore << " -> " << num_active << " gaussians" << std::endl;
