@@ -779,6 +779,17 @@ def test_refine_flag_preparation_reuses_cpu_scratch():
     assert "weightedSampleWithoutReplacement(weights, growCount, selected, rng, refineScratchSampleKeys)" in model_source
 
 
+def test_refine_reuses_bounds_for_scene_scale_update():
+    repo_root = Path(__file__).resolve().parents[1]
+    model_header = (repo_root / "core" / "include" / "model.hpp").read_text(encoding="utf-8")
+    model_source = (repo_root / "core" / "src" / "model.cpp").read_text(encoding="utf-8")
+
+    assert "float *sceneScaleOut" in model_header
+    assert "std::array<float, 3> extents" in model_source
+    assert "prepareBrushRefineFlags(step, check_screen, allowGrowth, cullCenter, &refineSceneScale)" in model_source
+    assert "updateMeanLrSceneScale(refineSceneScale, step)" in model_source
+
+
 def test_densify_split_offsets_generated_on_gpu():
     repo_root = Path(__file__).resolve().parents[1]
     model_header = (repo_root / "core" / "include" / "model.hpp").read_text(encoding="utf-8")

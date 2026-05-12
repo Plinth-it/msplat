@@ -2,6 +2,7 @@
 #include <fstream>
 #include <iostream>
 #include <random>
+#include <array>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -528,7 +529,7 @@ void weightedSampleWithoutReplacement(
 
 }
 
-float Model::prepareBrushRefineFlags(int step, int checkScreen, bool allowGrowth, float cullCenter[3]) {
+float Model::prepareBrushRefineFlags(int step, int checkScreen, bool allowGrowth, float cullCenter[3], float *sceneScaleOut) {
     bool benchmarkRefine = benchmarkRefinePhasesEnabled();
     auto now = []() { return std::chrono::high_resolution_clock::now(); };
     auto elapsedMs = [](auto start, auto end) {
@@ -576,12 +577,16 @@ float Model::prepareBrushRefineFlags(int step, int checkScreen, bool allowGrowth
     }
 
     float maxAllowedBounds = std::numeric_limits<float>::max();
+    float sceneScale = currentMeanLrSceneScale;
     if (!xs.empty()) {
         float loQ = (1.0f - BOUND_PERCENTILE) * 0.5f;
         float hiQ = 1.0f - loQ;
         float loX = percentileInPlace(xs, loQ), hiX = percentileInPlace(xs, hiQ);
         float loY = percentileInPlace(ys, loQ), hiY = percentileInPlace(ys, hiQ);
         float loZ = percentileInPlace(zs, loQ), hiZ = percentileInPlace(zs, hiQ);
+        std::array<float, 3> extents = {hiX - loX, hiY - loY, hiZ - loZ};
+        std::sort(extents.begin(), extents.end());
+        sceneScale = std::max(extents[1], 0.01f);
         cullCenter[0] = 0.5f * (loX + hiX);
         cullCenter[1] = 0.5f * (loY + hiY);
         cullCenter[2] = 0.5f * (loZ + hiZ);
@@ -589,6 +594,9 @@ float Model::prepareBrushRefineFlags(int step, int checkScreen, bool allowGrowth
         maxAllowedBounds = extent * 100.0f;
     } else {
         cullCenter[0] = cullCenter[1] = cullCenter[2] = 0.0f;
+    }
+    if (sceneScaleOut) {
+        *sceneScaleOut = sceneScale;
     }
     auto tBounds1 = mark();
 
@@ -742,7 +750,8 @@ void Model::afterTrain(int step, int phaseStep, int phaseTotal){
             bool checkHuge = resetEnabled && step > refineEvery * resetAlphaEvery;
             int fr_stride = (int)featuresRest_buf.stride0();
             float cullCenter[3] = {};
-            float maxAllowedBounds = prepareBrushRefineFlags(step, check_screen, allowGrowth, cullCenter);
+            float refineSceneScale = currentMeanLrSceneScale;
+            float maxAllowedBounds = prepareBrushRefineFlags(step, check_screen, allowGrowth, cullCenter, &refineSceneScale);
             auto t2 = now();
             int densifyMaxCount = std::max(maxSplats, 2 * num_active);
 
@@ -768,7 +777,7 @@ void Model::afterTrain(int step, int phaseStep, int phaseTotal){
             }
             num_active = new_count;
             refreshViews();
-            updateMeanLrSceneScaleFromActive(step);
+            updateMeanLrSceneScale(refineSceneScale, step);
             auto t4 = now();
             if (benchmarkRefine) {
                 benchmarkRefineEnsureCapacityMs.push_back(elapsedMs(t0, t1));
