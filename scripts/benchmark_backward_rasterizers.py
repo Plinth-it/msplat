@@ -63,6 +63,12 @@ def parse_args() -> argparse.Namespace:
         help="Drain at the end of the iteration before refine to diagnose queued GPU backlog.",
     )
     parser.add_argument(
+        "--overflow-poll-interval",
+        type=int,
+        default=100,
+        help="MSPLAT_OVERFLOW_POLL_INTERVAL value; 0 disables periodic overflow polling for diagnostic A/Bs.",
+    )
+    parser.add_argument(
         "--refine-flag-mode",
         choices=["brush", "gpu", "both"],
         default="brush",
@@ -145,6 +151,8 @@ def parse_args() -> argparse.Namespace:
         args.profile_stages = True
     if args.drain_interval <= 0:
         parser.error("--drain-interval must be positive")
+    if args.overflow_poll_interval < 0:
+        parser.error("--overflow-poll-interval must be non-negative")
     return args
 
 
@@ -358,6 +366,7 @@ def run_mode(
     env["BENCHMARK"] = "1"
     env["MSPLAT_BENCHMARK_TIMING_MODE"] = args.timing_mode
     env["MSPLAT_BENCHMARK_DRAIN_INTERVAL"] = str(args.drain_interval)
+    env["MSPLAT_OVERFLOW_POLL_INTERVAL"] = str(args.overflow_poll_interval)
     if args.pre_refine_drain:
         env["MSPLAT_BENCHMARK_PRE_REFINE_DRAIN"] = "1"
     else:
@@ -673,6 +682,7 @@ def write_summary(args: argparse.Namespace, results: list[dict[str, object]], ou
         "profile_mode": "stage" if args.profile_stages else "production",
         "timing_mode": args.timing_mode,
         "drain_interval": args.drain_interval,
+        "overflow_poll_interval": args.overflow_poll_interval,
         "pre_refine_drain": args.pre_refine_drain,
         "debug": args.debug,
         "quality_metrics": args.quality_metrics,

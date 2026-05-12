@@ -575,16 +575,19 @@ def test_benchmark_script_supports_async_submit_timing_mode():
     repo_root = Path(__file__).resolve().parents[1]
     script = (repo_root / "scripts" / "benchmark_backward_rasterizers.py").read_text(encoding="utf-8")
     cli = (repo_root / "cli" / "msplat.cpp").read_text(encoding="utf-8")
+    metal_source = (repo_root / "core" / "metal" / "msplat_metal.mm").read_text(encoding="utf-8")
     model_header = (repo_root / "core" / "include" / "model.hpp").read_text(encoding="utf-8")
     model_source = (repo_root / "core" / "src" / "model.cpp").read_text(encoding="utf-8")
 
     assert "--timing-mode" in script
     assert "--drain-interval" in script
     assert "--pre-refine-drain" in script
+    assert "--overflow-poll-interval" in script
     assert "drain-each-iter" in script
     assert "MSPLAT_BENCHMARK_TIMING_MODE" in script
     assert "MSPLAT_BENCHMARK_DRAIN_INTERVAL" in script
     assert "MSPLAT_BENCHMARK_PRE_REFINE_DRAIN" in script
+    assert "MSPLAT_OVERFLOW_POLL_INTERVAL" in script
     assert "MSPLAT_REFINE_FLAG_MODE" in script
     assert "MSPLAT_BENCHMARK_TIMING_MODE" in cli
     assert "MSPLAT_BENCHMARK_DRAIN_INTERVAL" in cli
@@ -601,6 +604,8 @@ def test_benchmark_script_supports_async_submit_timing_mode():
     assert "CPU submit phases" in cli
     assert "full_iteration" in cli
     assert "pre_refine_drain" in cli
+    assert "training_overflow_poll_interval" in metal_source
+    assert "MSPLAT_OVERFLOW_POLL_INTERVAL" in metal_source
     assert "flag_sync_readback" in script
     assert "shouldRefineAfterTrain" in model_header
     assert "after_train refine subphases" in cli
@@ -650,6 +655,7 @@ output.parent.mkdir(parents=True, exist_ok=True)
     "backward_debug": os.environ.get("MSPLAT_BACKWARD_DEBUG"),
     "timing_mode": os.environ.get("MSPLAT_BENCHMARK_TIMING_MODE"),
     "drain_interval": os.environ.get("MSPLAT_BENCHMARK_DRAIN_INTERVAL"),
+    "overflow_poll_interval": os.environ.get("MSPLAT_OVERFLOW_POLL_INTERVAL"),
     "pre_refine_drain": os.environ.get("MSPLAT_BENCHMARK_PRE_REFINE_DRAIN"),
     "refine_flag_mode": os.environ.get("MSPLAT_REFINE_FLAG_MODE"),
 }), encoding="utf-8")
@@ -689,6 +695,7 @@ print("  training loop: 1.0 s (1 steps, 1.0 it/s)")
     assert env["backward_debug"] is None
     assert env["timing_mode"] == "wall-only"
     assert env["drain_interval"] == "4"
+    assert env["overflow_poll_interval"] == "100"
     assert env["pre_refine_drain"] is None
     assert env["refine_flag_mode"] is None
     assert summary["profile_stages"] is False
@@ -696,6 +703,7 @@ print("  training loop: 1.0 s (1 steps, 1.0 it/s)")
     assert summary["debug"] is False
     assert summary["timing_mode"] == "wall-only"
     assert summary["drain_interval"] == 4
+    assert summary["overflow_poll_interval"] == 100
     assert summary["pre_refine_drain"] is False
     assert summary["refine_flag_mode"] == "brush"
 
@@ -866,11 +874,12 @@ def test_overflow_check_uses_delayed_polling_window():
     repo_root = Path(__file__).resolve().parents[1]
     host = (repo_root / "core" / "metal" / "msplat_metal.mm").read_text(encoding="utf-8")
 
-    assert "kOverflowPollInterval" in host
+    assert "training_overflow_poll_interval" in host
+    assert "MSPLAT_OVERFLOW_POLL_INTERVAL" in host
     assert "g_pending_train_overflow_poll" in host
     assert "overflow_poll_due" in host
     assert "msplat_consume_training_overflow_flag_after_sync" in host
-    assert "constexpr int kOverflowPollInterval = 100" in host
+    assert "overflow_poll_interval > 0" in host
     assert "num_points_changed || (iter_count_oc % kOverflowPollInterval)" not in host
 
 

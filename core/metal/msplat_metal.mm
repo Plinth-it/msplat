@@ -70,6 +70,16 @@ static int stage_profile_report_interval() {
     return interval;
 }
 
+static int training_overflow_poll_interval() {
+    static int interval = [] {
+        const char *env = std::getenv("MSPLAT_OVERFLOW_POLL_INTERVAL");
+        if (!env) return 100;
+        int parsed = std::atoi(env);
+        return parsed >= 0 ? parsed : 100;
+    }();
+    return interval;
+}
+
 static bool roofline_diagnostics_enabled() {
     static const bool enabled = std::getenv("MSPLAT_PRINT_ROOFLINE") != nullptr;
     return enabled;
@@ -2284,9 +2294,10 @@ std::tuple<MTensor, float> msplat_train_step(
     // --- Overflow check: detect mismatched dynamic intersection counts ---
     // Only warn once; the dynamic path should size buffers to the exact GPU count.
     static int iter_count_oc = 0;
-    constexpr int kOverflowPollInterval = 100;
     iter_count_oc++;
-    bool overflow_poll_due = (iter_count_oc % kOverflowPollInterval) == 1;
+    int overflow_poll_interval = training_overflow_poll_interval();
+    bool overflow_poll_due = overflow_poll_interval > 0
+        && (iter_count_oc % overflow_poll_interval) == 1;
     if (g_tcache.overflow_flag.defined() && g_tcache.fwd_num_points > 0
         && overflow_poll_due && g_pending_train_overflow_poll) {
         if (ctx->_currentCB) {
