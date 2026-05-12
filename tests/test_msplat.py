@@ -772,11 +772,12 @@ def test_refine_flag_preparation_reuses_cpu_scratch():
     model_header = (repo_root / "core" / "include" / "model.hpp").read_text(encoding="utf-8")
     model_source = (repo_root / "core" / "src" / "model.cpp").read_text(encoding="utf-8")
 
-    assert "refineScratchWeights" in model_header
     assert "refineScratchSampleKeys" in model_header
-    assert "auto &weights = refineScratchWeights" in model_source
-    assert "weightedSampleWithoutReplacement(weights, prunedCount, selected, rng, refineScratchSampleKeys)" in model_source
-    assert "weightedSampleWithoutReplacement(weights, growCount, selected, rng, refineScratchSampleKeys)" in model_source
+    assert "refineScratchWeights" not in model_header
+    assert "auto pruneWeight = [&](int i)" in model_source
+    assert "auto growWeight = [&](int i)" in model_source
+    assert "weightedSampleWithoutReplacement(N, prunedCount, selected, rng, refineScratchSampleKeys, pruneWeight)" in model_source
+    assert "weightedSampleWithoutReplacement(N, growCount, selected, rng, refineScratchSampleKeys, growWeight)" in model_source
 
 
 def test_refine_reuses_bounds_for_scene_scale_update():

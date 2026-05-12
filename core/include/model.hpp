@@ -115,7 +115,6 @@ struct Model{
   MTensor densify_block_totals;
   MTensor densify_compact_scratch;
   std::vector<float> refineScratchX, refineScratchY, refineScratchZ;
-  std::vector<float> refineScratchWeights;
   std::vector<uint8_t> refineScratchPruned, refineScratchSelected;
   std::vector<std::pair<float, int>> refineScratchSampleKeys;
 

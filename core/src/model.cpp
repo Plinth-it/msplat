@@ -496,21 +496,24 @@ float percentileInPlace(std::vector<float>& values, float q) {
     return values[idx];
 }
 
+template <typename WeightFn>
 void weightedSampleWithoutReplacement(
-    const std::vector<float>& weights,
+    int size,
     int count,
     std::vector<uint8_t>& selected,
     std::mt19937& rng,
-    std::vector<std::pair<float, int>>& keys
+    std::vector<std::pair<float, int>>& keys,
+    WeightFn weightFor
 ) {
     if (count <= 0) return;
 
     keys.clear();
-    keys.reserve(weights.size());
+    keys.reserve(size);
     std::uniform_real_distribution<float> uniform(1e-12f, 1.0f);
-    for (int i = 0; i < (int)weights.size(); ++i) {
-        float weight = weights[i];
-        if (selected[i] || !std::isfinite(weight) || weight <= 0.0f) continue;
+    for (int i = 0; i < size; ++i) {
+        if (selected[i]) continue;
+        float weight = weightFor(i);
+        if (!std::isfinite(weight) || weight <= 0.0f) continue;
         keys.emplace_back(std::log(uniform(rng)) / weight, i);
     }
 
@@ -649,14 +652,12 @@ float Model::prepareBrushRefineFlags(int step, int checkScreen, bool allowGrowth
     std::mt19937 rng((uint32_t)step);
 
     auto tPruneSample0 = mark();
-    auto &weights = refineScratchWeights;
-    weights.assign(N, 0.0f);
-    for (int i = 0; i < N; ++i) {
-        if (pruned[i] || visPtr[i] <= 0.0f) continue;
+    auto pruneWeight = [&](int i) {
+        if (pruned[i] || visPtr[i] <= 0.0f) return 0.0f;
         float opacity = sigmoidf(opacPtr[i]);
-        weights[i] = std::isfinite(opacity) ? opacity * visPtr[i] : 0.0f;
-    }
-    weightedSampleWithoutReplacement(weights, prunedCount, selected, rng, refineScratchSampleKeys);
+        return std::isfinite(opacity) ? opacity * visPtr[i] : 0.0f;
+    };
+    weightedSampleWithoutReplacement(N, prunedCount, selected, rng, refineScratchSampleKeys, pruneWeight);
     auto tPruneSample1 = mark();
 
     auto tScreenSelect0 = mark();
@@ -684,15 +685,15 @@ float Model::prepareBrushRefineFlags(int step, int checkScreen, bool allowGrowth
         growCount = std::min(growCount, headroom);
     }
     if (growCount > 0) {
-        std::fill(weights.begin(), weights.end(), 0.0f);
-        for (int i = 0; i < N; ++i) {
-            if (pruned[i] || selected[i] || visPtr[i] <= 0.0f) continue;
+        auto growWeight = [&](int i) {
+            if (pruned[i] || visPtr[i] <= 0.0f) return 0.0f;
             float refineWeight = gradPtr[i] * halfMaxDim;
             if (std::isfinite(refineWeight) && refineWeight > densifyGradThresh) {
-                weights[i] = refineWeight;
+                return refineWeight;
             }
-        }
-        weightedSampleWithoutReplacement(weights, growCount, selected, rng, refineScratchSampleKeys);
+            return 0.0f;
+        };
+        weightedSampleWithoutReplacement(N, growCount, selected, rng, refineScratchSampleKeys, growWeight);
     }
     auto tGrowSample1 = mark();
 
