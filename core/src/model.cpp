@@ -727,11 +727,8 @@ void Model::afterTrain(int step, int phaseStep, int phaseTotal){
         }
 
         if (resetEnabled && step < stopSplitAt && refineStep % resetInterval == refineEvery){
-            msplat_gpu_sync_named("opacity-reset-readback");
             constexpr float resetLogit = -1.3862943611198906f;
-            float *op = opacities.data<float>();
-            for (int64_t i = 0; i < opacities.numel(); i++)
-                if (op[i] > resetLogit) op[i] = resetLogit;
+            msplat_reset_opacity(num_active, opacities, resetLogit);
 
             adam_exp_avg[5].zero();
             adam_exp_avg_sq[5].zero();

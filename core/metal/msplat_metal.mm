@@ -161,6 +161,7 @@ struct MetalContext {
     id<MTLComputePipelineState> compact_scatter_kernel_cpso;
     id<MTLComputePipelineState> compact_copy_back_kernel_cpso;
     id<MTLComputePipelineState> apply_refine_decay_kernel_cpso;
+    id<MTLComputePipelineState> reset_opacity_kernel_cpso;
     std::unordered_map<uint32_t, id<MTLComputePipelineState>> project_sh_forward_specializations;
     std::unordered_map<uint32_t, id<MTLComputePipelineState>> project_sh_backward_specializations;
     std::unordered_map<uint32_t, id<MTLComputePipelineState>> loss_l1_specializations;
@@ -349,6 +350,7 @@ MetalContext* init_msplat_metal_context() {
     ctx->compact_scatter_kernel_cpso              = load(@"compact_scatter_kernel");
     ctx->compact_copy_back_kernel_cpso            = load(@"compact_copy_back_kernel");
     ctx->apply_refine_decay_kernel_cpso           = load(@"apply_refine_decay_kernel");
+    ctx->reset_opacity_kernel_cpso                = load(@"reset_opacity_kernel");
 
     auto requireThreadgroupSize = [&](id<MTLComputePipelineState> pso, NSString *name, NSUInteger required) {
         if (pso && pso.maxTotalThreadsPerThreadgroup < required) {
@@ -874,6 +876,25 @@ void msplat_apply_refine_decay(
     ENC_BUF(enc, scales, 2);
     ENC_SCALAR(enc, minus_opacity, 3);
     ENC_SCALAR(enc, log_scale_delta, 4);
+    [enc dispatchThreads:MTLSizeMake(num_points, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+    [enc endEncoding];
+}
+
+void msplat_reset_opacity(int num_points, MTensor &opacities, float reset_logit) {
+    if (num_points <= 0) {
+        return;
+    }
+
+    MetalContext* ctx = get_global_context();
+    id<MTLCommandBuffer> command_buffer = ctx->getCommandBuffer();
+    id<MTLComputeCommandEncoder> enc = [command_buffer computeCommandEncoder];
+    NSUInteger tpg = MIN(ctx->reset_opacity_kernel_cpso.maxTotalThreadsPerThreadgroup,
+                         (NSUInteger)num_points);
+    uint32_t n = (uint32_t)num_points;
+    [enc setComputePipelineState:ctx->reset_opacity_kernel_cpso];
+    ENC_SCALAR(enc, n, 0);
+    ENC_BUF(enc, opacities, 1);
+    ENC_SCALAR(enc, reset_logit, 2);
     [enc dispatchThreads:MTLSizeMake(num_points, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
     [enc endEncoding];
 }

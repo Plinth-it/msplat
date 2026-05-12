@@ -749,6 +749,20 @@ def test_refine_decay_runs_on_gpu_without_readback_sync():
     assert "kernel void apply_refine_decay_kernel" in shader
 
 
+def test_opacity_reset_runs_on_gpu_without_readback_sync():
+    repo_root = Path(__file__).resolve().parents[1]
+    model_source = (repo_root / "core" / "src" / "model.cpp").read_text(encoding="utf-8")
+    host = (repo_root / "core" / "metal" / "msplat_metal.mm").read_text(encoding="utf-8")
+    shader = (repo_root / "core" / "metal" / "msplat_densify.metal").read_text(encoding="utf-8")
+    bindings = (repo_root / "core" / "metal" / "bindings.h").read_text(encoding="utf-8")
+
+    assert 'msplat_gpu_sync_named("opacity-reset-readback")' not in model_source
+    assert "msplat_reset_opacity(num_active, opacities, resetLogit)" in model_source
+    assert "void msplat_reset_opacity" in bindings
+    assert "reset_opacity_kernel_cpso" in host
+    assert "kernel void reset_opacity_kernel" in shader
+
+
 def test_backward_rasterizer_benchmark_script_supports_auto_quality_metrics():
     repo_root = Path(__file__).resolve().parents[1]
     script = repo_root / "scripts" / "benchmark_backward_rasterizers.py"

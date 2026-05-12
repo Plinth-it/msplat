@@ -345,3 +345,15 @@ kernel void apply_refine_decay_kernel(
         scales[idx * 3 + 2] += log_scale_delta;
     }
 }
+
+kernel void reset_opacity_kernel(
+    constant uint& N               [[buffer(0)]],
+    device float* opacities        [[buffer(1)]],
+    constant float& reset_logit    [[buffer(2)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= N) return;
+    if (opacities[idx] > reset_logit) {
+        opacities[idx] = reset_logit;
+    }
+}
